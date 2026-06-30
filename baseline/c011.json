@@ -1,0 +1,6 @@
+{
+  "case_id": "c011",
+  "model": "anthropic:claude-sonnet-4-6",
+  "latency_s": 21.413,
+  "timestamp": "2026-06-30T13:59:38.388439+00:00"
+}

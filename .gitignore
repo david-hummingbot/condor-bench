@@ -1,0 +1,27 @@
+# Environment
+.venv/
+.env
+*.env
+
+# Results (not tracked — too large; track baselines separately)
+results/
+!results/.gitkeep
+
+# Baselines are tracked so teams share the same reference
+# baseline/
+# !baseline/*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.deepeval/
+
+# Streamlit
+.streamlit/
+
+# OS
+.DS_Store

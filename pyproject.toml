@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "condor-bench"
+version = "0.1.0"
+description = "LLM benchmarking suite for the Condor trading assistant"
+requires-python = ">=3.12"
+dependencies = [
+    # LLM framework + MCP (condor's client is vendored in condor_compat/)
+    # Must stay on 1.x — condor uses 1.78.0 and the vendored pydantic_ai_client.py
+    # uses MCPServerStdio which was removed in pydantic-ai 2.0.
+    "pydantic-ai[mcp]>=1.78,<2.0",
+    "openai>=1.0",
+    "httpx>=0.27",
+    # Evaluation
+    "deepeval>=2.0",
+    "anthropic>=0.40",
+    # CLI + dashboard API
+    "rich>=13.0",
+    "typer>=0.12",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    # Data
+    "pandas>=2.0",
+    "plotly>=5.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[project.scripts]
+condor-bench = "runner:app"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bench*", "metrics*", "mock_mcp*", "dashboard*", "condor_compat*", "config*", "runner*"]
