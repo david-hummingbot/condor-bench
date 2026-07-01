@@ -81,6 +81,7 @@ def test(
                     prompt = build_tick_prompt_for_case(case, model)
                     result = await run_tick(case.id, prompt, model, case.mock_tools)
                     expected_tools = case.expected_tool_calls
+                    input_text = case.scenario_name
                 else:
                     result = await run_consult(
                         case.id, case.question, model,
@@ -88,11 +89,12 @@ def test(
                         mock_tools=getattr(case, "mock_tools", {}),
                     )
                     expected_tools = getattr(case, "expected_tools", [])
+                    input_text = case.question
 
                 baseline = store.load(case.id)
                 baseline_latency = baseline.latency_s if baseline else result.latency_s
 
-                sc = await score(result, case.question, expected_tools, baseline_latency)
+                sc = await score(result, input_text, expected_tools, baseline_latency)
                 scorecards.append(sc)
                 responses[case.id] = result.response
                 status = f"[green]{sc.composite:.2f}[/green]" if sc.composite >= 0.7 else f"[red]{sc.composite:.2f}[/red]"

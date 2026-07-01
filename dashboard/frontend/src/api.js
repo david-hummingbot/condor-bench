@@ -18,6 +18,11 @@ export function getProviderModels(baseUrl, apiKey = '') {
 export const createRun = (body) =>
   fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(handle)
 
+export const createCustomPrompt = (body) =>
+  fetch('/api/custom-prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(handle)
+
+export const streamCustomPromptUrl = (id) => `/api/custom-prompt/${id}/stream`
+
 export const cancelRun = (id) =>
   fetch(`/api/runs/${id}`, { method: 'DELETE' }).then(handle)
 

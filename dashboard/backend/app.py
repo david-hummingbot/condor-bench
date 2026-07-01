@@ -37,6 +37,9 @@ FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
 # active run state: run_id -> dict
 _active_runs: dict[str, dict[str, Any]] = {}
 
+# custom prompt runs: run_id -> dict
+_custom_runs: dict[str, dict[str, Any]] = {}
+
 PROVIDERS = [
     {"id": "claude-code", "label": "Claude Code", "kind": "agent", "bare_key": True,
      "needs_api_key": False, "supports_url": False, "models": []},
@@ -51,13 +54,15 @@ PROVIDERS = [
      "models": ["gpt-4o", "gpt-4o-mini", "o1-mini", "o3-mini"],
      "key_hint": "sk-..."},
     {"id": "openrouter", "label": "OpenRouter", "kind": "cloud",
-     "needs_api_key": True, "supports_url": False,
+     "needs_api_key": True, "supports_url": False, "fetch_models": True,
+     "api_base": "https://openrouter.ai/api/v1",
      "models": ["google/gemini-flash-2.0", "google/gemini-pro-2.5",
                 "meta-llama/llama-3.3-70b-instruct", "qwen/qwen-2.5-72b-instruct",
                 "mistralai/mistral-small-3.1-24b-instruct"],
      "key_hint": "sk-or-..."},
     {"id": "groq", "label": "Groq", "kind": "cloud",
-     "needs_api_key": True, "supports_url": False,
+     "needs_api_key": True, "supports_url": False, "fetch_models": True,
+     "api_base": "https://api.groq.com/openai/v1",
      "models": ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
      "key_hint": "gsk_..."},
     {"id": "ollama", "label": "Ollama", "kind": "local",
@@ -94,7 +99,11 @@ def _model_env_vars(model_key: str, api_key: str | None, base_url: str | None) -
         if provider == "ollama":
             env["OLLAMA_HOST"] = base_url
         elif provider in ("lmstudio", "custom", "openai"):
-            env["OPENAI_BASE_URL"] = base_url
+            # Ensure /v1 suffix — pydantic-ai's OpenAI client appends paths directly
+            normalized = base_url.rstrip("/")
+            if not normalized.endswith("/v1"):
+                normalized += "/v1"
+            env["OPENAI_BASE_URL"] = normalized
             if not api_key:
                 env.setdefault("OPENAI_API_KEY", "local")
     return env
@@ -144,9 +153,9 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
 
         done_count = 0
         for model_cfg in req.models:
-            model_key = model_cfg["model_key"]
+            model_key = model_cfg.model_key
             norm_key = _normalize_model_key(model_key)
-            env_vars = _model_env_vars(model_key, model_cfg.get("api_key"), model_cfg.get("base_url"))
+            env_vars = _model_env_vars(model_key, model_cfg.api_key, model_cfg.base_url)
 
             await _emit(run_id, {"type": "model_started", "model": model_key})
 
@@ -177,6 +186,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                             prompt = build_tick_prompt_for_case(case, norm_key)
                             result = await run_tick(case.id, prompt, norm_key, case.mock_tools)
                             expected_tools = case.expected_tool_calls
+                            input_text = case.scenario_name
                         else:
                             result = await run_consult(
                                 case.id, case.question, norm_key,
@@ -184,10 +194,11 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                                 mock_tools=getattr(case, "mock_tools", {}),
                             )
                             expected_tools = getattr(case, "expected_tools", [])
+                            input_text = case.question
 
                         baseline = store.load(case.id)
                         baseline_latency = baseline.latency_s if baseline else result.latency_s
-                        sc = await do_score(result, case.question, expected_tools, baseline_latency)
+                        sc = await do_score(result, input_text, expected_tools, baseline_latency)
                         sc_dict = sc.as_dict()
                         response = result.response
                         scorecards.append(sc)
@@ -237,11 +248,105 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             await q.put(None)
 
 
+async def _emit_custom(run_id: str, event: dict) -> None:
+    state = _custom_runs.get(run_id)
+    if not state:
+        return
+    state["events"].append(event)
+    for q in list(state["listeners"]):
+        await q.put(event)
+
+
+async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from bench.baseline import BaselineStore
+    from bench.client import run_consult
+    from bench.scorer import score as do_score
+
+    state = _custom_runs[run_id]
+    state["status"] = "running"
+
+    try:
+        await _emit_custom(run_id, {"type": "started", "total": len(req.models)})
+        store = BaselineStore()
+
+        for model_cfg in req.models:
+            model_key = model_cfg.model_key
+            norm_key = _normalize_model_key(model_key)
+            env_vars = _model_env_vars(model_key, model_cfg.api_key, model_cfg.base_url)
+
+            await _emit_custom(run_id, {"type": "model_started", "model": model_key})
+
+            env_backup: dict[str, str | None] = {}
+            try:
+                for k, v in env_vars.items():
+                    env_backup[k] = os.environ.get(k)
+                    os.environ[k] = v
+
+                result = await run_consult(
+                    "custom",
+                    req.question,
+                    norm_key,
+                    extra_turns=req.turns,
+                    mock_tools=req.mock_tools,
+                )
+
+                baseline = store.load("custom")
+                baseline_latency = baseline.latency_s if baseline else result.latency_s
+                # None → no ground truth → skip tool accuracy
+                expected = req.expected_tools if req.expected_tools else None
+                sc = await do_score(result, req.question, expected, baseline_latency)
+
+                await _emit_custom(run_id, {
+                    "type": "model_done",
+                    "model": model_key,
+                    "response": result.response,
+                    "tool_calls": result.tool_calls,
+                    "scorecard": sc.as_dict(),
+                    "error": result.error,
+                })
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await _emit_custom(run_id, {
+                    "type": "model_done",
+                    "model": model_key,
+                    "response": "",
+                    "tool_calls": [],
+                    "scorecard": {},
+                    "error": str(exc),
+                })
+            finally:
+                for k, v in env_backup.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
+        state["status"] = "completed"
+        await _emit_custom(run_id, {"type": "done", "status": "completed"})
+
+    except asyncio.CancelledError:
+        state["status"] = "cancelled"
+        await _emit_custom(run_id, {"type": "done", "status": "cancelled"})
+    except Exception as exc:
+        state["status"] = "failed"
+        await _emit_custom(run_id, {"type": "done", "status": "failed", "error": str(exc)})
+    finally:
+        for q in list(state.get("listeners", [])):
+            await q.put(None)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     yield
     for state in _active_runs.values():
+        task = state.get("task")
+        if task and not task.done():
+            task.cancel()
+    for state in _custom_runs.values():
         task = state.get("task")
         if task and not task.done():
             task.cancel()
@@ -265,7 +370,9 @@ async def get_providers():
 
 @app.get("/api/provider-models")
 async def get_provider_models(base_url: str, api_key: str = ""):
-    url = base_url.rstrip("/") + "/v1/models"
+    base = base_url.rstrip("/")
+    # Don't double-add /v1 when the base already ends with it
+    url = base + "/models" if base.endswith("/v1") else base + "/v1/models"
     headers: dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -291,6 +398,14 @@ class RunRequest(BaseModel):
     category: str | None = None
     consult_only: bool = False
     tick_only: bool = False
+
+
+class CustomPromptRequest(BaseModel):
+    question: str
+    turns: list[str] = []
+    expected_tools: list[str] = []  # empty → no ground truth, tool accuracy skipped
+    mock_tools: dict = {}
+    models: list[ModelConfig]
 
 
 @app.post("/api/runs")
@@ -413,6 +528,63 @@ async def get_run(run_dir_or_id: str):
         except Exception:
             continue
     return {"run_dir": run_dir_or_id, "summary": summary, "cases": cases, "active": False}
+
+
+# ── Custom prompt ──────────────────────────────────────────────────────────────
+
+@app.post("/api/custom-prompt")
+async def create_custom_prompt(req: CustomPromptRequest):
+    run_id = uuid.uuid4().hex[:8]
+    _custom_runs[run_id] = {
+        "run_id": run_id,
+        "status": "starting",
+        "events": [],
+        "listeners": [],
+        "task": None,
+        "started_at": time.time(),
+        "models": [m.model_key for m in req.models],
+    }
+    task = asyncio.create_task(_run_custom_prompt(run_id, req))
+    _custom_runs[run_id]["task"] = task
+    return {"run_id": run_id}
+
+
+@app.get("/api/custom-prompt/{run_id}/stream")
+async def stream_custom_prompt(run_id: str, request: Request):
+    state = _custom_runs.get(run_id)
+    if not state:
+        raise HTTPException(404, "Custom prompt run not found")
+
+    listener_q: asyncio.Queue = asyncio.Queue()
+    state["listeners"].append(listener_q)
+
+    async def generate():
+        try:
+            for event in list(state["events"]):
+                yield f"data: {json.dumps(event)}\n\n"
+            if state["status"] in ("completed", "cancelled", "failed"):
+                return
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(listener_q.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("type") == "done":
+                    break
+        finally:
+            try:
+                state["listeners"].remove(listener_q)
+            except ValueError:
+                pass
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ── Static files (must come last) ─────────────────────────────────────────────

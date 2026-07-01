@@ -214,7 +214,13 @@ def build_tick_prompt(
         sections.append(
             "[CONTROLLER MODE]\n"
             f"You operate the Hummingbot bot '{bot_name}'. Steer its controllers "
-            "instead of creating standalone executors."
+            "instead of creating standalone executors:\n"
+            '- Check current state first: manage_bots(action="status").\n'
+            "- Define/update controller config templates with manage_controllers.\n"
+            f"- Apply them with manage_bots: deploy if '{bot_name}' is not running, "
+            "otherwise update_config / start_controllers / stop_controllers.\n"
+            "Do NOT create standalone executors unless the strategy instructions "
+            "explicitly tell you to. The bot's PnL is attributed to you automatically."
         )
 
     rs = risk_state

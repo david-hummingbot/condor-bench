@@ -44,10 +44,12 @@ export default function RunConfig({ onRunStarted, isRunning }) {
 
   const loadModels = async (p) => {
     const state = cfg[p.id]
-    if (!state.baseUrl) return
+    // Cloud providers use a fixed api_base; local providers use the user-supplied baseUrl
+    const url = p.api_base || state.baseUrl
+    if (!url) return
     update(p.id, { loading: true, error: '' })
     try {
-      const data = await getProviderModels(state.baseUrl, state.apiKey)
+      const data = await getProviderModels(url, state.apiKey)
       const models = data.models || []
       update(p.id, {
         loadedModels: models,
@@ -177,6 +179,29 @@ export default function RunConfig({ onRunStarted, isRunning }) {
                                 >
                                   {state.loading ? '…' : 'Load models'}
                                 </button>
+                              )}
+                            </div>
+                            {state.error && (
+                              <span className="error-text">{state.error}</span>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Cloud providers with a fixed API base (e.g. OpenRouter, Groq) */}
+                        {!p.supports_url && p.fetch_models && (
+                          <div className="field">
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                              <button
+                                className="btn sm"
+                                onClick={() => loadModels(p)}
+                                disabled={state.loading}
+                              >
+                                {state.loading ? '…' : 'Load all models'}
+                              </button>
+                              {state.loadedModels.length > 0 && (
+                                <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                  {state.loadedModels.length} models loaded
+                                </span>
                               )}
                             </div>
                             {state.error && (

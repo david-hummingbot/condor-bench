@@ -3,6 +3,7 @@ import RunConfig from './components/RunConfig.jsx'
 import LiveRun from './components/LiveRun.jsx'
 import Leaderboard from './components/Leaderboard.jsx'
 import Runs from './components/Runs.jsx'
+import CustomPrompt from './components/CustomPrompt.jsx'
 import { listRuns } from './api.js'
 import './styles.css'
 
@@ -49,6 +50,7 @@ export default function App() {
           {[
             { id: 'run', label: 'Run' },
             { id: 'live', label: 'Live', dot: isRunning },
+            { id: 'prompt', label: 'Prompt' },
             { id: 'leaderboard', label: 'Leaderboard' },
             { id: 'runs', label: 'Runs' },
           ].map(t => (
@@ -85,6 +87,7 @@ export default function App() {
             onViewRuns={() => setTab('runs')}
           />
         )}
+        {tab === 'prompt' && <CustomPrompt />}
         {tab === 'leaderboard' && <Leaderboard runs={runs} />}
         {tab === 'runs' && (
           <Runs runs={runs} onRefresh={refreshRuns} />

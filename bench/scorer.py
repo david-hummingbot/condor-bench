@@ -26,7 +26,7 @@ class ScoreCard:
     model: str
     answer_quality: float
     answer_reason: str
-    tool_accuracy: float
+    tool_accuracy: float | None  # None when no ground-truth expected_tools provided
     latency_score: float
     composite: float
     latency_s: float
@@ -39,7 +39,7 @@ class ScoreCard:
             "model": self.model,
             "answer_quality": round(self.answer_quality, 4),
             "answer_reason": self.answer_reason,
-            "tool_accuracy": round(self.tool_accuracy, 4),
+            "tool_accuracy": round(self.tool_accuracy, 4) if self.tool_accuracy is not None else None,
             "latency_score": round(self.latency_score, 4),
             "composite": round(self.composite, 4),
             "latency_s": round(self.latency_s, 2),
@@ -51,16 +51,22 @@ class ScoreCard:
 async def score(
     result: BenchmarkResult,
     input_text: str,
-    expected_tools: list[str],
+    expected_tools: list[str] | None,
     baseline_latency_s: float,
 ) -> ScoreCard:
-    """Score a result against dataset ground truth (no baseline response needed)."""
+    """Score a result against dataset ground truth (no baseline response needed).
+
+    When expected_tools is None (custom prompt with no ground truth), tool
+    accuracy is skipped and its weight is redistributed to answer quality.
+    """
     answer_quality, answer_reason = await _quality_metric.a_score(input_text, result.response)
 
-    tool_accuracy = _tool_metric.score(
-        actual_tools=result.tool_names(),
-        expected_tools=expected_tools,
-    )
+    tool_accuracy: float | None = None
+    if expected_tools is not None:
+        tool_accuracy = _tool_metric.score(
+            actual_tools=result.tool_names(),
+            expected_tools=expected_tools,
+        )
 
     latency_score = _latency_metric.score(
         test_latency=result.latency_s,
@@ -68,11 +74,16 @@ async def score(
     )
 
     weights = SCORE_WEIGHTS
-    composite = (
-        weights["answer_quality"] * answer_quality
-        + weights["tool_accuracy"] * tool_accuracy
-        + weights["latency_score"] * latency_score
-    )
+    if tool_accuracy is not None:
+        composite = (
+            weights["answer_quality"] * answer_quality
+            + weights["tool_accuracy"] * tool_accuracy
+            + weights["latency_score"] * latency_score
+        )
+    else:
+        # No ground truth: redistribute tool_accuracy weight into answer quality
+        q_weight = weights["answer_quality"] + weights["tool_accuracy"]
+        composite = q_weight * answer_quality + weights["latency_score"] * latency_score
 
     return ScoreCard(
         case_id=result.case_id,
