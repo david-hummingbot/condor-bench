@@ -52,7 +52,7 @@ export default function App() {
             { id: 'live', label: 'Live', dot: isRunning },
             { id: 'prompt', label: 'Prompt' },
             { id: 'leaderboard', label: 'Leaderboard' },
-            { id: 'runs', label: 'Runs' },
+            { id: 'runs', label: 'Results' },
           ].map(t => (
             <button
               key={t.id}

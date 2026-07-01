@@ -32,11 +32,13 @@ class ScoreCard:
     latency_s: float
     baseline_latency_s: float
     error: str | None = None
+    category: str = ""
 
     def as_dict(self) -> dict:
         return {
             "case_id": self.case_id,
             "model": self.model,
+            "category": self.category,
             "answer_quality": round(self.answer_quality, 4),
             "answer_reason": self.answer_reason,
             "tool_accuracy": round(self.tool_accuracy, 4) if self.tool_accuracy is not None else None,

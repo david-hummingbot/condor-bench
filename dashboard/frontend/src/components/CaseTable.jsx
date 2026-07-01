@@ -15,6 +15,7 @@ export default function CaseTable({ cases }) {
           <tr>
             <th>Case</th>
             <th>Type</th>
+            <th>Category</th>
             <th>Composite</th>
             <th>Quality</th>
             <th>Tools</th>
@@ -40,6 +41,7 @@ export default function CaseTable({ cases }) {
                     <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>{c.case_id}</span>
                   </td>
                   <td><span className={`type-tag ${ctype}`}>{ctype}</span></td>
+                  <td style={{ color: 'var(--muted)', fontSize: 12 }}>{c.category || '—'}</td>
                   <td style={{ textAlign: 'right', color: scoreColor(c.composite), fontWeight: 600 }}>
                     {c.error ? <span style={{ color: 'var(--red)', fontSize: 11 }}>ERR</span> : fmtScore(c.composite)}
                   </td>
@@ -65,7 +67,7 @@ export default function CaseTable({ cases }) {
                 </tr>
                 {isOpen && (
                   <tr key={`${c.case_id}-det`}>
-                    <td colSpan={8} style={{ padding: '0 12px 12px' }}>
+                    <td colSpan={9} style={{ padding: '0 12px 12px' }}>
                       <div className="case-detail">
                         {c.error && (
                           <div className="error-text" style={{ marginBottom: 10 }}>{c.error}</div>

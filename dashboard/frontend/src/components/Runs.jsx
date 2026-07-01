@@ -27,14 +27,14 @@ export default function Runs({ runs, onRefresh }) {
   return (
     <div>
       <div className="section-header" style={{ marginBottom: 20 }}>
-        <span className="section-title">Runs</span>
+        <span className="section-title">Results</span>
         <button className="btn sm" onClick={onRefresh}>↻ Refresh</button>
       </div>
 
       {runs.length === 0 ? (
         <div className="card">
           <div className="empty">
-            No runs yet. Go to <strong>Run</strong> to start your first benchmark.
+            No results yet. Go to <strong>Run</strong> to start your first benchmark.
           </div>
         </div>
       ) : (
@@ -46,7 +46,16 @@ export default function Runs({ runs, onRefresh }) {
                 className={`run-item ${selected === r.run_dir ? 'active' : ''}`}
                 onClick={() => open(r.run_dir)}
               >
-                <div className="run-model">{shortModel(r.model) || r.run_dir}</div>
+                <div className="run-model">
+                  {shortModel(r.model) || r.run_dir}
+                  {r.run_type === 'custom-prompt' && (
+                    <span style={{
+                      marginLeft: 6, fontSize: 10, padding: '1px 5px',
+                      background: 'rgba(79,140,255,0.15)', color: 'var(--accent)',
+                      borderRadius: 3, verticalAlign: 'middle',
+                    }}>prompt</span>
+                  )}
+                </div>
                 <div className="run-meta">
                   {fmtTime(r.timestamp)}
                 </div>
@@ -85,6 +94,16 @@ export default function Runs({ runs, onRefresh }) {
                   <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: 13, marginBottom: 16, color: 'var(--muted)' }}>
                     {detail.run_dir}
                   </div>
+                  {detail.summary?.prompt_question && (
+                    <div style={{
+                      marginBottom: 16, padding: '10px 12px',
+                      background: 'var(--panel-2)', borderRadius: 6,
+                      fontSize: 13, lineHeight: 1.5, color: 'var(--text)',
+                    }}>
+                      <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 4 }}>Prompt</span>
+                      {detail.summary.prompt_question}
+                    </div>
+                  )}
                   <SummaryMetrics s={detail.summary} />
                 </div>
                 <div className="card">

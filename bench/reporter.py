@@ -50,7 +50,8 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
         "cases_total": len(scorecards),
         "cases_scored": len(valid),
         "answer_quality_avg": round(sum(s.answer_quality for s in valid) / n, 4),
-        "tool_accuracy_avg": round(sum(s.tool_accuracy for s in valid) / n, 4),
+        "tool_accuracy_avg": round(sum(s.tool_accuracy for s in valid if s.tool_accuracy is not None) / n, 4)
+            if any(s.tool_accuracy is not None for s in valid) else None,
         "latency_score_avg": round(sum(s.latency_score for s in valid) / n, 4),
         "composite_avg": round(sum(s.composite for s in valid) / n, 4),
         "latency_s_avg": round(sum(s.latency_s for s in valid) / n, 2),

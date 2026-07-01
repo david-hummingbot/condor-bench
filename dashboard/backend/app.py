@@ -81,11 +81,26 @@ _PROVIDER_ENV: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "groq": "GROQ_API_KEY",
+    "custom": "OPENAI_API_KEY",
 }
 
 
 def _judge_key_configured() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def _normalize_openai_base_url(base_url: str, default_port: int | None = None) -> str:
+    """Ensure a user-supplied URL has an http:// scheme, optional default port, and /v1 suffix."""
+    from urllib.parse import urlparse, urlunparse
+    url = base_url.strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    parsed = urlparse(url)
+    if default_port and not parsed.port:
+        url = f"{parsed.scheme}://{parsed.hostname}:{default_port}{parsed.path or ''}"
+    if not url.endswith("/v1"):
+        url += "/v1"
+    return url
 
 
 def _model_env_vars(model_key: str, api_key: str | None, base_url: str | None) -> dict[str, str]:
@@ -98,21 +113,25 @@ def _model_env_vars(model_key: str, api_key: str | None, base_url: str | None) -
     if base_url:
         if provider == "ollama":
             env["OLLAMA_HOST"] = base_url
+            # pydantic-ai uses AsyncOpenAI (OpenAI-compat) for ollama, so also
+            # set OPENAI_BASE_URL — the only path that reaches _build_model
+            env["OPENAI_BASE_URL"] = _normalize_openai_base_url(base_url, default_port=11434)
+            env.setdefault("OPENAI_API_KEY", "not-needed")
         elif provider in ("lmstudio", "custom", "openai"):
-            # Ensure /v1 suffix — pydantic-ai's OpenAI client appends paths directly
-            normalized = base_url.rstrip("/")
-            if not normalized.endswith("/v1"):
-                normalized += "/v1"
-            env["OPENAI_BASE_URL"] = normalized
+            env["OPENAI_BASE_URL"] = _normalize_openai_base_url(
+                base_url, default_port=1234 if provider == "lmstudio" else None
+            )
             if not api_key:
                 env.setdefault("OPENAI_API_KEY", "local")
     return env
 
 
 def _normalize_model_key(model_key: str) -> str:
-    """Convert lmstudio:model → openai:model so pydantic-ai resolves it."""
+    """Convert lmstudio:/custom: → openai: so pydantic-ai resolves it."""
     if model_key.startswith("lmstudio:"):
         return "openai:" + model_key[len("lmstudio:"):]
+    if model_key.startswith("custom:"):
+        return "openai:" + model_key[len("custom:"):]
     return model_key
 
 
@@ -199,6 +218,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                         baseline = store.load(case.id)
                         baseline_latency = baseline.latency_s if baseline else result.latency_s
                         sc = await do_score(result, input_text, expected_tools, baseline_latency)
+                        sc.category = getattr(case, "category", "")
                         sc_dict = sc.as_dict()
                         response = result.response
                         scorecards.append(sc)
@@ -262,10 +282,15 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
     sys.path.insert(0, str(ROOT))
     from bench.baseline import BaselineStore
     from bench.client import run_consult
+    from bench.reporter import save_run
     from bench.scorer import score as do_score
 
     state = _custom_runs[run_id]
     state["status"] = "running"
+
+    # Unique case id shared across all models in this prompt run so the Runs
+    # page groups them together and the case file has a meaningful name.
+    cp_case_id = f"cp_{run_id}"
 
     try:
         await _emit_custom(run_id, {"type": "started", "total": len(req.models)})
@@ -285,18 +310,34 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
                     os.environ[k] = v
 
                 result = await run_consult(
-                    "custom",
+                    cp_case_id,
                     req.question,
                     norm_key,
                     extra_turns=req.turns,
                     mock_tools=req.mock_tools,
                 )
 
-                baseline = store.load("custom")
+                baseline = store.load(cp_case_id)
                 baseline_latency = baseline.latency_s if baseline else result.latency_s
                 # None → no ground truth → skip tool accuracy
                 expected = req.expected_tools if req.expected_tools else None
                 sc = await do_score(result, req.question, expected, baseline_latency)
+                sc.category = "custom-prompt"
+                sc.case_id = cp_case_id
+
+                # Persist to disk so this run appears on the Runs page
+                run_dir = save_run(
+                    norm_key,
+                    [sc],
+                    {cp_case_id: result.response},
+                    run_id,
+                )
+                # Annotate summary with run type and the prompt question
+                summary_path = run_dir / "summary.json"
+                summary = json.loads(summary_path.read_text())
+                summary["run_type"] = "custom-prompt"
+                summary["prompt_question"] = req.question[:300]
+                summary_path.write_text(json.dumps(summary, indent=2))
 
                 await _emit_custom(run_id, {
                     "type": "model_done",
@@ -503,6 +544,17 @@ async def list_runs():
                 "total": state["total"],
                 "active": True,
                 "started_at": state["started_at"],
+            })
+    for rid, state in _custom_runs.items():
+        if state["status"] in ("starting", "running"):
+            active.append({
+                "run_id": rid,
+                "status": state["status"],
+                "models": state.get("models", []),
+                "total": len(state.get("models", [])),
+                "active": True,
+                "run_type": "custom-prompt",
+                "started_at": state.get("started_at"),
             })
 
     return {"runs": completed, "active": active}

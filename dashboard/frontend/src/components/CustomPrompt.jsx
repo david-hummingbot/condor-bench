@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { getProviders, createCustomPrompt, streamCustomPromptUrl } from '../api.js'
+import { getProviders, getProviderModels, createCustomPrompt, streamCustomPromptUrl } from '../api.js'
 
 const SCORE_COLOR = (v) => v >= 0.8 ? 'var(--green)' : v >= 0.5 ? 'var(--yellow)' : 'var(--red)'
 
@@ -111,6 +111,8 @@ function ModelResult({ model, result }) {
   )
 }
 
+const CP_RUN_KEY = 'cp_run_id'
+
 export default function CustomPrompt() {
   const [providers, setProviders] = useState([])
   const [cfg, setCfg] = useState({})
@@ -122,6 +124,45 @@ export default function CustomPrompt() {
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const esRef = useRef(null)
+
+  const connectToStream = (runId) => {
+    if (esRef.current) esRef.current.close()
+    const url = streamCustomPromptUrl(runId)
+    const es = new EventSource(url)
+    esRef.current = es
+
+    es.onmessage = (e) => {
+      const ev = JSON.parse(e.data)
+      if (ev.type === 'started') {
+        setStatus(`Running on ${ev.total} model${ev.total !== 1 ? 's' : ''}…`)
+      } else if (ev.type === 'model_started') {
+        setStatus(`Running ${ev.model}…`)
+      } else if (ev.type === 'model_done') {
+        setResults(prev => {
+          // Avoid duplicates when replaying already-completed events on reconnect
+          if (prev.some(r => r.model === ev.model)) return prev
+          return [...prev, {
+            model: ev.model,
+            response: ev.response,
+            tool_calls: ev.tool_calls,
+            scorecard: ev.scorecard,
+            error: ev.error,
+          }]
+        })
+      } else if (ev.type === 'done') {
+        setStatus(ev.status === 'completed' ? 'Done' : ev.status)
+        setRunning(false)
+        es.close()
+      }
+    }
+
+    es.onerror = () => {
+      setError('Stream disconnected — run may no longer be available')
+      setRunning(false)
+      localStorage.removeItem(CP_RUN_KEY)
+      es.close()
+    }
+  }
 
   useEffect(() => {
     getProviders()
@@ -135,17 +176,48 @@ export default function CustomPrompt() {
             apiKey: '',
             baseUrl: p.default_url || '',
             selectedModel: p.models?.[0] || '',
+            loadedModels: [],
+            loading: false,
+            loadError: '',
           }
         }
         setCfg(init)
       })
       .catch(() => {})
+
+    // Reconnect to any run that was in progress before navigation/reload
+    const savedRunId = localStorage.getItem(CP_RUN_KEY)
+    if (savedRunId) {
+      setRunning(true)
+      setStatus('Reconnecting…')
+      connectToStream(savedRunId)
+    }
+
+    return () => { if (esRef.current) esRef.current.close() }
   }, [])
 
   const update = (id, patch) =>
     setCfg(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }))
 
   const toggle = (id) => update(id, { enabled: !cfg[id]?.enabled })
+
+  const loadModels = async (p) => {
+    const state = cfg[p.id]
+    const url = p.api_base || state.baseUrl
+    if (!url) return
+    update(p.id, { loading: true, loadError: '' })
+    try {
+      const data = await getProviderModels(url, state.apiKey)
+      const models = data.models || []
+      update(p.id, {
+        loadedModels: models,
+        selectedModel: models[0] || state.selectedModel,
+        loading: false,
+      })
+    } catch (e) {
+      update(p.id, { loading: false, loadError: e.message })
+    }
+  }
 
   const enabledModels = () => {
     const out = []
@@ -168,6 +240,7 @@ export default function CustomPrompt() {
     setResults([])
     setStatus('Starting…')
     setError('')
+    localStorage.removeItem(CP_RUN_KEY)
 
     const parsedTools = expectedTools.trim()
       ? expectedTools.split(',').map(t => t.trim()).filter(Boolean)
@@ -182,36 +255,8 @@ export default function CustomPrompt() {
         models,
       })
 
-      const url = streamCustomPromptUrl(data.run_id)
-      const es = new EventSource(url)
-      esRef.current = es
-
-      es.onmessage = (e) => {
-        const ev = JSON.parse(e.data)
-        if (ev.type === 'started') {
-          setStatus(`Running on ${ev.total} model${ev.total !== 1 ? 's' : ''}…`)
-        } else if (ev.type === 'model_started') {
-          setStatus(`Running ${ev.model}…`)
-        } else if (ev.type === 'model_done') {
-          setResults(prev => [...prev, {
-            model: ev.model,
-            response: ev.response,
-            tool_calls: ev.tool_calls,
-            scorecard: ev.scorecard,
-            error: ev.error,
-          }])
-        } else if (ev.type === 'done') {
-          setStatus(ev.status === 'completed' ? 'Done' : ev.status)
-          setRunning(false)
-          es.close()
-        }
-      }
-
-      es.onerror = () => {
-        setError('Stream disconnected')
-        setRunning(false)
-        es.close()
-      }
+      localStorage.setItem(CP_RUN_KEY, data.run_id)
+      connectToStream(data.run_id)
     } catch (e) {
       setError(e.message)
       setRunning(false)
@@ -316,7 +361,7 @@ export default function CustomPrompt() {
                 {g.list.map(p => {
                   const state = cfg[p.id]
                   if (!state) return null
-                  const allModels = p.models || []
+                  const allModels = p.models || []  // static models from provider catalog
                   return (
                     <div key={p.id} className={`provider-row ${state.enabled ? 'enabled' : ''}`}>
                       <div className="provider-header" onClick={() => toggle(p.id)}>
@@ -345,44 +390,70 @@ export default function CustomPrompt() {
                           {p.supports_url && (
                             <div className="field">
                               <label>Base URL</label>
-                              <input
-                                type="text"
-                                className="input"
-                                placeholder={p.default_url || 'http://host:port'}
-                                value={state.baseUrl}
-                                onChange={e => update(p.id, { baseUrl: e.target.value })}
-                              />
+                              <div className="inline-row">
+                                <input
+                                  type="text"
+                                  className="input"
+                                  placeholder={p.default_url || 'http://host:port'}
+                                  value={state.baseUrl}
+                                  onChange={e => update(p.id, { baseUrl: e.target.value })}
+                                />
+                                {p.fetch_models && (
+                                  <button
+                                    className="btn sm"
+                                    onClick={() => loadModels(p)}
+                                    disabled={state.loading || !state.baseUrl}
+                                  >
+                                    {state.loading ? '…' : 'Load models'}
+                                  </button>
+                                )}
+                              </div>
+                              {state.loadError && (
+                                <span className="error-text">{state.loadError}</span>
+                              )}
                             </div>
                           )}
-                          {allModels.length > 0 && (
+                          {!p.supports_url && p.fetch_models && (
                             <div className="field">
-                              <label>Model</label>
-                              <input
-                                type="text"
-                                className="input"
-                                value={state.selectedModel}
-                                onChange={e => update(p.id, { selectedModel: e.target.value })}
-                                list={`cp-models-${p.id}`}
-                                style={{ maxWidth: 340 }}
-                              />
-                              <datalist id={`cp-models-${p.id}`}>
-                                {allModels.map(m => <option key={m} value={m} />)}
-                              </datalist>
+                              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                <button
+                                  className="btn sm"
+                                  onClick={() => loadModels(p)}
+                                  disabled={state.loading}
+                                >
+                                  {state.loading ? '…' : 'Load models'}
+                                </button>
+                                {state.loadedModels.length > 0 && (
+                                  <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                    {state.loadedModels.length} models loaded
+                                  </span>
+                                )}
+                              </div>
+                              {state.loadError && (
+                                <span className="error-text">{state.loadError}</span>
+                              )}
                             </div>
                           )}
-                          {allModels.length === 0 && (
-                            <div className="field">
-                              <label>Model name</label>
-                              <input
-                                type="text"
-                                className="input"
-                                placeholder="e.g. llama3.1:8b"
-                                value={state.selectedModel}
-                                onChange={e => update(p.id, { selectedModel: e.target.value })}
-                                style={{ maxWidth: 340 }}
-                              />
-                            </div>
-                          )}
+                          {(() => {
+                            const merged = [...(state.loadedModels.length ? state.loadedModels : allModels)]
+                            return (
+                              <div className="field">
+                                <label>Model</label>
+                                <input
+                                  type="text"
+                                  className="input"
+                                  placeholder="e.g. llama3.1:8b"
+                                  value={state.selectedModel}
+                                  onChange={e => update(p.id, { selectedModel: e.target.value })}
+                                  list={`cp-models-${p.id}`}
+                                  style={{ maxWidth: 340 }}
+                                />
+                                <datalist id={`cp-models-${p.id}`}>
+                                  {merged.map(m => <option key={m} value={m} />)}
+                                </datalist>
+                              </div>
+                            )
+                          })()}
                         </div>
                       )}
                     </div>

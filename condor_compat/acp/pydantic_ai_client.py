@@ -393,9 +393,11 @@ class PydanticAIClient:
                 model_id, OpenAIProvider(openai_client=openai_client)
             )
 
-        # Local providers: always use OpenAI-compatible endpoint with default URL
+        # Local providers: always use OpenAI-compatible endpoint with default URL.
+        # Fall back to OPENAI_BASE_URL env var before the hardcoded default so
+        # a remote host (e.g. ollama on another machine) is respected.
         if prefix in DEFAULT_BASE_URLS:
-            base_url = base_url or DEFAULT_BASE_URLS[prefix]
+            base_url = base_url or os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URLS[prefix]
             if not model_id:
                 model_id = self._resolve_default_local_model(
                     prefix=prefix, base_url=base_url

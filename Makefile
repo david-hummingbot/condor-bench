@@ -27,7 +27,7 @@ dashboard:
 	@echo ""
 	@echo "  Dashboard → http://localhost:8001"
 	@echo ""
-	uv run uvicorn dashboard.backend.app:app --port 8001
+	uv run uvicorn dashboard.backend.app:app --host 0.0.0.0 --port 8001
 
 # Hot-reload dev mode: backend on :8001, Vite on :5173
 dashboard-dev:
