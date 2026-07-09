@@ -6,6 +6,7 @@ const CASE_FILTER_OPTS = [
   { id: 'consult', label: 'Consult only' },
   { id: 'tick', label: 'Tick only' },
   { id: 'strategy-creation', label: 'Strategy creation' },
+  { id: 'routine-builder', label: 'Routine builder' },
 ]
 
 export default function RunConfig({ onRunStarted, isRunning }) {
@@ -93,9 +94,9 @@ export default function RunConfig({ onRunStarted, isRunning }) {
     try {
       const body = {
         models,
-        consult_only: caseFilter === 'consult' || caseFilter === 'strategy-creation',
+        consult_only: caseFilter === 'consult' || caseFilter === 'strategy-creation' || caseFilter === 'routine-builder',
         tick_only: caseFilter === 'tick',
-        category: caseFilter === 'strategy-creation' ? 'strategy-creation' : category.trim() || null,
+        category: ['strategy-creation', 'routine-builder'].includes(caseFilter) ? caseFilter : category.trim() || null,
       }
       const data = await createRun(body)
       onRunStarted(data.run_id)

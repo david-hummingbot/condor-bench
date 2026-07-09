@@ -145,7 +145,7 @@ Results are saved to `results/<run-id>_<model>/` as JSON.
 
 | File | Cases | Description |
 |------|-------|-------------|
-| `datasets/consult.jsonl` | 15 | Q&A cases covering concepts, strategy, risk, troubleshooting, configuration. Includes 3 multi-turn cases (API key setup, strategy wizard, troubleshooting follow-up). |
+| `datasets/consult.jsonl` | 23 | Q&A cases covering concepts, strategy, risk, troubleshooting, configuration, strategy creation, and routine building. Includes 5 multi-turn cases. |
 | `datasets/tick.jsonl` | 6 | Strategy tick cases: normal execution, profit-taking, risk-blocked, near-capacity, error recovery, dry-run observation. |
 
 ---
