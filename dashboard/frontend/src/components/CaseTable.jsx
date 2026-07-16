@@ -1,5 +1,10 @@
 import { useState } from 'react'
 import { fmtLatency, fmtScore, PASS_THRESHOLD, scoreColor } from '../utils.js'
+import casePrompts from '../casePrompts.json'
+
+function caseQuestion(c) {
+  return c.question || casePrompts[c.case_id] || ''
+}
 
 export default function CaseTable({ cases }) {
   const [expanded, setExpanded] = useState(null)
@@ -29,6 +34,7 @@ export default function CaseTable({ cases }) {
             const isOpen = expanded === c.case_id
             const passed = !c.error && (c.composite ?? 0) >= PASS_THRESHOLD
             const ctype = c.case_id?.startsWith('t') ? 'tick' : 'consult'
+            const question = caseQuestion(c)
             return (
               <>
                 <tr
@@ -75,7 +81,15 @@ export default function CaseTable({ cases }) {
                         <div className="case-detail-grid">
                           <div>
                             <div className="case-detail-label">Response</div>
-                            <div className="case-detail-text">{c.response || '(no response)'}</div>
+                            <div className="case-detail-text">
+                              {question && (
+                                <div className="case-question">
+                                  <span className="case-question-label">Question</span>
+                                  {question}
+                                </div>
+                              )}
+                              {c.response || '(no response)'}
+                            </div>
                           </div>
                           <div>
                             <div className="case-detail-label">Judge Reasoning</div>

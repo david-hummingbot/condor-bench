@@ -46,13 +46,14 @@ def test(
     """Run all benchmarks against a model and score vs baseline latency."""
     from bench.baseline import BaselineStore
     from bench.client import run_consult, run_tick, build_tick_prompt_for_case
-    from bench.dataset import load_all_cases
+    from bench.dataset import load_all_cases, case_prompt_map
     from bench.reporter import save_run
     from bench.scorer import score
     import uuid
 
     store = BaselineStore()
     cases = load_all_cases()
+    prompts = case_prompt_map()
 
     if consult_only:
         cases = [c for c in cases if c.type == "consult"]
@@ -81,20 +82,27 @@ def test(
                     prompt = build_tick_prompt_for_case(case, model)
                     result = await run_tick(case.id, prompt, model, case.mock_tools)
                     expected_tools = case.expected_tool_calls
+                    expected_no_calls = getattr(case, "expected_no_calls", [])
                     input_text = case.scenario_name
                 else:
+                    expected_tools = getattr(case, "expected_tools", [])
+                    expected_no_calls = []
                     result = await run_consult(
                         case.id, case.question, model,
                         extra_turns=getattr(case, "turns", []),
                         mock_tools=getattr(case, "mock_tools", {}),
+                        required_tools=expected_tools or None,
                     )
-                    expected_tools = getattr(case, "expected_tools", [])
                     input_text = case.question
 
                 baseline = store.load(case.id)
                 baseline_latency = baseline.latency_s if baseline else result.latency_s
 
-                sc = await score(result, input_text, expected_tools, baseline_latency)
+                sc = await score(
+                    result, input_text, expected_tools, baseline_latency,
+                    expected_no_calls=expected_no_calls or None,
+                )
+                sc.category = getattr(case, "category", "")
                 scorecards.append(sc)
                 responses[case.id] = result.response
                 status = f"[green]{sc.composite:.2f}[/green]" if sc.composite >= 0.7 else f"[red]{sc.composite:.2f}[/red]"
@@ -105,7 +113,7 @@ def test(
     console.print(f"\nBenchmarking [bold]{model}[/bold] on {len(cases)} cases (run {run_id})")
     asyncio.run(_run())
 
-    run_dir = save_run(model, scorecards, responses, run_id)
+    run_dir = save_run(model, scorecards, responses, run_id, prompts=prompts)
     console.print(f"\n[bold]Run saved:[/bold] {run_dir}")
     _print_summary(scorecards, model)
 
@@ -158,7 +166,9 @@ def _print_summary(scorecards, model: str) -> None:
     console.print(f"\n[bold]{model}[/bold] — {len(valid)}/{len(scorecards)} cases scored")
     console.print(f"  Composite:      {sum(s.composite for s in valid)/n:.3f}")
     console.print(f"  Answer quality: {sum(s.answer_quality for s in valid)/n:.3f}")
-    console.print(f"  Tool accuracy:  {sum(s.tool_accuracy for s in valid)/n:.3f}")
+    with_tools = [s for s in valid if s.tool_accuracy is not None]
+    tool_avg = sum(s.tool_accuracy for s in with_tools) / len(with_tools) if with_tools else 0.0
+    console.print(f"  Tool accuracy:  {tool_avg:.3f}")
     console.print(f"  Latency score:  {sum(s.latency_score for s in valid)/n:.3f}")
     console.print(f"  Avg latency:    {sum(s.latency_s for s in valid)/n:.1f}s")
 

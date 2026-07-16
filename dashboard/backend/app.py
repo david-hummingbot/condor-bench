@@ -149,7 +149,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     sys.path.insert(0, str(ROOT))
     from bench.baseline import BaselineStore
     from bench.client import run_consult, run_tick, build_tick_prompt_for_case
-    from bench.dataset import load_all_cases
+    from bench.dataset import load_all_cases, case_prompt_map
     from bench.reporter import save_run
     from bench.scorer import score as do_score
 
@@ -158,6 +158,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
 
     try:
         cases = load_all_cases()
+        prompts = case_prompt_map()
         if req.consult_only:
             cases = [c for c in cases if c.type == "consult"]
         elif req.tick_only:
@@ -188,6 +189,9 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
 
                 for i, case in enumerate(cases):
                     state["current_case"] = case.id
+                    question = (
+                        case.scenario_name if case.type == "tick" else case.question
+                    )
                     await _emit(run_id, {
                         "type": "case_started",
                         "model": model_key,
@@ -195,6 +199,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                         "case_type": case.type,
                         "case_number": done_count + 1,
                         "total": total,
+                        "question": question,
                     })
 
                     error: str | None = None
@@ -205,21 +210,28 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                             prompt = build_tick_prompt_for_case(case, norm_key)
                             result = await run_tick(case.id, prompt, norm_key, case.mock_tools)
                             expected_tools = case.expected_tool_calls
+                            expected_no_calls = getattr(case, "expected_no_calls", [])
                             input_text = case.scenario_name
                         else:
+                            expected_tools = getattr(case, "expected_tools", [])
+                            expected_no_calls = []
                             result = await run_consult(
                                 case.id, case.question, norm_key,
                                 extra_turns=getattr(case, "turns", []),
                                 mock_tools=getattr(case, "mock_tools", {}),
+                                required_tools=expected_tools or None,
                             )
-                            expected_tools = getattr(case, "expected_tools", [])
                             input_text = case.question
 
                         baseline = store.load(case.id)
                         baseline_latency = baseline.latency_s if baseline else result.latency_s
-                        sc = await do_score(result, input_text, expected_tools, baseline_latency)
+                        sc = await do_score(
+                            result, input_text, expected_tools, baseline_latency,
+                            expected_no_calls=expected_no_calls or None,
+                        )
                         sc.category = getattr(case, "category", "")
                         sc_dict = sc.as_dict()
+                        sc_dict["question"] = question
                         response = result.response
                         scorecards.append(sc)
                         responses[case.id] = response
@@ -235,6 +247,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                         "case_id": case.id,
                         "scorecard": sc_dict,
                         "response": response[:1000] if response else "",
+                        "question": question,
                         "error": error,
                         "completed": done_count,
                         "total": total,
@@ -242,7 +255,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
 
                 if scorecards:
                     run_id_short = uuid.uuid4().hex[:8]
-                    run_dir = save_run(norm_key, scorecards, responses, run_id_short)
+                    run_dir = save_run(norm_key, scorecards, responses, run_id_short, prompts=prompts)
                     await _emit(run_id, {"type": "model_done", "model": model_key, "run_dir": run_dir.name})
 
             except asyncio.CancelledError:
@@ -573,10 +586,24 @@ async def get_run(run_dir_or_id: str):
         raise HTTPException(404, "Run not found")
 
     summary = json.loads(summary_file.read_text())
+    prompts: dict[str, str] = {}
+    try:
+        from bench.dataset import case_prompt_map
+        prompts = case_prompt_map()
+    except Exception:
+        pass
     cases = []
     for f in sorted((run_dir / "cases").glob("*.json")):
         try:
-            cases.append(json.loads(f.read_text()))
+            record = json.loads(f.read_text())
+            if not record.get("question"):
+                q = prompts.get(record.get("case_id", ""))
+                if q:
+                    record["question"] = q
+            # Custom-prompt runs store the question on the summary
+            if not record.get("question") and summary.get("prompt_question"):
+                record["question"] = summary["prompt_question"]
+            cases.append(record)
         except Exception:
             continue
     return {"run_dir": run_dir_or_id, "summary": summary, "cases": cases, "active": False}

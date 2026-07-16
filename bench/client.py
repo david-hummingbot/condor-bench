@@ -7,10 +7,11 @@ Multi-turn cases loop prompt_stream() calls preserving message history.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +28,13 @@ _AGENT_INSTRUCTIONS: str = _AGENT_MD.read_text() if _AGENT_MD.exists() else ""
 _ROOT = Path(__file__).parent.parent
 _HB_SCRIPT = _ROOT / "mock_mcp" / "hummingbot_server.py"
 _CONDOR_SCRIPT = _ROOT / "mock_mcp" / "condor_server.py"
+
+_CONFIRM_RE = re.compile(
+    r"(shall i|do you want(?: me)? to|please confirm|confirm (?:with|before|deploy|to)|"
+    r"yes/no|reply (?:with )?(?:yes|confirm)|\bproceed\?\b|want me to (?:create|deploy|run))",
+    re.I,
+)
+_AUTO_CONFIRM_MSG = "Yes, proceed. Deploy / execute with the parameters you proposed."
 
 
 def _build_consult_prompt(question: str) -> str:
@@ -53,6 +61,17 @@ def _mock_mcp_configs(scenario_path: str, tool_log_path: str) -> list[dict]:
         {"name": "mcp-hummingbot", "command": _cmd(_HB_SCRIPT)[0], "args": _cmd(_HB_SCRIPT)[1:], "env": env},
         {"name": "condor",         "command": _cmd(_CONDOR_SCRIPT)[0], "args": _cmd(_CONDOR_SCRIPT)[1:], "env": env},
     ]
+
+
+def _asks_confirmation(text: str) -> bool:
+    return bool(_CONFIRM_RE.search(text or ""))
+
+
+def _missing_required_tools(logged: list[dict], required: list[str]) -> list[str]:
+    from metrics.tool_accuracy import normalize_tool_name
+
+    called = {normalize_tool_name(r["tool"]) for r in logged}
+    return [t for t in required if normalize_tool_name(t) not in called]
 
 
 # ── Result types ───────────────────────────────────────────────────────────────
@@ -91,6 +110,24 @@ class BenchmarkResult:
     def tool_names(self) -> list[str]:
         return [c["tool"] for c in self.tool_calls]
 
+    def transcript_for_judge(self) -> str:
+        """Full multi-turn transcript including tool names for the quality judge."""
+        if not self.turns:
+            return ""
+        if len(self.turns) == 1 and not self.turns[0].tool_calls:
+            return self.turns[0].response
+        parts: list[str] = []
+        for i, turn in enumerate(self.turns, 1):
+            tools = ", ".join(c["tool"] for c in turn.tool_calls) or "(none)"
+            parts.append(
+                f"--- Turn {i} ---\n"
+                f"Tools called: {tools}\n"
+                f"Response:\n{turn.response}"
+            )
+        if self.error:
+            parts.append(f"--- Error ---\n{self.error}")
+        return "\n\n".join(parts)
+
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 async def _stream_turn(client: Any, prompt: str) -> TurnResult:
@@ -127,6 +164,17 @@ def _read_tool_log(path: str) -> list[dict]:
         return []
 
 
+def _assign_logged_tools(all_turns: list[TurnResult], logged: list[dict]) -> None:
+    """Attach MCP tool-log records to turns (aggregate on last turn for scoring)."""
+    if not logged or not all_turns:
+        return
+    for t in all_turns:
+        t.tool_calls = []
+    all_turns[-1].tool_calls = [
+        {"tool": r["tool"], "args": r.get("args", {})} for r in logged
+    ]
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 async def run_consult(
     case_id: str,
@@ -134,10 +182,15 @@ async def run_consult(
     model: str,
     extra_turns: list[str] | None = None,
     mock_tools: dict[str, Any] | None = None,
+    *,
+    auto_confirm: bool = True,
+    required_tools: list[str] | None = None,
 ) -> BenchmarkResult:
     """Run a consult case (with MCP tools available, same as production).
 
     extra_turns: additional user messages after the initial question (multi-turn).
+    auto_confirm: if the model asks for confirmation and required tools are still
+      missing, send one follow-up "Yes, proceed" turn (covers strategy-creation stalls).
     """
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as sf:
         json.dump({"mock_tools": mock_tools or {}}, sf)
@@ -170,6 +223,21 @@ async def run_consult(
                     if turn.error:
                         outer_error = turn.error
                         break
+
+                # Auto-confirm when the model gated a fully-specified action
+                if (
+                    auto_confirm
+                    and not outer_error
+                    and required_tools
+                    and all_turns
+                ):
+                    logged = _read_tool_log(tool_log_path)
+                    missing = _missing_required_tools(logged, required_tools)
+                    if missing and _asks_confirmation(all_turns[-1].response):
+                        turn = await _stream_turn(client, _AUTO_CONFIRM_MSG)
+                        all_turns.append(turn)
+                        if turn.error:
+                            outer_error = turn.error
         finally:
             await client.stop()
     except Exception as exc:
@@ -177,16 +245,8 @@ async def run_consult(
         if not all_turns:
             all_turns.append(TurnResult(response="", tool_calls=[], latency_s=0.0, error=str(exc)))
 
-    # Prefer the MCP tool log (has full args + results) over pydantic-ai events
     logged = _read_tool_log(tool_log_path)
-    if logged:
-        # Redistribute to the turns proportionally (approximate — log order matches call order)
-        for t in all_turns:
-            t.tool_calls = []
-        for rec in logged:
-            for t in reversed(all_turns):
-                t.tool_calls.append({"tool": rec["tool"], "args": rec.get("args", {})})
-                break
+    _assign_logged_tools(all_turns, logged)
 
     for p in (scenario_path, tool_log_path):
         try:

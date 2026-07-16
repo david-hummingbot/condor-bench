@@ -1,6 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { cancelRun, streamUrl } from '../api.js'
 import { scoreColor, fmtScore, fmtLatency, PASS_THRESHOLD } from '../utils.js'
+import casePrompts from '../casePrompts.json'
+
+function caseQuestion(c) {
+  return c.question || casePrompts[c.case_id] || ''
+}
 
 export default function LiveRun({ runId, onDone, onViewRuns }) {
   const [status, setStatus] = useState('idle')
@@ -42,7 +47,13 @@ export default function LiveRun({ runId, onDone, onViewRuns }) {
         setCurrentCase(null)
         if (evt.scorecard) {
           setCases(prev => [
-            { ...evt.scorecard, response: evt.response, model: evt.model, error: evt.error },
+            {
+              ...evt.scorecard,
+              response: evt.response,
+              question: evt.question || evt.scorecard.question,
+              model: evt.model,
+              error: evt.error,
+            },
             ...prev,
           ])
         }
@@ -191,6 +202,12 @@ export default function LiveRun({ runId, onDone, onViewRuns }) {
                             <div>
                               <div className="case-detail-label">Response</div>
                               <div className="case-detail-text">
+                                {caseQuestion(c) && (
+                                  <div className="case-question">
+                                    <span className="case-question-label">Question</span>
+                                    {caseQuestion(c)}
+                                  </div>
+                                )}
                                 {c.response || '(no response)'}
                               </div>
                             </div>

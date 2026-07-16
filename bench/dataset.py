@@ -98,3 +98,14 @@ def load_tick_cases(path: Path | None = None) -> list[TickCase]:
 
 def load_all_cases() -> list[ConsultCase | TickCase]:
     return load_consult_cases() + load_tick_cases()
+
+
+def case_prompt_map() -> dict[str, str]:
+    """Map case_id → user-facing question / scenario name for UI + persistence."""
+    prompts: dict[str, str] = {}
+    for case in load_all_cases():
+        if case.type == "tick":
+            prompts[case.id] = case.scenario_name
+        else:
+            prompts[case.id] = case.question
+    return prompts

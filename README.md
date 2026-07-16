@@ -87,13 +87,15 @@ Each case is scored on three dimensions:
 
 | Dimension | Weight | How it's measured |
 |-----------|--------|-------------------|
-| **Answer quality** | 50% | Reference-free judge (Claude evaluates the response against Condor domain criteria — no baseline needed) |
-| **Tool accuracy** | 30% | F1 score comparing actual tool calls against the expected tools defined in the dataset |
+| **Answer quality** | 50% | Reference-free judge (Claude evaluates response / multi-turn transcript — no baseline needed) |
+| **Tool accuracy** | 30% | F1 on tool names vs non-empty `expected_tools`. Empty `[]` skips this metric (weight → quality). `expected_no_calls` → 0 if violated |
 | **Latency** | 20% | `baseline_latency / test_latency`, capped at 1.0 — only meaningful after running a baseline |
 
-**Composite** = 0.5 × quality + 0.3 × tools + 0.2 × latency
+**Composite** = 0.5 × quality + 0.3 × tools + 0.2 × latency (or 0.8 × quality + 0.2 × latency when no required tools)
 
 A case **passes** when composite ≥ 0.70.
+
+Infra failures (token/request limits) are tagged `error: infra:…` and excluded from summary averages.
 
 ---
 

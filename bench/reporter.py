@@ -17,6 +17,7 @@ def save_run(
     scorecards: list[ScoreCard],
     responses: dict[str, str],
     run_id: str | None = None,
+    prompts: dict[str, str] | None = None,
 ) -> Path:
     """Persist a full benchmark run to results/{run_id}/."""
     run_id = run_id or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -32,6 +33,8 @@ def save_run(
     for sc in scorecards:
         record = sc.as_dict()
         record["response"] = responses.get(sc.case_id, "")
+        if prompts and sc.case_id in prompts:
+            record["question"] = prompts[sc.case_id]
         (cases_dir / f"{sc.case_id}.json").write_text(json.dumps(record, indent=2))
 
     return run_dir
@@ -43,19 +46,23 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
 
     valid = [sc for sc in scorecards if sc.error is None]
     n = len(valid) or 1
+    with_tools = [s for s in valid if s.tool_accuracy is not None]
+    infra_excluded = sum(1 for sc in scorecards if sc.error and str(sc.error).startswith("infra:"))
 
     return {
         "model": model,
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "cases_total": len(scorecards),
         "cases_scored": len(valid),
-        "answer_quality_avg": round(sum(s.answer_quality for s in valid) / n, 4),
-        "tool_accuracy_avg": round(sum(s.tool_accuracy for s in valid if s.tool_accuracy is not None) / n, 4)
-            if any(s.tool_accuracy is not None for s in valid) else None,
-        "latency_score_avg": round(sum(s.latency_score for s in valid) / n, 4),
-        "composite_avg": round(sum(s.composite for s in valid) / n, 4),
-        "latency_s_avg": round(sum(s.latency_s for s in valid) / n, 2),
-        "baseline_latency_s_avg": round(sum(s.baseline_latency_s for s in valid) / n, 2),
+        "infra_excluded": infra_excluded,
+        "answer_quality_avg": round(sum(s.answer_quality for s in valid) / n, 4) if valid else 0.0,
+        "tool_accuracy_avg": round(sum(s.tool_accuracy for s in with_tools) / len(with_tools), 4)
+            if with_tools else None,
+        "latency_score_avg": round(sum(s.latency_score for s in valid) / n, 4) if valid else 0.0,
+        "composite_avg": round(sum(s.composite for s in valid) / n, 4) if valid else 0.0,
+        "latency_s_avg": round(sum(s.latency_s for s in valid) / n, 2) if valid else 0.0,
+        "baseline_latency_s_avg": round(sum(s.baseline_latency_s for s in valid) / n, 2) if valid else 0.0,
+        "pass_count": sum(1 for s in valid if s.composite >= 0.7),
     }
 
 
