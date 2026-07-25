@@ -14,6 +14,25 @@ fixtures:
 goldens:
 	uv run --project $(CONDOR_REPO) python collect/build_goldens.py
 
+# ── Accuracy harness (Track A — see harness/) ──────────────────────────────────
+
+# Deterministic CI: grader perturbation tests + reference self-grading vs
+# frozen goldens. No LLM calls, no network. Fails on stale goldens, engine
+# semantic drift, or grader regressions.
+bench-lite:
+	uv run pytest tests/test_grader.py -q
+	uv run --project $(CONDOR_REPO) python harness/selfcheck.py
+
+# Stochastic end-to-end A1 evaluation: prompt -> model builds -> grade.
+# Usage: make build-eval INSTANCE=simple-rsi [MODEL=anthropic:...] [RUNS=3]
+MODEL ?= anthropic:claude-sonnet-4-6
+RUNS ?= 1
+build-eval:
+	uv run python harness/build.py $(INSTANCE) --model $(MODEL) --runs $(RUNS)
+
+build-eval-all:
+	uv run python harness/build.py --all --model $(MODEL) --runs $(RUNS)
+
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
 install:
