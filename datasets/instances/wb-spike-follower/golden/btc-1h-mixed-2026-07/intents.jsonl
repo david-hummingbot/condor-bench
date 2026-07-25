@@ -1,0 +1,1 @@
+{"created_ts": 1783350000.0, "type": "position_perp", "side": "LONG", "tag": "spike", "notional_quote": 1000.0, "entry_ts": 1783350000.0, "close_ts": 1783350000.0, "close_type": "stop_loss", "order_type": "market", "leverage": 1, "take_profit_pct": 0.04, "stop_loss_pct": 0.02, "trailing_activation_pct": null, "trailing_delta_pct": null, "time_limit_s": null}

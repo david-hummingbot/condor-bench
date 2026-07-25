@@ -84,20 +84,27 @@ def main() -> int:
 
         inst_dir = INSTANCES_DIR / entry["id"]
         inst_dir.mkdir(parents=True, exist_ok=True)
+        feasibility = {
+            "decline": "needs-decline",
+            "clarify": "clarification-required",
+        }.get(status, "expressible")
         instance = {
             "id": entry["id"],
-            "source": "botcamp",
+            "source": entry.get("source", "botcamp"),
             "botcamp_name": entry["botcamp_name"],
             "category": entry["category"],
             "difficulty": entry["difficulty"],
-            "feasibility": "needs-decline" if status == "decline" else "expressible",
+            "feasibility": feasibility,
         }
 
-        if status == "decline":
+        if status in ("decline", "clarify"):
             if not (inst_dir / "prompt.md").exists():
                 problems.append(f"{entry['id']}: missing prompt.md")
-            instance["decline_reason"] = entry["decline_reason"].strip()
-            print(f"  {entry['id']}: decline instance")
+            if status == "decline":
+                instance["decline_reason"] = entry["decline_reason"].strip()
+            else:
+                instance["expected_clarifications"] = entry["expected_clarifications"]
+            print(f"  {entry['id']}: {status} instance")
         else:
             built = build_ready(entry, defaults, problems)
             if built is None:

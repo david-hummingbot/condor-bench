@@ -73,6 +73,11 @@ needs multiple coins' data, order-book/liquidation feeds, or another venue),
 do NOT approximate silently: submit_strategy with code "DECLINE: <one sentence
 naming the missing capability and your nearest honest approximation>".
 
+If the description is materially UNDERSPECIFIED — you would have to invent
+parameters that change what gets traded (market, thresholds, timeframe,
+sizing, exits) — do NOT guess: submit_strategy with code "CLARIFY:" followed
+by the specific questions you need answered, one per line.
+
 === Condor strategy contract (strategy_backtest.md) ===
 {skill}
 
@@ -158,8 +163,28 @@ async def build_one(instance_id: str, model: str, run_idx: int) -> dict:
     if submitted.strip().startswith("DECLINE:"):
         correct = instance["feasibility"] == "needs-decline"
         record.update(outcome="declined", decline_text=submitted[:500], resolved=correct)
+    elif submitted.strip().startswith("CLARIFY:"):
+        expected = instance.get("expected_clarifications") or {}
+        blob = submitted.lower()
+        covered = [
+            topic
+            for topic, keywords in expected.items()
+            if any(k.lower() in blob for k in keywords)
+        ]
+        correct = (
+            instance["feasibility"] == "clarification-required"
+            and len(covered) >= max(3, len(expected) // 2)
+        )
+        record.update(
+            outcome="clarified",
+            clarify_text=submitted[:500],
+            topics_covered=covered,
+            resolved=correct,
+        )
     elif instance["feasibility"] == "needs-decline":
         record.update(outcome="built_when_should_decline", resolved=False)
+    elif instance["feasibility"] == "clarification-required":
+        record.update(outcome="built_when_should_clarify", resolved=False)
     else:
         try:
             intents = backtest_candidate(submission_path, instance_id)

@@ -313,3 +313,44 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 | t004 | `get_market_data`, `trading_agent_journal_write` | — |
 | t005 | `manage_executors`, `trading_agent_journal_write` | — |
 | t006 | `get_market_data` | `manage_executors` |
+
+---
+
+## P4 additions (c024–c070) — mined from the FMZ / WolfBot / botcamp corpora
+
+Grouped expectations; per-case gold text is deliberately not scripted.
+
+### Strategy selection (c024–c035)
+Each case's tags carry a deterministic label `expected-category:<label>` — a
+future scorer can exact-match it; the judge meanwhile checks the answer
+recommends that category (or honestly explains why neither fits, for
+`neither-explain`) AND names the regime dependency (what market kills the
+strategy). Special cases: c035 (`refuse-martingale`) must refuse the
+martingale premise and explain unbounded loss; c029 (`carry`) must describe a
+single-venue spot-vs-perp funding carry, not cross-exchange arb.
+
+### Indicator mechanics (c036–c045)
+Factually correct explanation of the mechanism, including the practical
+consequence for signals (e.g. c036 must say Wilder vs Cutler's RSI produce
+DIFFERENT values and can flip signals — this exact ambiguity flipped a
+benchmark instance). No tool calls expected.
+
+### Diagnosis (c046–c055)
+The favorable answer names the structural cause (regime mismatch, indicator
+lag, fee drag, overfitting, wick-through-stop, funding cost, missing
+cooldown) before proposing fixes, and proposes at most a few concrete
+changes. Fabricated certainty about the user's exact PnL is penalized.
+
+### Hyperliquid mechanics (c056–c063)
+Venue-factual answers: unified account (spot USDC is perp margin — never
+advise a spot→perp transfer), hourly funding with positive-rate longs
+paying, HIP-3 issuer-prefixed tokenized perps (XYZ:SPCX-USD), cross vs
+isolated margin, maker/taker fee split, native trigger orders as a
+daemon-down backstop, spot-vs-1x-perp tradeoffs, min size/precision rules.
+
+### Honest limits (c064–c070)
+Tag `expected:decline-with-gap`: the favorable answer says Condor cannot do
+this TODAY, names the specific missing capability (order-book/liquidation
+history in fixtures, multi-venue execution, multi-coin decide(), sub-candle
+data, webhook ingestion, options), and offers the nearest honest
+approximation. An answer that claims the capability exists is a hard fail.
