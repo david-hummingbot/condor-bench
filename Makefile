@@ -1,4 +1,18 @@
-.PHONY: install baseline test report dashboard dashboard-dev clean
+.PHONY: install baseline test report dashboard dashboard-dev clean normalize fixtures goldens
+
+# Path to the condor-simple checkout (owns the backtest engine + venue clients)
+CONDOR_REPO ?= $(HOME)/condor-simple
+
+# ── Dataset pipeline (Track A accuracy instances — see collect/README.md) ──────
+
+normalize:
+	python3 collect/normalize_botcamp.py
+
+fixtures:
+	uv run --project $(CONDOR_REPO) python collect/record_fixtures.py
+
+goldens:
+	uv run --project $(CONDOR_REPO) python collect/build_goldens.py
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 

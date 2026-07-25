@@ -1,0 +1,10 @@
+{"created_ts": 1782525600.0, "type": "order_perp", "side": "LONG", "tag": "slice_1", "notional_quote": 500.0, "close_type": "position_hold"}
+{"created_ts": 1782540000.0, "type": "order_perp", "side": "LONG", "tag": "slice_2", "notional_quote": 500.0, "close_type": "position_hold"}
+{"created_ts": 1782554400.0, "type": "order_perp", "side": "LONG", "tag": "slice_3", "notional_quote": 500.0, "close_type": "position_hold"}
+{"created_ts": 1782568800.0, "type": "order_perp", "side": "LONG", "tag": "slice_4", "notional_quote": 500.0, "close_type": "position_hold"}
+{"created_ts": 1782583200.0, "type": "order_perp", "side": "LONG", "tag": "slice_5", "notional_quote": 500.0, "close_type": "position_hold"}
+{"created_ts": 1782597600.0, "type": "order_perp", "side": "LONG", "tag": "slice_6", "notional_quote": 500.0, "close_type": "position_hold"}
+{"created_ts": 1782612000.0, "type": "order_perp", "side": "LONG", "tag": "slice_7", "notional_quote": 500.0, "close_type": "position_hold"}
+{"created_ts": 1782626400.0, "type": "order_perp", "side": "LONG", "tag": "slice_8", "notional_quote": 500.0, "close_type": "position_hold"}
+{"created_ts": 1782640800.0, "type": "order_perp", "side": "LONG", "tag": "slice_9", "notional_quote": 500.0, "close_type": "position_hold"}
+{"created_ts": 1782655200.0, "type": "order_perp", "side": "LONG", "tag": "slice_10", "notional_quote": 500.0, "close_type": "position_hold"}

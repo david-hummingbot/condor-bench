@@ -1,0 +1,2 @@
+{"created_ts": 1769698800.0, "type": "position_perp", "side": "LONG", "tag": "rsi_dip", "notional_quote": 1000.0, "close_type": "early_stop"}
+{"created_ts": 1771804800.0, "type": "position_perp", "side": "LONG", "tag": "rsi_dip", "notional_quote": 1000.0, "close_type": "end_of_data"}

@@ -1,0 +1,10 @@
+{
+  "venue": "hyperliquid",
+  "coin": "BTC",
+  "interval": "1h",
+  "start_ms": 1769385600000,
+  "end_ms": 1771977600000,
+  "n_candles": 721,
+  "n_funding_events": 720,
+  "recorded_at_ms": 1785005538120
+}

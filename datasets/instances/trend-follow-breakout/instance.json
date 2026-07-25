@@ -1,0 +1,37 @@
+{
+  "id": "trend-follow-breakout",
+  "source": "botcamp",
+  "botcamp_name": "Directional Strategy on WLD-USDT Perp",
+  "category": "trend-following",
+  "difficulty": "medium",
+  "feasibility": "expressible",
+  "fixtures": [
+    "btc-1h-trend-up-2026-04",
+    "btc-1h-trend-down-2026-02"
+  ],
+  "params": {
+    "coin": "BTC",
+    "notional_quote": 1000.0,
+    "channel": 55,
+    "trailing_activation_pct": 0.02,
+    "trailing_delta_pct": 0.01
+  },
+  "golden": {
+    "btc-1h-trend-up-2026-04": {
+      "intents": 7,
+      "net_pnl_quote": 0.26,
+      "close_types": {
+        "trailing_stop": 5,
+        "early_stop": 2
+      }
+    },
+    "btc-1h-trend-down-2026-02": {
+      "intents": 12,
+      "net_pnl_quote": 14.72,
+      "close_types": {
+        "early_stop": 4,
+        "trailing_stop": 8
+      }
+    }
+  }
+}

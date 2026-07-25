@@ -1,0 +1,14 @@
+{"created_ts": 1769587200.0, "type": "position_perp", "side": "SHORT", "tag": "barbell", "notional_quote": 500.0, "close_type": "take_profit"}
+{"created_ts": 1769760000.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "stop_loss"}
+{"created_ts": 1769914800.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "stop_loss"}
+{"created_ts": 1769983200.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "stop_loss"}
+{"created_ts": 1770015600.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "stop_loss"}
+{"created_ts": 1770285600.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "stop_loss"}
+{"created_ts": 1770346800.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "take_profit"}
+{"created_ts": 1770508800.0, "type": "position_perp", "side": "SHORT", "tag": "barbell", "notional_quote": 500.0, "close_type": "stop_loss"}
+{"created_ts": 1770584400.0, "type": "position_perp", "side": "SHORT", "tag": "barbell", "notional_quote": 500.0, "close_type": "take_profit"}
+{"created_ts": 1770832800.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "stop_loss"}
+{"created_ts": 1770948000.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "take_profit"}
+{"created_ts": 1771074000.0, "type": "position_perp", "side": "SHORT", "tag": "barbell", "notional_quote": 500.0, "close_type": "take_profit"}
+{"created_ts": 1771614000.0, "type": "position_perp", "side": "SHORT", "tag": "barbell", "notional_quote": 500.0, "close_type": "take_profit"}
+{"created_ts": 1771934400.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "end_of_data"}

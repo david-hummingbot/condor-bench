@@ -1,0 +1,6 @@
+{"created_ts": 1782856800.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "take_profit"}
+{"created_ts": 1783022400.0, "type": "position_perp", "side": "SHORT", "tag": "barbell", "notional_quote": 500.0, "close_type": "stop_loss"}
+{"created_ts": 1783209600.0, "type": "position_perp", "side": "SHORT", "tag": "barbell", "notional_quote": 500.0, "close_type": "stop_loss"}
+{"created_ts": 1783537200.0, "type": "position_perp", "side": "LONG", "tag": "barbell", "notional_quote": 1500.0, "close_type": "take_profit"}
+{"created_ts": 1784131200.0, "type": "position_perp", "side": "SHORT", "tag": "barbell", "notional_quote": 500.0, "close_type": "stop_loss"}
+{"created_ts": 1784653200.0, "type": "position_perp", "side": "SHORT", "tag": "barbell", "notional_quote": 500.0, "close_type": "end_of_data"}

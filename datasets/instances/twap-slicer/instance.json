@@ -1,0 +1,26 @@
+{
+  "id": "twap-slicer",
+  "source": "botcamp",
+  "botcamp_name": "Simple VWAP",
+  "category": "execution",
+  "difficulty": "easy",
+  "feasibility": "expressible",
+  "fixtures": [
+    "btc-1h-mixed-2026-07"
+  ],
+  "params": {
+    "coin": "BTC",
+    "total_notional": 5000.0,
+    "slices": 10,
+    "every_candles": 4
+  },
+  "golden": {
+    "btc-1h-mixed-2026-07": {
+      "intents": 10,
+      "net_pnl_quote": 275.67,
+      "close_types": {
+        "position_hold": 10
+      }
+    }
+  }
+}

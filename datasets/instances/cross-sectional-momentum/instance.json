@@ -1,0 +1,9 @@
+{
+  "id": "cross-sectional-momentum",
+  "source": "botcamp",
+  "botcamp_name": "Cross-Sectional Momentum",
+  "category": "momentum",
+  "difficulty": "hard",
+  "feasibility": "needs-decline",
+  "decline_reason": "Ranks a universe of coins and rotates holdings; needs multi-coin data and portfolio rebalancing across many instruments per tick."
+}

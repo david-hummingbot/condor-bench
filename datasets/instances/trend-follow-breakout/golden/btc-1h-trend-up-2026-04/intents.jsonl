@@ -1,0 +1,7 @@
+{"created_ts": 1774843200.0, "type": "position_perp", "side": "LONG", "tag": "breakout", "notional_quote": 1000.0, "close_type": "trailing_stop"}
+{"created_ts": 1775426400.0, "type": "position_perp", "side": "LONG", "tag": "breakout", "notional_quote": 1000.0, "close_type": "trailing_stop"}
+{"created_ts": 1775599200.0, "type": "position_perp", "side": "LONG", "tag": "breakout", "notional_quote": 1000.0, "close_type": "trailing_stop"}
+{"created_ts": 1775995200.0, "type": "position_perp", "side": "SHORT", "tag": "breakout", "notional_quote": 1000.0, "close_type": "early_stop"}
+{"created_ts": 1776117600.0, "type": "position_perp", "side": "LONG", "tag": "breakout", "notional_quote": 1000.0, "close_type": "trailing_stop"}
+{"created_ts": 1776618000.0, "type": "position_perp", "side": "SHORT", "tag": "breakout", "notional_quote": 1000.0, "close_type": "early_stop"}
+{"created_ts": 1776708000.0, "type": "position_perp", "side": "LONG", "tag": "breakout", "notional_quote": 1000.0, "close_type": "trailing_stop"}

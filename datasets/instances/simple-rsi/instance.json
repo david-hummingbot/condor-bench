@@ -1,0 +1,36 @@
+{
+  "id": "simple-rsi",
+  "source": "botcamp",
+  "botcamp_name": "Simple RSI",
+  "category": "mean-reversion",
+  "difficulty": "easy",
+  "feasibility": "expressible",
+  "fixtures": [
+    "btc-1h-chop-2026-05",
+    "btc-1h-trend-down-2026-02"
+  ],
+  "params": {
+    "coin": "BTC",
+    "notional_quote": 1000.0,
+    "rsi_period": 14,
+    "buy_below": 30.0,
+    "sell_above": 70.0
+  },
+  "golden": {
+    "btc-1h-chop-2026-05": {
+      "intents": 3,
+      "net_pnl_quote": 26.47,
+      "close_types": {
+        "early_stop": 3
+      }
+    },
+    "btc-1h-trend-down-2026-02": {
+      "intents": 2,
+      "net_pnl_quote": -231.03,
+      "close_types": {
+        "early_stop": 1,
+        "end_of_data": 1
+      }
+    }
+  }
+}

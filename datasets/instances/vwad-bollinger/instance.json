@@ -1,0 +1,41 @@
+{
+  "id": "vwad-bollinger",
+  "source": "botcamp",
+  "botcamp_name": "VWAD Enhanced Bollinger Strategy",
+  "category": "trend-following",
+  "difficulty": "hard",
+  "feasibility": "expressible",
+  "fixtures": [
+    "btc-1h-mixed-2026-07",
+    "btc-1h-trend-up-2026-04"
+  ],
+  "params": {
+    "coin": "BTC",
+    "notional_quote": 1000.0,
+    "bb_period": 20,
+    "bb_std": 2.0,
+    "ad_lookback": 10,
+    "volume_mult": 1.5,
+    "take_profit_pct": 0.06,
+    "stop_loss_pct": 0.03
+  },
+  "golden": {
+    "btc-1h-mixed-2026-07": {
+      "intents": 4,
+      "net_pnl_quote": 22.41,
+      "close_types": {
+        "stop_loss": 2,
+        "take_profit": 1,
+        "end_of_data": 1
+      }
+    },
+    "btc-1h-trend-up-2026-04": {
+      "intents": 7,
+      "net_pnl_quote": -34.54,
+      "close_types": {
+        "stop_loss": 5,
+        "take_profit": 2
+      }
+    }
+  }
+}

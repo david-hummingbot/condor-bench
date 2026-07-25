@@ -1,0 +1,35 @@
+{
+  "id": "sma-cross",
+  "source": "botcamp",
+  "botcamp_name": "Buy Low & Sell high",
+  "category": "trend-following",
+  "difficulty": "easy",
+  "feasibility": "expressible",
+  "fixtures": [
+    "btc-1h-trend-up-2026-04",
+    "btc-1h-chop-2026-05"
+  ],
+  "params": {
+    "coin": "BTC",
+    "notional_quote": 1000.0,
+    "fast": 10,
+    "slow": 30
+  },
+  "golden": {
+    "btc-1h-trend-up-2026-04": {
+      "intents": 14,
+      "net_pnl_quote": -10.64,
+      "close_types": {
+        "early_stop": 14
+      }
+    },
+    "btc-1h-chop-2026-05": {
+      "intents": 13,
+      "net_pnl_quote": -28.47,
+      "close_types": {
+        "early_stop": 12,
+        "end_of_data": 1
+      }
+    }
+  }
+}

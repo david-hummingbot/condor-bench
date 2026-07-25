@@ -1,0 +1,9 @@
+{
+  "id": "orderbook-skew-oi",
+  "source": "botcamp",
+  "botcamp_name": "Following Spot Orderbook Skew & Fading Open Interest RSI",
+  "category": "microstructure",
+  "difficulty": "hard",
+  "feasibility": "needs-decline",
+  "decline_reason": "Signals come from order-book imbalance and open-interest history; fixtures carry candles + funding only."
+}
