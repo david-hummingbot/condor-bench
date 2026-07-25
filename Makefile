@@ -23,15 +23,18 @@ bench-lite:
 	uv run pytest tests/test_grader.py -q
 	uv run --project $(CONDOR_REPO) python harness/selfcheck.py
 
-# Stochastic end-to-end A1 evaluation: prompt -> model builds -> grade.
-# Usage: make build-eval INSTANCE=simple-rsi [MODEL=anthropic:...] [RUNS=3]
-MODEL ?= anthropic:claude-sonnet-4-6
+# Stochastic end-to-end A1 evaluation: prompt -> agent builds -> grade.
+# Default backend is the operator's Claude SUBSCRIPTION via claude-agent-acp
+# (no API key needed); any condor-supported backend works, e.g.
+#   MODEL=claude-acp:haiku | claude-acp:opus | openrouter:openai/gpt-4o-mini
+# Usage: make build-eval INSTANCE=simple-rsi [MODEL=...] [RUNS=3]
+MODEL ?= claude-acp:sonnet
 RUNS ?= 1
 build-eval:
-	uv run python harness/build.py $(INSTANCE) --model $(MODEL) --runs $(RUNS)
+	uv run --project $(CONDOR_REPO) python harness/build.py $(INSTANCE) --model $(MODEL) --runs $(RUNS)
 
 build-eval-all:
-	uv run python harness/build.py --all --model $(MODEL) --runs $(RUNS)
+	uv run --project $(CONDOR_REPO) python harness/build.py --all --model $(MODEL) --runs $(RUNS)
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
