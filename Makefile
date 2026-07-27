@@ -1,4 +1,40 @@
-.PHONY: install baseline test report dashboard dashboard-dev clean
+.PHONY: install baseline test report dashboard dashboard-dev clean normalize fixtures goldens
+
+# Path to the condor-simple checkout (owns the backtest engine + venue clients)
+CONDOR_REPO ?= $(HOME)/condor-simple
+
+# ── Dataset pipeline (Track A accuracy instances — see collect/README.md) ──────
+
+normalize:
+	python3 collect/normalize_botcamp.py
+
+fixtures:
+	uv run --project $(CONDOR_REPO) python collect/record_fixtures.py
+
+goldens:
+	uv run --project $(CONDOR_REPO) python collect/build_goldens.py
+
+# ── Accuracy harness (Track A — see harness/) ──────────────────────────────────
+
+# Deterministic CI: grader perturbation tests + reference self-grading vs
+# frozen goldens. No LLM calls, no network. Fails on stale goldens, engine
+# semantic drift, or grader regressions.
+bench-lite:
+	uv run pytest tests/test_grader.py -q
+	uv run --project $(CONDOR_REPO) python harness/selfcheck.py
+
+# Stochastic end-to-end A1 evaluation: prompt -> agent builds -> grade.
+# Default backend is the operator's Claude SUBSCRIPTION via claude-agent-acp
+# (no API key needed); any condor-supported backend works, e.g.
+#   MODEL=claude-acp:haiku | claude-acp:opus | openrouter:openai/gpt-4o-mini
+# Usage: make build-eval INSTANCE=simple-rsi [MODEL=...] [RUNS=3]
+MODEL ?= claude-acp:sonnet
+RUNS ?= 1
+build-eval:
+	uv run --project $(CONDOR_REPO) python harness/build.py $(INSTANCE) --model $(MODEL) --runs $(RUNS)
+
+build-eval-all:
+	uv run --project $(CONDOR_REPO) python harness/build.py --all --model $(MODEL) --runs $(RUNS)
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 

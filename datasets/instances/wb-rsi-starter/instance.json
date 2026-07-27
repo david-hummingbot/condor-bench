@@ -1,0 +1,39 @@
+{
+  "id": "wb-rsi-starter",
+  "source": "wolfbot",
+  "botcamp_name": "RSIStarter",
+  "category": "mean-reversion",
+  "difficulty": "hard",
+  "feasibility": "expressible",
+  "fixtures": [
+    "btc-1h-trend-down-2026-02",
+    "btc-1h-chop-2026-05"
+  ],
+  "params": {
+    "coin": "BTC",
+    "notional_quote": 1000.0,
+    "rsi_period": 14,
+    "low": 30.0,
+    "low_start_factor": 0.75,
+    "pause_candles": 20,
+    "take_profit_pct": 0.05,
+    "stop_loss_pct": 0.025
+  },
+  "golden": {
+    "btc-1h-trend-down-2026-02": {
+      "intents": 8,
+      "net_pnl_quote": -207.58,
+      "close_types": {
+        "stop_loss": 8
+      }
+    },
+    "btc-1h-chop-2026-05": {
+      "intents": 3,
+      "net_pnl_quote": 0.05,
+      "close_types": {
+        "take_profit": 1,
+        "stop_loss": 2
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "id": "funding-arb-multi-venue",
+  "source": "botcamp",
+  "botcamp_name": "Multi-Exchange Funding Arb",
+  "category": "arbitrage",
+  "difficulty": "hard",
+  "feasibility": "needs-decline",
+  "decline_reason": "Hedged legs on two venues with cross-venue funding comparison; Condor executors act on one venue per intent and the engine replays one venue."
+}

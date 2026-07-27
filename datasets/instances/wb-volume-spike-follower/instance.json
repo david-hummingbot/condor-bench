@@ -1,0 +1,40 @@
+{
+  "id": "wb-volume-spike-follower",
+  "source": "wolfbot",
+  "botcamp_name": "VolumeSpikeDetector",
+  "category": "momentum",
+  "difficulty": "medium",
+  "feasibility": "expressible",
+  "fixtures": [
+    "btc-1h-trend-up-2026-04",
+    "btc-1h-mixed-2026-07"
+  ],
+  "params": {
+    "coin": "BTC",
+    "notional_quote": 1000.0,
+    "spike_factor": 3.0,
+    "vol_window": 24,
+    "min_move_pct": 0.01,
+    "trend_window": 24,
+    "take_profit_pct": 0.04,
+    "stop_loss_pct": 0.02
+  },
+  "golden": {
+    "btc-1h-trend-up-2026-04": {
+      "intents": 5,
+      "net_pnl_quote": 24.81,
+      "close_types": {
+        "take_profit": 2,
+        "stop_loss": 3
+      }
+    },
+    "btc-1h-mixed-2026-07": {
+      "intents": 5,
+      "net_pnl_quote": -42.8,
+      "close_types": {
+        "take_profit": 1,
+        "stop_loss": 4
+      }
+    }
+  }
+}

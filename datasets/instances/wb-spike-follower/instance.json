@@ -1,0 +1,37 @@
+{
+  "id": "wb-spike-follower",
+  "source": "wolfbot",
+  "botcamp_name": "PriceSpikeDetector",
+  "category": "momentum",
+  "difficulty": "medium",
+  "feasibility": "expressible",
+  "fixtures": [
+    "btc-1h-trend-down-2026-02",
+    "btc-1h-mixed-2026-07"
+  ],
+  "params": {
+    "coin": "BTC",
+    "notional_quote": 1000.0,
+    "spike_pct": 0.02,
+    "history_candle": 36,
+    "trend_window": 24,
+    "take_profit_pct": 0.04,
+    "stop_loss_pct": 0.02
+  },
+  "golden": {
+    "btc-1h-trend-down-2026-02": {
+      "intents": 9,
+      "net_pnl_quote": -188.1,
+      "close_types": {
+        "stop_loss": 9
+      }
+    },
+    "btc-1h-mixed-2026-07": {
+      "intents": 1,
+      "net_pnl_quote": -20.9,
+      "close_types": {
+        "stop_loss": 1
+      }
+    }
+  }
+}

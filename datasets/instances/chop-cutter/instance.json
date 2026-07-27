@@ -1,0 +1,38 @@
+{
+  "id": "chop-cutter",
+  "source": "botcamp",
+  "botcamp_name": "Chop Cutter",
+  "category": "mean-reversion",
+  "difficulty": "medium",
+  "feasibility": "expressible",
+  "fixtures": [
+    "btc-1h-chop-2026-05",
+    "btc-1h-trend-up-2026-04"
+  ],
+  "params": {
+    "coin": "BTC",
+    "notional_quote": 1000.0,
+    "bb_period": 20,
+    "bb_std": 2.0,
+    "stop_loss_pct": 0.03
+  },
+  "golden": {
+    "btc-1h-chop-2026-05": {
+      "intents": 25,
+      "net_pnl_quote": 7.13,
+      "close_types": {
+        "early_stop": 23,
+        "stop_loss": 1,
+        "end_of_data": 1
+      }
+    },
+    "btc-1h-trend-up-2026-04": {
+      "intents": 28,
+      "net_pnl_quote": -16.27,
+      "close_types": {
+        "early_stop": 24,
+        "stop_loss": 4
+      }
+    }
+  }
+}

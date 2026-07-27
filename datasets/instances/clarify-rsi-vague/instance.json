@@ -1,0 +1,52 @@
+{
+  "id": "clarify-rsi-vague",
+  "source": "bench",
+  "botcamp_name": "(deliberately vague RSI request)",
+  "category": "mean-reversion",
+  "difficulty": "easy",
+  "feasibility": "clarification-required",
+  "expected_clarifications": {
+    "market": [
+      "coin",
+      "market",
+      "pair",
+      "asset",
+      "which perp"
+    ],
+    "period": [
+      "period",
+      "length",
+      "lookback",
+      "14"
+    ],
+    "thresholds": [
+      "threshold",
+      "oversold",
+      "overbought",
+      "30",
+      "70",
+      "level"
+    ],
+    "timeframe": [
+      "timeframe",
+      "interval",
+      "candle",
+      "hourly",
+      "time frame"
+    ],
+    "sizing": [
+      "size",
+      "notional",
+      "amount",
+      "capital",
+      "how much"
+    ],
+    "exits": [
+      "exit",
+      "take profit",
+      "stop loss",
+      "close",
+      "when to sell"
+    ]
+  }
+}

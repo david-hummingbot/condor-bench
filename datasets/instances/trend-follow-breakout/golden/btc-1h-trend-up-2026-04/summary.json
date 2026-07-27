@@ -1,0 +1,23 @@
+{
+  "net_pnl_quote": 0.25682347236636355,
+  "net_pnl_pct": 2.5682347236636355e-05,
+  "realized_pnl_quote": 0.25682347236636355,
+  "unrealized_pnl_quote": 0.0,
+  "total_executors": 7,
+  "open_executors": 0,
+  "round_trips": 7,
+  "win_signals": 4,
+  "loss_signals": 3,
+  "win_rate": 0.5714285714285714,
+  "profit_factor": 1.003473680735582,
+  "close_types": {
+    "trailing_stop": 5,
+    "early_stop": 2
+  },
+  "total_fees_quote": 6.3,
+  "total_funding_quote": -0.08837472499784868,
+  "max_drawdown_quote": -92.55220406002829,
+  "max_drawdown_pct": -0.009255220406002828,
+  "sharpe_per_candle": 0.00011013189300474528,
+  "final_price": 77462.0
+}

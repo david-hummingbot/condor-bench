@@ -1,0 +1,40 @@
+{
+  "id": "wb-price-range-trader",
+  "source": "wolfbot",
+  "botcamp_name": "PriceRangeTrader",
+  "category": "market-making",
+  "difficulty": "hard",
+  "feasibility": "expressible",
+  "fixtures": [
+    "btc-1h-chop-2026-05",
+    "btc-1h-mixed-2026-07"
+  ],
+  "params": {
+    "coin": "BTC",
+    "notional_quote": 500.0,
+    "range_window": 24,
+    "min_range_pct": 0.02,
+    "profit_pct": 0.02,
+    "order_ttl_candles": 12
+  },
+  "golden": {
+    "btc-1h-chop-2026-05": {
+      "intents": 230,
+      "net_pnl_quote": -13.88,
+      "close_types": {
+        "position_hold": 194,
+        "early_stop": 35,
+        "resting": 1
+      }
+    },
+    "btc-1h-mixed-2026-07": {
+      "intents": 378,
+      "net_pnl_quote": 14.34,
+      "close_types": {
+        "early_stop": 17,
+        "position_hold": 360,
+        "resting": 1
+      }
+    }
+  }
+}

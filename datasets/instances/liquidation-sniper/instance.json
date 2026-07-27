@@ -1,0 +1,9 @@
+{
+  "id": "liquidation-sniper",
+  "source": "botcamp",
+  "botcamp_name": "Liquidation Sniper",
+  "category": "event-driven",
+  "difficulty": "medium",
+  "feasibility": "needs-decline",
+  "decline_reason": "Needs a liquidation-event feed; candles + funding cannot see forced liquidations, so any candle-only implementation would be a different strategy."
+}

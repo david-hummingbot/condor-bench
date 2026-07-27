@@ -1,0 +1,238 @@
+# Curated strategies -> Track A accuracy instances (botcamp + WolfBot sources).
+#
+# THIS FILE IS THE EDITABLE SOURCE OF TRUTH. To add/change an instance:
+#   1. Add or edit an entry under `instances:` (set status: todo while drafting).
+#   2. Write datasets/instances/<id>/prompt.md   (user-voice, explicit params —
+#      what a real user would type; never mention Condor internals).
+#   3. For status: ready — write datasets/instances/<id>/reference/strategy.py
+#      (self-contained PARAMS + decide(candles, ctx); see any ready instance).
+#   4. make goldens   (regenerates instance.json + golden/ for ready instances)
+#
+# status:
+#   ready   — reference impl exists; goldens are built and frozen
+#   todo    — curated, awaiting a reference implementation (builder skips it)
+#   decline — the CORRECT Condor behavior is to say it can't express this
+#             faithfully and offer the nearest approximation; no reference impl.
+#             decline_reason states the gap the answer must name.
+#   clarify — the prompt is deliberately underspecified; the CORRECT behavior
+#             is to ask for the material parameters before building.
+#             expected_clarifications lists topic keyword groups the questions
+#             must cover (build driver grades CLARIFY submissions against them).
+
+defaults:
+  coin: BTC
+  interval: 1h
+  warmup: 50
+  notional_quote: 1000.0
+
+# 30d BTC windows chosen from a regime scan of available Hyperliquid history
+# (candleSnapshot reaches back ~7 months at 1h). Stats at selection time noted.
+fixtures:
+  btc-1h-trend-up-2026-04:
+    coin: BTC
+    interval: 1h
+    start: "2026-03-27"
+    end: "2026-04-26"
+    regime: trend_up          # +18.5%, 37.9% ann vol
+  btc-1h-trend-down-2026-02:
+    coin: BTC
+    interval: 1h
+    start: "2026-01-26"
+    end: "2026-02-25"
+    regime: trend_down        # -21.2%, 63.5% ann vol (high-vol selloff)
+  btc-1h-chop-2026-05:
+    coin: BTC
+    interval: 1h
+    start: "2026-04-26"
+    end: "2026-05-26"
+    regime: chop              # -3.0%, 31.5% ann vol, 10% range
+  btc-1h-mixed-2026-07:
+    coin: BTC
+    interval: 1h
+    start: "2026-06-25"
+    end: "2026-07-25"
+    regime: mixed             # +8.6%, 36.1% ann vol (recovery month)
+
+instances:
+  # ── ready: reference implemented, goldens frozen ──────────────────────────
+  - id: simple-rsi
+    status: ready
+    botcamp_name: "Simple RSI"
+    category: mean-reversion
+    difficulty: easy
+    fixtures: [btc-1h-chop-2026-05, btc-1h-trend-down-2026-02]
+
+  - id: sma-cross
+    status: ready
+    botcamp_name: "Buy Low & Sell high"
+    category: trend-following
+    difficulty: easy
+    fixtures: [btc-1h-trend-up-2026-04, btc-1h-chop-2026-05]
+
+  - id: chop-cutter
+    status: ready
+    botcamp_name: "Chop Cutter"
+    category: mean-reversion
+    difficulty: medium
+    fixtures: [btc-1h-chop-2026-05, btc-1h-trend-up-2026-04]
+
+  - id: vwap-scalper
+    status: ready
+    botcamp_name: "VWAP Scalper"
+    category: mean-reversion
+    difficulty: medium
+    fixtures: [btc-1h-chop-2026-05, btc-1h-mixed-2026-07]
+
+  - id: macd-bb-barbell
+    status: ready
+    botcamp_name: "Asymmetric Barbell Strategy"
+    category: trend-following
+    difficulty: medium
+    fixtures: [btc-1h-trend-down-2026-02, btc-1h-mixed-2026-07]
+
+  - id: trend-follow-breakout
+    status: ready
+    botcamp_name: "Directional Strategy on WLD-USDT Perp"
+    category: trend-following
+    difficulty: medium
+    fixtures: [btc-1h-trend-up-2026-04, btc-1h-trend-down-2026-02]
+
+  - id: vwad-bollinger
+    status: ready
+    botcamp_name: "VWAD Enhanced Bollinger Strategy"
+    category: trend-following
+    difficulty: hard
+    fixtures: [btc-1h-mixed-2026-07, btc-1h-trend-up-2026-04]
+
+  - id: twap-slicer
+    status: ready
+    botcamp_name: "Simple VWAP"
+    category: execution
+    difficulty: easy
+    fixtures: [btc-1h-mixed-2026-07]
+
+  # ── ready, WolfBot source (github Ekliptor/WolfBot src/Strategies) ────────
+  - id: wb-price-range-trader
+    status: ready
+    source: wolfbot
+    botcamp_name: "PriceRangeTrader"
+    category: market-making
+    difficulty: hard
+    fixtures: [btc-1h-chop-2026-05, btc-1h-mixed-2026-07]
+    notes: Resting limit orders + ledger round trips + stale-order cancels.
+
+  - id: wb-spike-follower
+    status: ready
+    source: wolfbot
+    botcamp_name: "PriceSpikeDetector"
+    category: momentum
+    difficulty: medium
+    fixtures: [btc-1h-trend-down-2026-02, btc-1h-mixed-2026-07]
+
+  - id: wb-rsi-starter
+    status: ready
+    source: wolfbot
+    botcamp_name: "RSIStarter"
+    category: mean-reversion
+    difficulty: hard
+    fixtures: [btc-1h-trend-down-2026-02, btc-1h-chop-2026-05]
+    notes: Stateful — 20-candle cooldown after a losing trade (ctx.stopped + memo).
+
+  - id: wb-volume-spike-follower
+    status: ready
+    source: wolfbot
+    botcamp_name: "VolumeSpikeDetector"
+    category: momentum
+    difficulty: medium
+    fixtures: [btc-1h-trend-up-2026-04, btc-1h-mixed-2026-07]
+
+  # ── clarify: correct answer = ask the material questions first ────────────
+  - id: clarify-rsi-vague
+    status: clarify
+    source: bench
+    botcamp_name: "(deliberately vague RSI request)"
+    category: mean-reversion
+    difficulty: easy
+    expected_clarifications:
+      market: [coin, market, pair, asset, "which perp"]
+      period: [period, length, lookback, "14"]
+      thresholds: [threshold, oversold, overbought, "30", "70", level]
+      timeframe: [timeframe, interval, candle, hourly, "time frame"]
+      sizing: [size, notional, amount, capital, "how much"]
+      exits: [exit, "take profit", "stop loss", close, "when to sell"]
+
+  # ── decline: correct answer = name the gap, offer nearest approximation ───
+  - id: leader-follower-pairs
+    status: decline
+    botcamp_name: "Leader-Follower Directional Divergence"
+    category: pairs
+    difficulty: medium
+    decline_reason: >-
+      Needs two coins' candles in one decision function; the backtest engine
+      and a strategy routine see a single candle series today.
+
+  - id: liquidation-sniper
+    status: decline
+    botcamp_name: "Liquidation Sniper"
+    category: event-driven
+    difficulty: medium
+    decline_reason: >-
+      Needs a liquidation-event feed; candles + funding cannot see forced
+      liquidations, so any candle-only implementation would be a different
+      strategy.
+
+  - id: cross-sectional-momentum
+    status: decline
+    botcamp_name: "Cross-Sectional Momentum"
+    category: momentum
+    difficulty: hard
+    decline_reason: >-
+      Ranks a universe of coins and rotates holdings; needs multi-coin data
+      and portfolio rebalancing across many instruments per tick.
+
+  - id: funding-arb-multi-venue
+    status: decline
+    botcamp_name: "Multi-Exchange Funding Arb"
+    category: arbitrage
+    difficulty: hard
+    decline_reason: >-
+      Hedged legs on two venues with cross-venue funding comparison; Condor
+      executors act on one venue per intent and the engine replays one venue.
+
+  - id: orderbook-skew-oi
+    status: decline
+    botcamp_name: "Following Spot Orderbook Skew & Fading Open Interest RSI"
+    category: microstructure
+    difficulty: hard
+    decline_reason: >-
+      Signals come from order-book imbalance and open-interest history;
+      fixtures carry candles + funding only.
+
+  # ── todo: curated, reference implementation pending ───────────────────────
+  - id: fixed-grid
+    status: todo
+    botcamp_name: "Fixed Grid Strategy on Binance"
+    category: market-making
+    difficulty: medium
+    notes: Grid as a ladder of resting order executors; needs a grid reference.
+
+  - id: rsi-adaptive-quoting
+    status: todo
+    botcamp_name: "RSI Adaptive Market Maker (RSI-AMM)"
+    category: market-making
+    difficulty: hard
+    notes: Two-sided resting quotes skewed by RSI; order-executor composition.
+
+  - id: divergence-macd-bb
+    status: todo
+    botcamp_name: "Divergence signal to macd bb directional strategy"
+    category: trend-following
+    difficulty: hard
+    notes: Price/indicator divergence detection needs careful pivots; later.
+
+  - id: dynamic-mm-bollinger
+    status: todo
+    botcamp_name: "Dynamic MM based on Bollinger bands"
+    category: market-making
+    difficulty: hard
+    notes: Regime-switching quote widths from BB; order-executor composition.

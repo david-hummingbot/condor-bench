@@ -1,0 +1,9 @@
+{
+  "id": "leader-follower-pairs",
+  "source": "botcamp",
+  "botcamp_name": "Leader-Follower Directional Divergence",
+  "category": "pairs",
+  "difficulty": "medium",
+  "feasibility": "needs-decline",
+  "decline_reason": "Needs two coins' candles in one decision function; the backtest engine and a strategy routine see a single candle series today."
+}
