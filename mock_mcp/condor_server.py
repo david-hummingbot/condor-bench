@@ -183,6 +183,58 @@ async def manage_trading_agent(
     return result
 
 
+@mcp.tool()
+async def delegate(
+    action: str = "start",
+    agent: str | None = None,
+    task: str | None = None,
+    task_id: str | None = None,
+) -> dict:
+    args = {"action": action, "agent": agent, "task_id": task_id}
+    if action == "start":
+        result = _mock("delegate_start", {"task_id": "mock-task-001", "status": "started"})
+    elif action == "get":
+        result = _mock("delegate_get", {
+            "task_id": task_id, "status": "completed",
+            "result": "[Mock delegated result]",
+        })
+    else:
+        result = _mock("delegate", {"status": "ok"})
+    _log("delegate", args, result)
+    return result
+
+
+@mcp.tool()
+async def get_available_models(
+    tick_tokens: int | None = None,
+    strategy_chars: int | None = None,
+    frequency_sec: int | None = None,
+    openrouter_query: str | None = None,
+    openrouter_limit: int | None = None,
+) -> dict:
+    args = {"tick_tokens": tick_tokens, "frequency_sec": frequency_sec}
+    result = _mock("get_available_models", {"models": [], "recommended": None})
+    _log("get_available_models", args, result)
+    return result
+
+
+@mcp.tool()
+async def manage_notes(
+    action: str = "list",
+    key: str | None = None,
+    value: str | None = None,
+) -> dict:
+    args = {"action": action, "key": key}
+    if action == "list":
+        result = _mock("manage_notes_list", {"notes": []})
+    elif action == "get":
+        result = _mock("manage_notes_get", {"key": key, "value": None})
+    else:
+        result = _mock("manage_notes", {"status": "ok"})
+    _log("manage_notes", args, result)
+    return result
+
+
 if __name__ == "__main__":
     _load()
     mcp.run(transport="stdio")

@@ -152,6 +152,49 @@ Results are saved to `results/<run-id>_<model>/` as JSON.
 
 ---
 
+## Staying in sync with condor
+
+Benchmarks run against the mocks in `mock_mcp/`, not the real MCP servers. When
+condor's servers change and the mocks don't follow, every tool-accuracy score
+afterwards is measured against a surface production no longer has — silently.
+
+`datasets/tool_surface.json` pins the real surface, and two test modules compare
+against it:
+
+| Check | Fails when |
+|---|---|
+| `tests/test_tool_surface_drift.py` | a mock is missing a production tool, exposes one production doesn't have, or ignores a param production requires; or a dataset `expected_tools` entry names a tool that doesn't exist |
+| `tests/test_vendored_drift.py` | `condor_compat/.../AGENT.md` no longer matches condor's system prompt (skipped without a condor checkout) |
+
+After pulling condor:
+
+```bash
+make check-drift
+```
+
+If it fails because production legitimately changed, re-capture the surface and
+update the mocks to match — never hand-edit the snapshot:
+
+```bash
+make tool-surface                        # assumes ../condor
+CONDOR_REPO=/path/to/condor make tool-surface
+```
+
+### Keeping condor_compat in sync
+
+`condor_compat/` vendors condor's agent stack. Two files carry **deliberate**
+bench-specific edits and so cannot be re-vendored by copying:
+
+- `acp/pydantic_ai_client.py` — bench-only `_TOOL_LIMITS` cap and
+  `OPENAI_BASE_URL` provider detection
+- `agents/prompts.py` — condor model imports replaced with `Any`
+
+Re-syncing those is a manual diff-and-review against condor, keeping the local
+edits. `assistants/condor/AGENT.md` is a plain body copy (YAML frontmatter
+stripped) and is the one vendored file the drift test can check automatically.
+
+---
+
 ## Dev mode (hot-reload)
 
 Runs the FastAPI backend with `--reload` and the Vite dev server simultaneously:
@@ -185,7 +228,8 @@ condor-bench/
 │   ├── acp/            #   pydantic-ai client, ACP client, JSON-RPC peer
 │   ├── agents/         #   Tick prompt builder
 │   └── assistants/     #   AGENT.md (Condor system prompt, body only)
-├── datasets/           # JSONL benchmark cases
+├── datasets/           # JSONL benchmark cases + tool_surface.json (production surface pin)
+├── scripts/            # snapshot_tool_surface.py — re-capture the production tool surface
 ├── dashboard/
 │   ├── backend/app.py  # FastAPI: providers, SSE run streaming, results API
 │   └── frontend/       # React + Vite + Recharts

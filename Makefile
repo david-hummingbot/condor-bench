@@ -1,9 +1,21 @@
-.PHONY: install baseline test report dashboard dashboard-dev clean
+.PHONY: install baseline test report dashboard dashboard-dev clean tool-surface check-drift
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
 install:
 	uv sync
+
+# ── Keeping the mocks honest ───────────────────────────────────────────────────
+
+# Re-capture the production MCP tool surface from the real condor servers.
+# Run after pulling condor; commit the resulting datasets/tool_surface.json.
+# Usage: make tool-surface [CONDOR_REPO=/path/to/condor]
+tool-surface:
+	uv run python scripts/snapshot_tool_surface.py
+
+# Fail if the mocks or the vendored system prompt have drifted from condor.
+check-drift:
+	uv run pytest tests/test_tool_surface_drift.py tests/test_vendored_drift.py -q
 
 # ── Workflow ───────────────────────────────────────────────────────────────────
 
