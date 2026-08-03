@@ -42,11 +42,16 @@ def _mock(tool: str, default: dict) -> dict:
 @mcp.tool()
 async def get_market_data(
     connector_name: str = "binance",
+    data_type: str = "prices",
     trading_pair: str = "BTC-USDT",
+    trading_pairs: list[str] | None = None,
     interval: str = "1m",
-    max_records: int = 100,
+    days: int = 1,
+    is_buy: bool | None = None,
+    query_type: str | None = None,
+    query_value: float | None = None,
 ) -> dict:
-    args = {"connector_name": connector_name, "trading_pair": trading_pair}
+    args = {"connector_name": connector_name, "data_type": data_type, "trading_pair": trading_pair}
     result = _mock("get_market_data", {
         "mid_price": 65000.0,
         "best_bid": 64990.0,
@@ -101,8 +106,21 @@ async def get_portfolio_overview(connector_name: str | None = None) -> dict:
 
 
 @mcp.tool()
-async def search_history(query: str = "", limit: int = 10) -> dict:
-    args = {"query": query, "limit": limit}
+async def search_history(
+    data_type: str = "orders",
+    account_names: list[str] | None = None,
+    connector_names: list[str] | None = None,
+    trading_pairs: list[str] | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    status: str | None = None,
+    network: str | None = None,
+    wallet_address: str | None = None,
+    position_addresses: list[str] | None = None,
+    limit: int = 10,
+    offset: int = 0,
+) -> dict:
+    args = {"data_type": data_type, "limit": limit}
     result = _mock("search_history", {"results": [], "total": 0})
     _log("search_history", args, result)
     return result
@@ -155,30 +173,71 @@ async def manage_controllers(
 
 
 @mcp.tool()
-async def place_order(
-    connector_name: str,
-    trading_pair: str,
-    order_type: str = "market",
-    side: str = "buy",
-    amount: float = 0.01,
-    price: float | None = None,
+async def set_account_position_mode_and_leverage(
+    account_name: str = "master_account",
+    connector_name: str = "binance_perpetual",
+    trading_pair: str | None = None,
+    position_mode: str = "ONEWAY",
+    leverage: int = 1,
 ) -> dict:
-    args = {"connector_name": connector_name, "trading_pair": trading_pair, "side": side, "amount": amount}
-    result = _mock("place_order", {"order_id": "mock-order-001", "status": "submitted"})
-    _log("place_order", args, result)
+    args = {
+        "account_name": account_name,
+        "connector_name": connector_name,
+        "trading_pair": trading_pair,
+        "leverage": leverage,
+    }
+    result = _mock("set_account_position_mode_and_leverage", {"status": "ok"})
+    _log("set_account_position_mode_and_leverage", args, result)
     return result
 
 
 @mcp.tool()
-async def set_account_position_mode_and_leverage(
-    connector_name: str,
-    trading_pair: str,
-    position_mode: str = "ONEWAY",
-    leverage: int = 1,
+async def configure_server(
+    name: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    username: str | None = None,
+    password: str | None = None,
 ) -> dict:
-    args = {"connector_name": connector_name, "trading_pair": trading_pair, "leverage": leverage}
-    result = _mock("set_account_position_mode_and_leverage", {"status": "ok"})
-    _log("set_account_position_mode_and_leverage", args, result)
+    args = {"name": name, "host": host, "port": port}
+    result = _mock("configure_server", {
+        "name": name or "mock", "host": host or "localhost", "port": port or 8000,
+        "status": "connected",
+    })
+    _log("configure_server", args, result)
+    return result
+
+
+@mcp.tool()
+async def run_backtest(
+    config_name: str = "mock-config",
+    start_time: int = 0,
+    end_time: int = 0,
+    backtesting_resolution: str = "1m",
+    trade_cost: float = 0.0006,
+) -> dict:
+    args = {"config_name": config_name, "start_time": start_time, "end_time": end_time}
+    result = _mock("run_backtest", {
+        "task_id": "mock-backtest-001",
+        "status": "queued",
+    })
+    _log("run_backtest", args, result)
+    return result
+
+
+@mcp.tool()
+async def manage_backtest_tasks(
+    action: str = "list",
+    task_id: str | None = None,
+    config_name: str | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    backtesting_resolution: str | None = None,
+    trade_cost: float | None = None,
+) -> dict:
+    args = {"action": action, "task_id": task_id}
+    result = _mock("manage_backtest_tasks", {"tasks": [], "status": "ok"})
+    _log("manage_backtest_tasks", args, result)
     return result
 
 
