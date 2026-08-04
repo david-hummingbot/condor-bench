@@ -105,29 +105,126 @@ def test_mock_accepts_every_required_production_param(server):
     )
 
 
-def test_dataset_expected_tools_exist_in_production():
-    """Every expected_tools entry must name a tool production actually has."""
-    snapshot = _snapshot()
-    known = {
-        tool
-        for server in snapshot["servers"].values()
-        for tool in server["tools"]
-    }
+DATASET_FILES = ("consult.jsonl", "tick.jsonl", "tools.jsonl", "agents.jsonl")
 
-    unknown: dict[str, list[str]] = {}
-    for name in ("consult.jsonl", "tick.jsonl"):
+
+def _dataset_records() -> list[tuple[str, dict]]:
+    """Every dataset record, tagged with a "file:lineno" label for error messages."""
+    records = []
+    for name in DATASET_FILES:
         path = ROOT / "datasets" / name
         if not path.exists():
             continue
         for lineno, line in enumerate(path.read_text().splitlines(), 1):
             line = line.strip()
-            if not line:
-                continue
-            for tool in json.loads(line).get("expected_tools") or []:
-                if tool not in known:
-                    unknown.setdefault(f"{name}:{lineno}", []).append(tool)
+            if line:
+                records.append((f"{name}:{lineno}", json.loads(line)))
+    return records
+
+
+def _known_tools() -> dict[str, dict]:
+    """tool name -> production spec, across both servers."""
+    return {
+        tool: spec
+        for server in _snapshot()["servers"].values()
+        for tool, spec in server["tools"].items()
+    }
+
+
+def test_dataset_expected_tools_exist_in_production():
+    """Every expected_tools entry must name a tool production actually has."""
+    known = _known_tools()
+
+    unknown: dict[str, list[str]] = {}
+    for label, data in _dataset_records():
+        expected = list(data.get("expected_tools") or [])
+        expected += list(data.get("expected_tool_calls") or [])
+        expected += list(data.get("expected_no_calls") or [])
+        # A tool case names its subject directly, so that field is ground truth too.
+        if data.get("tool"):
+            expected.append(data["tool"])
+        for tool in expected:
+            if tool not in known:
+                unknown.setdefault(label, []).append(tool)
 
     assert not unknown, (
         f"datasets reference tools production does not expose: {unknown}. "
         "Scoring against these can never be satisfied by a correct model."
     )
+
+
+def test_dataset_expected_params_exist_in_production():
+    """Pinned params must be real parameters of the tool they're pinned on.
+
+    A typo here is invisible without this check: ``metrics/tool_params`` looks the
+    key up in the call's arguments, never finds it, and scores every model 0 on a
+    case no model can pass.
+    """
+    known = _known_tools()
+
+    bad: dict[str, list[str]] = {}
+    for label, data in _dataset_records():
+        for tool, params in (data.get("expected_tool_params") or {}).items():
+            spec = known.get(tool)
+            if spec is None:
+                bad.setdefault(label, []).append(f"{tool} (unknown tool)")
+                continue
+            for key in params:
+                if key not in spec["params"]:
+                    bad.setdefault(label, []).append(f"{tool}.{key}")
+
+    assert not bad, (
+        f"datasets pin parameters production's tools do not accept: {bad}. "
+        f"{REFRESH_HINT}"
+    )
+
+
+def test_every_production_tool_has_a_tool_case():
+    """datasets/tools.jsonl must cover the whole MCP surface.
+
+    Layer 2 exists to answer "which model size can call *this* tool correctly".
+    An uncovered tool is a hole in the routing matrix that reads as "no data"
+    rather than as a gap someone chose.
+    """
+    path = ROOT / "datasets" / "tools.jsonl"
+    if not path.exists():
+        pytest.skip("datasets/tools.jsonl missing")
+
+    covered = {
+        json.loads(line)["tool"]
+        for line in path.read_text().splitlines()
+        if line.strip()
+    }
+    missing = set(_known_tools()) - covered
+    assert not missing, (
+        f"no per-tool benchmark case for: {sorted(missing)}. Add one to "
+        "datasets/tools.jsonl, or the matrix silently has no verdict for it."
+    )
+
+
+def test_agent_scoped_cases_declare_a_slug():
+    """Tick and agent cases must resolve to an agent_slug (or explicit null).
+
+    Layer 3 and tick cases act *as* an agent. A missing slug sends condor's
+    memory/skill/journal tools at the chat's stores instead, and the case fails
+    for a harness reason that looks exactly like a model limitation.
+    """
+    from bench.dataset import load_agent_cases, load_tick_cases
+
+    missing = [c.id for c in load_tick_cases() if not c.agent_slug]
+    assert not missing, f"tick cases without an agent_slug: {missing}"
+
+    # For agent cases an explicit null is legitimate (chat-scoped, like a
+    # production consult), so check the raw JSON has the key rather than a value.
+    path = ROOT / "datasets" / "agents.jsonl"
+    if path.exists():
+        undeclared = [
+            json.loads(line)["id"]
+            for line in path.read_text().splitlines()
+            if line.strip() and "agent_slug" not in json.loads(line)
+        ]
+        assert not undeclared, (
+            f"agent cases that don't declare agent_slug (use null for chat-scoped): "
+            f"{undeclared}"
+        )
+    assert load_agent_cases() is not None

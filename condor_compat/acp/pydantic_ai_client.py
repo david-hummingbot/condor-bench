@@ -17,6 +17,10 @@ Bench-specific additions (not in condor):
   3. _is_tool_call_error / _prompt_no_tools: no-tools fallback when a model with
      declared tool support still fails (e.g. 20-schema payload overwhelms the model).
   4. _plain_messages: parallel message history used by the no-tools fallback.
+  5. Per-server `cwd` in an MCP config dict. Live mode launches condor's real
+     servers with `uv run python -m mcp_servers.…`, which only resolves inside the
+     condor project — and bench's own cwd is a different project. condor doesn't
+     need this because its process is already there.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from .client import (
     TextChunk,
     ToolCallEvent,
     ToolCallUpdate,
+    UsageEvent,
 )
 
 log = logging.getLogger(__name__)
@@ -144,6 +149,65 @@ def is_pydantic_ai_model(agent_key: str) -> bool:
     """Check if an agent_key should use the PydanticAI client."""
     prefix = agent_key.split(":", 1)[0] if ":" in agent_key else ""
     return prefix in PYDANTIC_AI_PREFIXES
+
+
+def model_prefix(agent_key: str) -> str:
+    """Provider prefix of an agent key, with any endpoint name stripped.
+
+    Custom endpoints carry their saved nickname in the prefix
+    (``custom@venice:llama-3.3-70b``) so that the model id — which may itself
+    contain colons and slashes — stays recoverable with a single partition.
+    """
+    prefix = agent_key.split(":", 1)[0] if ":" in agent_key else ""
+    return prefix.split("@", 1)[0]
+
+
+_PRICED_PREFIXES = frozenset({"openai", "anthropic", "groq", "google", "openrouter"})
+
+
+def estimate_cost_usd(model_name: str, usage: dict[str, int]) -> float | None:
+    """Best-effort USD cost for a token usage dict, or ``None`` if unknown.
+
+    Uses the ``genai-prices`` dataset that ships with pydantic-ai (offline
+    snapshot, no network call). Returns ``None`` — never ``0.0`` — for local
+    backends, custom endpoints and any model missing from the dataset, so an
+    unpriced Ollama run is never mistaken for a free one when the matrix
+    aggregates cost per domain.
+    """
+    prefix = model_prefix(model_name)
+    if prefix:
+        if prefix not in _PRICED_PREFIXES:
+            return None
+        model_ref = model_name.split(":", 1)[1]
+    else:
+        # No provider prefix means a resolved model id an agent reported for
+        # itself (e.g. "gemini-2.5-pro" from the Gemini CLI's response, where the
+        # configured agent_key is just "gemini"). Let the dataset find its
+        # provider. Unpriced backends always carry a prefix ("ollama:",
+        # "custom@…"), so a bare id here is never one of those.
+        model_ref = model_name
+    try:
+        from genai_prices import Usage, calc_price
+
+        calc = calc_price(
+            Usage(
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                cache_read_tokens=usage.get("cache_read_tokens", 0),
+                cache_write_tokens=usage.get("cache_write_tokens", 0),
+            ),
+            model_ref,
+            # Name the provider when we know it: OpenRouter prices
+            # vendor-qualified refs ("openai/gpt-4.1") that no other provider can
+            # resolve, and its rates — not the upstream vendor's — are what the
+            # user is billed. None lets the dataset search for a bare id.
+            provider_id=prefix or None,
+        )
+        return float(calc.total_price)
+    except Exception as e:
+        # Unknown model ids are the common case here, not a bug worth a traceback.
+        log.debug("No price data for %s: %s", model_name, e)
+        return None
 
 
 def resolve_base_url(model_name: str, base_url: str | None = None) -> str | None:
@@ -335,6 +399,11 @@ class PydanticAIClient:
         self._message_history: list = []
         # Parallel plain-text history for the no-tools fallback path.
         self._plain_messages: list[dict] = []
+        # Session-cumulative token usage, so the UsageEvent we emit matches
+        # ACPClient's semantics (see UsageEvent). pydantic-ai reports usage per
+        # run, so each run's counts are folded in here rather than replacing it —
+        # a multi-turn case's usage is the total across its turns.
+        self._session_usage: dict[str, int] = {}
 
     def _build_model(self) -> Any:
         """Build the pydantic-ai model object with sensible defaults.
@@ -513,15 +582,29 @@ class PydanticAIClient:
             command = srv_config["command"]
             args = srv_config.get("args", [])
 
-            env = dict(self.extra_env or {})
+            # Inherit the parent process env (same as condor and ACPClient) so
+            # cloud keys loaded via dotenv reach MCP tools like
+            # get_available_models — and so a `uv`-launched live server still has
+            # a PATH and a HOME to find the project with. extra_env / per-server
+            # env overlay on top.
+            env = dict(os.environ)
+            if self.extra_env:
+                env.update(self.extra_env)
             for env_entry in srv_config.get("env", []):
                 if isinstance(env_entry, dict):
                     env[env_entry["name"]] = env_entry["value"]
 
+            # Bench-only: live mode launches condor's servers as
+            # `uv run python -m mcp_servers.…`, which resolves the project from
+            # cwd. condor's own process is already in that directory; bench's is
+            # not, so the config carries it explicitly.
+            cwd = srv_config.get("cwd")
+
             mcp_server = MCPServerStdio(
                 command,
                 args=args,
-                env=env if env else None,
+                env=env,
+                cwd=cwd,
                 timeout=30,
             )
 
@@ -685,6 +768,7 @@ class PydanticAIClient:
         # run in parallel; nullcontext() makes the guard a no-op for them.
         async with self._request_semaphore or contextlib.nullcontext():
             start_time = time.monotonic()
+            usage_event: UsageEvent | None = None
 
             try:
                 from pydantic_ai.agent import CallToolsNode, ModelRequestNode
@@ -784,6 +868,10 @@ class PydanticAIClient:
                     if run.result is not None:
                         self._message_history.extend(run.result.new_messages())
 
+                    usage_event = self._fold_run_usage(run)
+
+                if usage_event is not None:
+                    yield usage_event
                 yield PromptDone(stop_reason="end_turn")
 
             except asyncio.TimeoutError:
@@ -810,6 +898,53 @@ class PydanticAIClient:
                 log.exception("PydanticAI prompt error: %s", e)
                 yield TextChunk(text=self._format_error(e))
                 yield PromptDone(stop_reason="error")
+
+    def _fold_run_usage(self, run: Any) -> UsageEvent | None:
+        """Add this run's token usage to the session total and return an event.
+
+        pydantic-ai reports usage per run, while :class:`UsageEvent` is defined as
+        session-cumulative (matching what the ACP bridge sends), so each run's
+        counts are added into ``_session_usage`` and the running total is emitted.
+        Returns ``None`` when the provider reported no usage at all — some
+        OpenAI-compatible servers (and some Ollama builds) omit the ``usage``
+        block entirely, and a zeroed row would read as a free model rather than an
+        unmeasured one.
+        """
+        try:
+            usage = run.usage()
+        except Exception:
+            log.debug("PydanticAI run reported no usage", exc_info=True)
+            return None
+        if usage is None:
+            return None
+
+        fields = (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+        )
+        run_totals = {f: int(getattr(usage, f, 0) or 0) for f in fields}
+        if not any(run_totals.values()):
+            return None
+        for field_name, value in run_totals.items():
+            self._session_usage[field_name] = (
+                self._session_usage.get(field_name, 0) + value
+            )
+
+        totals = dict(self._session_usage)
+        return UsageEvent(
+            **totals,
+            # NOT the sum of the four fields. pydantic-ai normalises provider usage
+            # through genai-prices, whose convention nests cached tokens INSIDE
+            # input_tokens — hence its own `total_tokens` is input + output. Summing
+            # all four would bill the cached prefix twice, which on a case that
+            # re-sends a large stable prompt every turn inflates the total by ~40%.
+            # (The ACP bridge is the opposite: its four fields are disjoint and it
+            # sends its own totalTokens, which we take as given.)
+            total_tokens=totals.get("input_tokens", 0) + totals.get("output_tokens", 0),
+            cost_usd=estimate_cost_usd(self.model_name, totals),
+        )
 
     @staticmethod
     def _is_tool_call_error(e: Exception) -> bool:

@@ -18,12 +18,99 @@ MOCK_MCP_SCRIPT = ROOT / "mock_mcp" / "server.py"
 BASELINE_MODEL = os.environ.get("BENCH_BASELINE_MODEL", "anthropic:claude-sonnet-4-6")
 JUDGE_MODEL = os.environ.get("BENCH_JUDGE_MODEL", "claude-sonnet-4-6")
 
-# Composite score weights
-SCORE_WEIGHTS = {
+
+# ── Execution mode ─────────────────────────────────────────────────────────────
+# "live" runs against a staging hummingbot-api through condor's real MCP servers;
+# "mock" runs the offline mock_mcp/ servers (CI, drift checks, no staging).
+def bench_mode() -> str:
+    """Resolved execution mode. Read per call so tests/dashboard can override."""
+    mode = (os.environ.get("BENCH_MODE") or "mock").strip().lower()
+    return mode if mode in ("live", "mock") else "mock"
+
+
+def condor_path() -> Path | None:
+    """Path to the condor checkout that provides the production MCP wiring.
+
+    Falls back to a sibling ../condor checkout, which is how the repos are laid
+    out in development. Returns None when neither resolves to a real checkout,
+    so live mode can fail with a clear message instead of an ImportError.
+    """
+    raw = os.environ.get("CONDOR_PATH") or os.environ.get("CONDOR_REPO")
+    candidate = Path(raw).expanduser() if raw else ROOT.parent / "condor"
+    return candidate.resolve() if (candidate / "mcp_servers").is_dir() else None
+
+
+# ── Staging environment (live mode) ────────────────────────────────────────────
+def staging_config() -> dict[str, object]:
+    """Staging identifiers for live runs, read fresh from the environment."""
+    return {
+        "api_url": (os.environ.get("HUMMINGBOT_API_URL") or "").rstrip("/"),
+        # Alias used by the fail-closed check. Defaults to HUMMINGBOT_API_URL so a
+        # single-var setup still gets the guard; setting both to different values
+        # is a configuration error the health check reports.
+        "expected_api_url": (
+            os.environ.get("BENCH_EXPECTED_API_URL")
+            or os.environ.get("HUMMINGBOT_API_URL")
+            or ""
+        ).rstrip("/"),
+        "username": os.environ.get("HUMMINGBOT_USERNAME", ""),
+        "password": os.environ.get("HUMMINGBOT_PASSWORD", ""),
+        "server_name": os.environ.get("BENCH_SERVER_NAME", "bench_staging"),
+        "chat_id": int(os.environ.get("BENCH_CHAT_ID", "999001")),
+        "user_id": int(os.environ.get("BENCH_USER_ID", "999001")),
+        "account": os.environ.get("BENCH_STAGING_ACCOUNT", "bench_paper"),
+        "allow_mutating": _env_flag("BENCH_ALLOW_MUTATING", False),
+    }
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# ── Composite score weights ────────────────────────────────────────────────────
+# Mock mode: the historical weights. Tool params and live validity can't be
+# judged against canned responses, so they carry no weight here.
+SCORE_WEIGHTS_MOCK = {
     "answer_quality": 0.50,
     "tool_accuracy": 0.30,
+    "tool_params": 0.00,
+    "live_validity": 0.00,
     "latency_score": 0.20,
 }
 
+# Live mode: real API responses make param correctness and response shape
+# meaningful, so tool-name F1 gives up weight to them.
+SCORE_WEIGHTS_LIVE = {
+    "answer_quality": 0.45,
+    "tool_accuracy": 0.20,
+    "tool_params": 0.15,
+    "live_validity": 0.10,
+    "latency_score": 0.10,
+}
+
+# Backwards-compatible alias: existing callers (and tests) that import
+# SCORE_WEIGHTS get the mock profile, which is what they were written against.
+SCORE_WEIGHTS = SCORE_WEIGHTS_MOCK
+
+
+def score_weights(mode: str | None = None) -> dict[str, float]:
+    """Weight profile for a mode. Unknown modes fall back to mock."""
+    return SCORE_WEIGHTS_LIVE if (mode or bench_mode()) == "live" else SCORE_WEIGHTS_MOCK
+
+
 # Latency floor: even the slowest model gets at least this score
 LATENCY_FLOOR = 0.1
+
+# A case passes when its composite reaches this. Also the per-case bar the
+# matrix uses to compute domain pass rates.
+PASS_THRESHOLD = 0.70
+
+# A model "passes a domain" at this pass rate (see bench/routing.py).
+DOMAIN_PASS_RATE = 0.80
+
+# Destructive cases get a higher floor: a model that passes a domain on average
+# but botches an irreversible action is not a routing candidate.
+DESTRUCTIVE_FLOOR = 0.70

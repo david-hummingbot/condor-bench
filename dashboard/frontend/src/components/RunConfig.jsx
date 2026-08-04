@@ -1,22 +1,36 @@
 import { useState, useEffect } from 'react'
-import { getProviders, getProviderModels, createRun } from '../api.js'
+import { getProviders, getProviderModels, createRun, getDatasets } from '../api.js'
+import StagingStatus from './StagingStatus.jsx'
 
-const CASE_FILTER_OPTS = [
-  { id: 'all', label: 'All cases' },
-  { id: 'consult', label: 'Consult only' },
-  { id: 'tick', label: 'Tick only' },
-  { id: 'strategy-creation', label: 'Strategy creation' },
-  { id: 'routine-builder', label: 'Routine builder' },
+const LAYER_OPTS = [
+  { id: 'consult', label: 'Consult', hint: 'Layer 1 — end-to-end advisory + strategy creation' },
+  { id: 'tick', label: 'Tick', hint: 'Layer 1 — simulated agent ticks, agent-scoped' },
+  { id: 'tool', label: 'Tools', hint: 'Layer 2 — one case per MCP tool' },
+  { id: 'agent', label: 'Agents', hint: 'Layer 3 — routed to a specific Condor assistant' },
 ]
 
-export default function RunConfig({ onRunStarted, isRunning }) {
+const MODE_OPTS = [
+  { id: '', label: 'Use configured' },
+  { id: 'mock', label: 'Mock' },
+  { id: 'live', label: 'Live' },
+]
+
+export default function RunConfig({ onRunStarted, isRunning, config }) {
   const [providers, setProviders] = useState([])
   // cfg: { [providerId]: { enabled, apiKey, baseUrl, loadedModels, selectedModel, loading, error } }
   const [cfg, setCfg] = useState({})
-  const [caseFilter, setCaseFilter] = useState('all')
+  const [layers, setLayers] = useState([])   // empty = all layers
+  const [domain, setDomain] = useState('')
   const [category, setCategory] = useState('')
+  const [mode, setMode] = useState('')
+  const [datasets, setDatasets] = useState(null)
+  const [staging, setStaging] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
+
+  useEffect(() => {
+    getDatasets().then(setDatasets).catch(() => {})
+  }, [])
 
   useEffect(() => {
     getProviders()
@@ -86,6 +100,9 @@ export default function RunConfig({ onRunStarted, isRunning }) {
     return out
   }
 
+  const toggleLayer = (id) =>
+    setLayers(prev => (prev.includes(id) ? prev.filter(l => l !== id) : [...prev, id]))
+
   const handleStart = async () => {
     const models = enabledModels()
     if (!models.length) return
@@ -94,9 +111,10 @@ export default function RunConfig({ onRunStarted, isRunning }) {
     try {
       const body = {
         models,
-        consult_only: caseFilter === 'consult' || caseFilter === 'strategy-creation' || caseFilter === 'routine-builder',
-        tick_only: caseFilter === 'tick',
-        category: ['strategy-creation', 'routine-builder'].includes(caseFilter) ? caseFilter : category.trim() || null,
+        layers: layers.length ? layers : null,
+        domain: domain || null,
+        category: category.trim() || null,
+        mode: mode || null,
       }
       const data = await createRun(body)
       onRunStarted(data.run_id)
@@ -108,6 +126,26 @@ export default function RunConfig({ onRunStarted, isRunning }) {
   }
 
   const modelCount = enabledModels().length
+  const effectiveMode = mode || config?.mode || 'mock'
+  const stagingBlocked =
+    effectiveMode === 'live' &&
+    staging?.mode === 'live' &&
+    (staging.checks || []).some(c => c.blocking && !c.ok && !c.mutating_only)
+
+  // Case count for the current filters, so "start" isn't a guess about scope.
+  const selectedCases = (() => {
+    if (!datasets) return null
+    if (!layers.length && !domain) return datasets.total
+    let n = 0
+    for (const [d, count] of Object.entries(datasets.domains || {})) {
+      if (domain && d !== domain) continue
+      n += count
+    }
+    if (!domain) {
+      n = layers.reduce((acc, l) => acc + (datasets.layers?.[l] || 0), 0)
+    }
+    return n
+  })()
 
   const groups = [
     { label: 'CLI Agents', kinds: ['agent'] },
@@ -119,6 +157,17 @@ export default function RunConfig({ onRunStarted, isRunning }) {
     <div>
       <div className="section-header" style={{ marginBottom: 20 }}>
         <span className="section-title">Configure Benchmark</span>
+        {datasets && (
+          <span style={{ color: 'var(--muted)', fontSize: 13 }}>
+            {datasets.total} cases · {datasets.agent_scoped} agent-scoped
+          </span>
+        )}
+      </div>
+
+      {/* Shown above the model picker on purpose: which API the run will hit
+          matters more than which model runs against it. */}
+      <div style={{ marginBottom: 16 }}>
+        <StagingStatus compact onReport={setStaging} />
       </div>
 
       {groups.map(g => {
@@ -280,20 +329,66 @@ export default function RunConfig({ onRunStarted, isRunning }) {
 
       <div className="card">
         <div className="card-title">Options</div>
+
         <div className="field" style={{ marginBottom: 14 }}>
-          <label>Case filter</label>
+          <label>Execution mode</label>
           <div className="radio-group">
-            {CASE_FILTER_OPTS.map(o => (
+            {MODE_OPTS.map(o => (
               <button
                 key={o.id}
-                className={`radio-btn ${caseFilter === o.id ? 'active' : ''}`}
-                onClick={() => setCaseFilter(o.id)}
+                className={`radio-btn ${mode === o.id ? 'active' : ''}`}
+                onClick={() => setMode(o.id)}
               >
                 {o.label}
+                {o.id === '' && config?.mode ? ` (${config.mode})` : ''}
+              </button>
+            ))}
+          </div>
+          {effectiveMode === 'live' && !staging?.allow_mutating && (
+            <span className="run-meta">
+              BENCH_ALLOW_MUTATING is off, so mutating and destructive cases are skipped —
+              that changes which domains end up with enough evidence to earn a routing
+              recommendation.
+            </span>
+          )}
+        </div>
+
+        <div className="field" style={{ marginBottom: 14 }}>
+          <label>Dataset layers {layers.length === 0 && <span className="run-meta">(all)</span>}</label>
+          <div className="radio-group">
+            {LAYER_OPTS.map(o => (
+              <button
+                key={o.id}
+                className={`radio-btn ${layers.includes(o.id) ? 'active' : ''}`}
+                onClick={() => toggleLayer(o.id)}
+                title={o.hint}
+              >
+                {o.label}
+                {datasets?.layers?.[o.id] != null && (
+                  <span className="radio-count">{datasets.layers[o.id]}</span>
+                )}
               </button>
             ))}
           </div>
         </div>
+
+        <div className="field" style={{ marginBottom: 14 }}>
+          <label>Routing domain (optional)</label>
+          <select
+            className="select"
+            value={domain}
+            onChange={e => setDomain(e.target.value)}
+            style={{ maxWidth: 320 }}
+          >
+            <option value="">All domains</option>
+            {(datasets?.routing_domains || []).map(d => (
+              <option key={d} value={d}>
+                {d} ({datasets.domains?.[d] ?? 0})
+              </option>
+            ))}
+          </select>
+        </div>
+
         <div className="field">
           <label>Category filter (optional)</label>
           <input
@@ -303,7 +398,11 @@ export default function RunConfig({ onRunStarted, isRunning }) {
             value={category}
             onChange={e => setCategory(e.target.value)}
             style={{ maxWidth: 320 }}
+            list="bench-categories"
           />
+          <datalist id="bench-categories">
+            {(datasets?.categories || []).map(c => <option key={c} value={c} />)}
+          </datalist>
         </div>
       </div>
 
@@ -311,7 +410,18 @@ export default function RunConfig({ onRunStarted, isRunning }) {
         <div className="run-summary-info">
           {modelCount === 0
             ? 'Select at least one model above'
-            : <><strong>{modelCount}</strong> model{modelCount !== 1 ? 's' : ''} selected</>}
+            : (
+              <>
+                <strong>{modelCount}</strong> model{modelCount !== 1 ? 's' : ''}
+                {selectedCases != null && <> × <strong>{selectedCases}</strong> case{selectedCases !== 1 ? 's' : ''}</>}
+                {' '}in <strong>{effectiveMode}</strong> mode
+              </>
+            )}
+          {stagingBlocked && (
+            <span className="error-text" style={{ marginLeft: 12 }}>
+              staging pre-flight is failing — a live run will refuse to start
+            </span>
+          )}
           {submitError && (
             <span className="error-text" style={{ marginLeft: 12 }}>{submitError}</span>
           )}
@@ -319,7 +429,7 @@ export default function RunConfig({ onRunStarted, isRunning }) {
         <button
           className="btn primary"
           onClick={handleStart}
-          disabled={modelCount === 0 || submitting || isRunning}
+          disabled={modelCount === 0 || submitting || isRunning || stagingBlocked}
         >
           {isRunning ? '⏳ Running…' : submitting ? 'Starting…' : '▶ Start Benchmark'}
         </button>

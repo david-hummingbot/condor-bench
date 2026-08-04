@@ -1,14 +1,25 @@
 # Expected Favorable Outcomes
 
-Guide to what a strong (pass-level) response looks like for each case in `consult.jsonl` and `tick.jsonl`.
+Guide to what a strong (pass-level) response looks like. Layer 1 cases
+(`consult.jsonl`, `tick.jsonl`) are written up individually below; Layers 2 and 3
+are covered by the conventions at the end, since a per-tool case is
+self-describing.
 
 **How scoring works**
-- **Quality** — Claude judge rates the written answer / multi-turn transcript (accuracy, completeness, safety, actionability). Fabricated tool results are penalized. There is no fixed gold text.
+- **Quality** — Claude judge rates the transcript (accuracy, completeness, safety, actionability). It is shown the tool log *including outputs*, so a figure lifted from a tool call is credited as grounded and one the model invented is penalised as fabrication. There is no fixed gold text.
 - **Tool accuracy** — F1 on tool *names* vs non-empty `expected_tools` / `expected_tool_calls`. Empty `[]` means no required tools (metric skipped; weight goes to quality). `expected_no_calls` hard-fails (0.0) if a forbidden tool was used.
-- **Composite** — 50% quality + 30% tools + 20% latency (when tools apply). Pass threshold: ≥ 0.70.
-- Provider infra errors (token/request limits) are marked `error: infra:…` and excluded from averages.
+- **Tool params** (live mode) — key-value subset match vs `expected_tool_params`. Tolerant about representation, strict about meaning.
+- **Live validity** (live mode) — did the calls actually return usable data. Errored or empty responses score 0.
+- **Composite** — mode-dependent; see the weight table in the README. Pass threshold: ≥ 0.70 in both modes.
+- Provider infra errors (token/request limits) are marked `error: infra:…` and excluded from averages. Rows tagged `harness_artifact` are excluded from the routing matrix.
 
 This file describes the *favorable decision and content*, not a verbatim script the model must match.
+
+**A mock-mode caveat worth knowing before reading a low quality score.** The mocks
+return a fixed payload per tool regardless of arguments, so a request for
+`ETH-USDT` comes back with BTC-shaped prices. A model that faithfully reports what
+it was handed then looks wrong to the judge. Compare models against each other in
+mock mode rather than against 1.0; live mode has no such artifact.
 
 ---
 
@@ -292,24 +303,79 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 
 ---
 
-## Quick reference — expected tools
+## Quick reference — Layer 1 expected tools
 
-| ID | Expected tools | Must not call |
-|----|----------------|---------------|
-| c001–c008, c010–c013, rb001 | _(none — advisory)_ | — |
-| c009 | `manage_executors` | — |
-| c014 | `get_market_data` | — |
-| c015 | `get_market_data`, `manage_executors` | — |
-| sc001 | `get_market_data`, `manage_executors` | — |
-| sc002 | `manage_executors` | — |
-| sc003 | `get_portfolio_overview`, `get_market_data`, `manage_executors` | — |
-| sc004 | `manage_bots`, `manage_controllers` | — |
-| rb002 | `manage_routines` | — |
-| rb003 | `manage_skill`, `manage_routines` | — |
-| rb004 | `manage_routines` | — |
-| t001 | `get_market_data`, `manage_executors`, `trading_agent_journal_write` | — |
-| t002 | `manage_executors`, `trading_agent_journal_write` | — |
-| t003 | `trading_agent_journal_write` | `manage_executors` |
-| t004 | `get_market_data`, `trading_agent_journal_write` | — |
-| t005 | `manage_executors`, `trading_agent_journal_write` | — |
-| t006 | `get_market_data` | `manage_executors` |
+`risk` gates whether a case runs at all in live mode: without
+`BENCH_ALLOW_MUTATING`, only `read_only` cases run. `slug` is the `agent_slug` the
+case is run under — blank means chat-scoped.
+
+| ID | Expected tools | Must not call | Risk | Slug |
+|----|----------------|---------------|------|------|
+| c001–c008, c010–c013, rb001 | _(none — advisory)_ | — | read_only | (rb001: `routine_builder`) |
+| c009 | `manage_executors` | — | read_only | — |
+| c014 | `get_market_data` | — | read_only | — |
+| c015 | `get_market_data`, `manage_executors` | — | read_only | — |
+| sc001 | `get_market_data`, `manage_executors` | — | destructive | — |
+| sc002 | `manage_executors` | — | destructive | — |
+| sc003 | `get_portfolio_overview`, `get_market_data`, `manage_executors` | — | destructive | — |
+| sc004 | `manage_bots`, `manage_controllers` | — | destructive | — |
+| rb002 | `manage_routines` | — | mutating | `routine_builder` |
+| rb003 | `manage_skill`, `manage_routines` | — | mutating | `routine_builder` |
+| rb004 | `manage_routines` | — | mutating | `routine_builder` |
+| t001 | `get_market_data`, `manage_executors`, `trading_agent_journal_write` | — | destructive | `bench_tick_normal` |
+| t002 | `manage_executors`, `trading_agent_journal_write` | — | destructive | `bench_tick_profit` |
+| t003 | `trading_agent_journal_write` | `manage_executors` | mutating | `bench_tick_risk_blocked` |
+| t004 | `get_market_data`, `trading_agent_journal_write` | — | mutating | `bench_tick_near_limit` |
+| t005 | `manage_executors`, `trading_agent_journal_write` | — | destructive | `bench_tick_error_recovery` |
+| t006 | `get_market_data` | `manage_executors` | read_only | `bench_tick_dry_run` |
+
+Risk taxonomy: `read_only` = no state change; `mutating` = condor-side state only
+(routines, skills, memory, journals); `destructive` = capital-affecting (executors,
+bots, controllers, leverage, strategy creation).
+
+---
+
+## Tool cases (`tools.jsonl`) — Layer 2
+
+One focused case per MCP tool, all 25 covered. These do not get individual
+write-ups because the case *is* the specification: a single tool, a question that
+determines its arguments, and `expected_tool_params` pinning the arguments a
+correct call must carry.
+
+**A favorable outcome is:**
+- exactly the named tool called, no exploratory detour through others;
+- the pinned parameters present and correct — this is where model size actually
+  shows, far more than tool selection does;
+- an answer that reports what the tool returned rather than restating the question
+  or inventing figures;
+- for cases with `expected_no_calls`, the forbidden tools genuinely not called. A
+  read-only question that ends in a `manage_executors` call is a hard fail no
+  matter how good the prose is.
+
+Cases pinning `risk_level: destructive` (`tool_manage_executors_002`,
+`tool_set_leverage_001`) also have to clear the 0.70 destructive floor before the
+model can be recommended for that domain.
+
+---
+
+## Agent cases (`agents.jsonl`) — Layer 3
+
+Cases routed to a specific Condor assistant, with that assistant's own prompt and
+its own stores. `agent_slug` is what makes the difference: `routine_builder`
+reaches `agents/routine_builder/`, `null` stays chat-scoped like a production
+consult.
+
+**A favorable outcome is:**
+- the assistant behaving as its own prompt directs, not as generic Condor. For
+  `agent_routine_builder_001` that means reading the `routine_cookbook` skill
+  *before* writing a routine, because that is what its AGENT.md tells it to do;
+- correct `manage_routines` / `manage_trading_agent` actions with the pinned name
+  or config;
+- for `agent_builder_001`, asking clarifying questions and calling **nothing** —
+  the phase is conversational by design, and a model that jumps straight to
+  creating a strategy has failed it.
+
+`agent_builder` cases carry `requires:assistants/agent_builder` in their tags.
+Until condor ships that assistant, they run against the generic Condor prompt,
+which is tagged `harness_artifact` and excluded from routing rather than counted
+as a model failure.

@@ -1,141 +1,233 @@
 # condor-bench
 
-LLM benchmarking suite for the Condor automated trading assistant. Tests any model against a fixed dataset of consult and tick cases using the same agent stack (pydantic-ai + MCP tools) that Condor uses in production.
+LLM benchmarking suite for the Condor automated trading assistant. Tests any model
+against a fixed dataset using the same agent stack Condor runs in production
+(pydantic-ai + MCP tools), and answers a specific question:
+
+> **What is the smallest model that can do each job?**
+
+The output is a routing config — `general_consult → qwen2.5:7b`,
+`routine_builder → qwen2.5:14b`, `tick_execution → claude-sonnet` — not just a
+leaderboard.
+
+## Two execution modes
+
+| | `mock` | `live` |
+|---|---|---|
+| MCP backend | `mock_mcp/` servers, canned payloads | condor's real MCP servers → staging `hummingbot-api` |
+| Needs staging | no | yes |
+| Scores | quality, tool names, latency | + tool **params**, + live response **validity** |
+| Use for | CI, drift checks, offline dev | the actual model-sizing study |
+
+Mock mode is the default and needs no setup. Live mode is where param correctness
+and response validity start meaning something — a model can pick the right tool
+with plausible arguments and get an error back every single time, and mock mode
+scores that 1.0.
+
+One mock-mode artifact worth knowing about: the mocks return a fixed payload per
+tool regardless of the arguments, so asking for `ETH-USDT` gets BTC-shaped prices
+back. A model that faithfully reports what it was given then looks wrong to the
+judge. The mocks are deliberately left as-is — they exist to keep the tool
+*surface* honest for CI and offline dev, not to simulate a market — so treat
+absolute mock-mode quality scores as noisy and compare models against each other
+rather than against 1.0. Live mode has no such artifact.
+
+Live mode setup, guard rails and the failure modes it defends against:
+**[docs/STAGING.md](docs/STAGING.md)**.
 
 ## Prerequisites
 
-- **Python 3.12+** with [uv](https://docs.astral.sh/uv/) installed
-- **Node.js 18+** and npm (for the dashboard frontend)
-- An **Anthropic API key** (required for the judge LLM that scores responses)
+- **Python 3.12+** with [uv](https://docs.astral.sh/uv/)
+- **Node.js 18+** and npm (dashboard frontend)
+- An **Anthropic API key** (the judge that scores answer quality)
+- For live mode: a **condor checkout** and a **staging hummingbot-api**
 
 ## Quick start
-
-### 1. Clone and install
 
 ```bash
 git clone <repo-url>
 cd condor-bench
 uv sync
+cp .env.example .env      # set ANTHROPIC_API_KEY at minimum
+make dashboard            # → http://localhost:8001
 ```
-
-### 2. Configure API keys
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and set at minimum:
-
-```env
-ANTHROPIC_API_KEY=sk-ant-...        # Required — used by the judge to score responses
-```
-
-Add any other keys for the models you want to benchmark:
-
-```env
-OPENROUTER_API_KEY=sk-or-...        # For OpenRouter models
-OPENAI_API_KEY=sk-...               # For OpenAI models
-```
-
-Keys for Ollama and LM Studio are configured directly in the dashboard (no API key needed, just a host URL).
-
-### 3. Launch the dashboard
-
-```bash
-make dashboard
-```
-
-Open **http://localhost:8001** in your browser.
-
-That's it. Everything else is done from the UI.
 
 ---
 
 ## Using the dashboard
 
-### Run tab — configure and start a benchmark
+The topbar always shows the resolved mode (`○ mock` / `● live` plus the staging
+URL). Which backend a run is about to hit matters more than which model runs
+against it, so it is never more than a glance away.
 
-1. **Enable providers** — toggle the providers you want to test. Each enabled provider expands to show its settings.
-2. **Cloud APIs** (Anthropic, OpenAI, OpenRouter, Groq): enter your API key and pick a model from the dropdown.
-3. **Local models** (Ollama, LM Studio): enter the host URL (e.g. `http://192.168.1.10:11434`), click **Load models** to fetch the available model list, then pick one.
-4. **CLI agents** (Claude Code, Gemini CLI): just toggle — no key needed, uses the CLI tools already on your PATH.
-5. Set optional filters (consult-only, tick-only, category).
-6. Click **▶ Start Benchmark**.
+### Run — configure and start
 
-### Live tab — watch progress
+1. **Staging pre-flight** at the top. In live mode every check is listed, passing
+   or not; a blocking failure disables the start button.
+2. **Enable providers**. Cloud APIs take a key and a model; Ollama / LM Studio
+   take a host URL and a **Load models** click; CLI agents (Claude Code, Gemini)
+   just toggle.
+3. **Execution mode** — override `BENCH_MODE` per run, or leave it as configured.
+4. **Dataset layers** — any combination of consult / tick / tools / agents.
+   None selected means all four.
+5. **Routing domain** and **category** filters.
+6. **▶ Start Benchmark**.
 
-Switches automatically when a run starts. Shows:
-- Progress bar (cases completed / total)
-- Current model and case being evaluated
-- Results table that updates in real time — click any row to expand the full response and judge reasoning
+### Live — watch progress
 
-Cancel a running benchmark with the **Cancel** button.
+Progress bar, current model and case, and a results table that fills in as cases
+complete. Click a row for the full response, judge reasoning, tool trace, token
+counts and MCP wiring.
 
-### Leaderboard tab
+### Leaderboard
 
-Bar chart + score table showing the best run per model, sorted by composite score.
+Best run per model by composite score.
 
-### Runs tab
+### Matrix
 
-Full history of completed runs. Click a run in the sidebar to see per-case scores, responses, and judge reasoning.
+Heatmap of models (columns, smallest first) × routing domains or individual MCP
+tools (rows). Colour by pass rate, composite, average tokens or average cost.
+
+Each cell carries the number of cases it rests on, because a cell built from two
+cases is weaker evidence than one built from eight. Infra failures and harness
+artifacts are **excluded** and counted separately rather than scored zero — a
+staging outage should not read as the model getting worse. Hover a cell for the
+full breakdown, including which cases were excluded and why.
+
+### Router
+
+The recommendations, with the criteria exposed as live controls (min pass rate,
+min cases, prefer-lower-tokens). Shows what earned a recommendation, what didn't
+and why, per-tool minimums, shared config-key conflicts, and a copyable Condor
+config snippet.
+
+### Results
+
+Full run history with per-case detail.
 
 ---
 
 ## Scoring
 
-Each case is scored on three dimensions:
+Weights depend on mode. Any component a case has no ground truth for scores `None`
+and its weight moves to answer quality, so the applied weights always sum to 1.0
+and a case with less ground truth is never quietly capped below 1.0.
 
-| Dimension | Weight | How it's measured |
-|-----------|--------|-------------------|
-| **Answer quality** | 50% | Reference-free judge (Claude evaluates response / multi-turn transcript — no baseline needed) |
-| **Tool accuracy** | 30% | F1 on tool names vs non-empty `expected_tools`. Empty `[]` skips this metric (weight → quality). `expected_no_calls` → 0 if violated |
-| **Latency** | 20% | `baseline_latency / test_latency`, capped at 1.0 — only meaningful after running a baseline |
+| Metric | Mock | Live | How |
+|---|---|---|---|
+| **Answer quality** | 0.50 | 0.45 | Reference-free Claude judge over the full transcript |
+| **Tool accuracy** | 0.30 | 0.20 | F1 on tool *names* vs `expected_tools`; `expected_no_calls` → 0 if violated |
+| **Tool params** | — | 0.15 | Key-value subset match vs `expected_tool_params`, tolerant about representation (`"3"` ≈ `3`, `"BTC-USDT"` ≈ `["BTC-USDT"]`, `trading_pair` ≈ `trading_pairs`) and strict about meaning (`1` ≠ `true`) |
+| **Live validity** | — | 0.10 | Did the calls actually work? Errored or empty responses score 0, plus optional `live_expected` assertions |
+| **Latency** | 0.20 | 0.10 | `baseline_latency / test_latency`, capped at 1.0 |
 
-**Composite** = 0.5 × quality + 0.3 × tools + 0.2 × latency (or 0.8 × quality + 0.2 × latency when no required tools)
+A case **passes** at composite ≥ 0.70.
 
-A case **passes** when composite ≥ 0.70.
+**Token usage is tracked but carries no weight.** A model should not fail a case
+for being token-expensive. Cost is a reporting axis and an opt-in routing
+tie-breaker, never a gate. Judge tokens are tallied separately — charging a 3B
+model for being judged by Sonnet would make the cheap option look expensive.
 
-Infra failures (token/request limits) are tagged `error: infra:…` and excluded from summary averages.
+### Rows that are excluded rather than scored
+
+| Tag | Meaning |
+|---|---|
+| `error: infra:…` | Provider/rate limits. Excluded from averages (pre-existing behaviour). |
+| `harness_artifact` | The *harness* is why this row is bad: a live run with no resolved API URL, an agent case graded against the generic Condor prompt instead of its own, or ACP auto-discovery adding tools that shift the small-model tool cut. Excluded from the routing matrix. |
+
+That second category is the point of the whole live-mode design. A
+`routine_builder` case run without `--agent-slug` reads the chat's stores, never
+finds its `routine_cookbook` skill, and fails — and without this tagging the
+matrix would report "routine_builder needs a bigger model" when the truth is a
+misconfiguration. See [docs/STAGING.md](docs/STAGING.md#agent-scoping---agent-slug).
+
+---
+
+## Routing
+
+```bash
+uv run python runner.py sweep --models datasets/models.json   # benchmark every model, smallest first
+uv run python runner.py matrix                                # aggregate into a matrix
+uv run python runner.py route                                 # recommend
+```
+
+Per domain, the router:
+
+1. considers only models in `datasets/models.json` — a model with no recorded
+   `params_b` cannot be ranked by size, so recommending it would be guessing
+   (it's reported as unrankable rather than silently dropped);
+2. sorts ascending by `params_b`, cloud models last, so a local model that passes
+   always beats a cloud one that also passes;
+3. takes the **first** model that passes — pass rate ≥ `--min-pass-rate` (0.80),
+   no destructive case below the floor, and at least `--min-cases` scored cases;
+4. if nothing passes, reports the domain as unmet with the best attempt and the
+   specific blocker per model. "Insufficient evidence" is distinguished from "no
+   model was good enough" — the first is a dataset gap, not a model finding.
+
+Token cost never rejects a passing model. `--prefer-lower-tokens` only reorders
+models of the *same* size:
+
+```bash
+uv run python runner.py route --min-pass-rate 0.80 --prefer-lower-tokens
+```
+
+Output lands in `results/routing_recommendations.json`, including a
+`condor_config_snippet` ready to apply:
+
+```json
+{
+  "assistants/condor/default_model": "ollama:qwen2.5:7b",
+  "agents/routine_builder/agent_key": "ollama:qwen2.5:14b",
+  "agents/_defaults/agent_key": "openrouter:anthropic/claude-sonnet-4-5"
+}
+```
+
+When two domains share one config key and disagree, the larger model wins (a
+shared key has to satisfy every domain using it) and the disagreement is reported
+in `config_conflicts` rather than being decided by dict ordering.
 
 ---
 
 ## Baseline (optional)
 
-The baseline provides a latency reference point so slower models score lower on the latency dimension. Without it, every model gets 1.0 for latency (not useful for comparison).
-
-To generate baselines with Claude Sonnet:
+Gives latency a reference point. Without it every model scores 1.0 on latency.
 
 ```bash
-make baseline
+make baseline                    # generate with Claude Sonnet
+make baseline overwrite=true     # regenerate after adding cases
 ```
 
-Run this once. After that, every benchmark run scores latency relative to Sonnet's speed.
-
-To regenerate (e.g. after adding new cases):
-
-```bash
-make baseline overwrite=true
-```
+Baselines are produced through the same code path a test run uses, so a
+mock-mode baseline compared against a live run doesn't make every live case look
+slow. Generate baselines in the mode you intend to benchmark in.
 
 ---
 
-## CLI usage
-
-The dashboard covers the common workflow, but you can also run benchmarks from the terminal:
+## CLI
 
 ```bash
-# Run all cases against a model
-make test MODEL=anthropic:claude-haiku-4-5-20251001
+# Single model
 make test MODEL=ollama:llama3.1:8b
-make test MODEL=openrouter:google/gemini-flash-2.0
+uv run python runner.py test anthropic:claude-sonnet-4-6
 
-# Consult cases only
-uv run python runner.py test anthropic:claude-sonnet-4-6 --consult-only
-
-# Tick cases only, filter by category
+# Filter by layer, routing domain, category
+uv run python runner.py test ollama:qwen2.5:14b --layers tool,agent
+uv run python runner.py test ollama:qwen2.5:14b -d routine_builder
 uv run python runner.py test ollama:qwen2.5:14b --tick-only -c risk
 
-# Print a summary table of all runs
+# Force a mode for one run
+uv run python runner.py test ollama:qwen2.5:14b --mode live
+
+# Live pre-flight (exits non-zero on a blocking failure — usable as a CI gate)
+uv run python runner.py staging-check
+
+# Sweep, aggregate, recommend
+uv run python runner.py sweep --max-params-b 14
+uv run python runner.py sweep --only ollama:qwen2.5:14b,ollama:qwen2.5:7b
+uv run python runner.py matrix --mode live
+uv run python runner.py route --min-pass-rate 0.85
+
+# Run history
 make report
 ```
 
@@ -145,65 +237,97 @@ Results are saved to `results/<run-id>_<model>/` as JSON.
 
 ## Dataset
 
-| File | Cases | Description |
-|------|-------|-------------|
-| `datasets/consult.jsonl` | 23 | Q&A cases covering concepts, strategy, risk, troubleshooting, configuration, strategy creation, and routine building. Includes 5 multi-turn cases. |
-| `datasets/tick.jsonl` | 6 | Strategy tick cases: normal execution, profit-taking, risk-blocked, near-capacity, error recovery, dry-run observation. |
+74 cases across three layers.
+
+| File | Cases | What it measures |
+|---|---|---|
+| `datasets/consult.jsonl` | 23 | **Layer 1** — end-to-end advisory, strategy creation, routine building. 5 multi-turn. |
+| `datasets/tick.jsonl` | 6 | **Layer 1** — strategy ticks: normal, profit-taking, risk-blocked, near-capacity, error recovery, dry-run. Agent-scoped. |
+| `datasets/tools.jsonl` | 29 | **Layer 2** — at least one focused case per MCP tool. All 25 production tools covered; a drift test fails if one isn't. |
+| `datasets/agents.jsonl` | 16 | **Layer 3** — routed to a specific Condor assistant with its own prompt and stores. |
+| `datasets/models.json` | 8 | Model registry with parameter counts. Drives sweep order and routing. |
+
+Every case carries a `risk_level` (`read_only` / `mutating` / `destructive`) and
+resolves to a **routing domain**. Layer 2 domains are namespaced `tool:` because a
+capability bucket like "market data" is not something Condor can route to — those
+verdicts come out of the matrix's per-tool axis instead.
 
 ---
 
 ## Staying in sync with condor
 
-Benchmarks run against the mocks in `mock_mcp/`, not the real MCP servers. When
-condor's servers change and the mocks don't follow, every tool-accuracy score
-afterwards is measured against a surface production no longer has — silently.
-
-`datasets/tool_surface.json` pins the real surface, and two test modules compare
-against it:
+Three drift checks, all runnable with `make check-drift`:
 
 | Check | Fails when |
 |---|---|
-| `tests/test_tool_surface_drift.py` | a mock is missing a production tool, exposes one production doesn't have, or ignores a param production requires; or a dataset `expected_tools` entry names a tool that doesn't exist |
-| `tests/test_vendored_drift.py` | `condor_compat/.../AGENT.md` no longer matches condor's system prompt (skipped without a condor checkout) |
+| `tests/test_tool_surface_drift.py` | a mock is missing a production tool, exposes one production doesn't have, or ignores a required param; a dataset names a tool or param production doesn't have; a production tool has no Layer 2 case; an agent-scoped case doesn't declare `agent_slug` |
+| `tests/test_mcp_wiring_drift.py` | bench's live MCP spawn args diverge from condor's `build_mcp_servers_for_agent()` / `_for_session()`, **or** condor's own args diverge from a pinned shape |
+| `tests/test_vendored_drift.py` | `condor_compat/.../AGENT.md` no longer matches condor's system prompt |
+
+The MCP wiring check is the one worth understanding. bench *loads* condor's
+helpers rather than copying them, so bench-vs-condor comparison mostly guards the
+call site — a new required parameter on condor's side would change production's
+output while bench kept calling the old signature. The **pinned literal arg list**
+is what turns "condor changed its MCP wiring" into a failing test someone has to
+look at, instead of a change bench follows silently.
+
+condor-evals' `build_mcp_servers()` fails that pin today: no `--server-name` on
+either server, no `--agent-slug` on condor. That is why its wiring was not
+ported.
 
 After pulling condor:
 
 ```bash
 make check-drift
-```
-
-If it fails because production legitimately changed, re-capture the surface and
-update the mocks to match — never hand-edit the snapshot:
-
-```bash
-make tool-surface                        # assumes ../condor
+make tool-surface                        # re-capture if production legitimately changed
 CONDOR_REPO=/path/to/condor make tool-surface
 ```
+
+Never hand-edit `datasets/tool_surface.json`.
 
 ### Keeping condor_compat in sync
 
 `condor_compat/` vendors condor's agent stack. Two files carry **deliberate**
-bench-specific edits and so cannot be re-vendored by copying:
+bench-specific edits and cannot be re-vendored by copying:
 
-- `acp/pydantic_ai_client.py` — bench-only `_TOOL_LIMITS` cap and
-  `OPENAI_BASE_URL` provider detection
+- `acp/pydantic_ai_client.py` — bench-only `_TOOL_LIMITS` cap, `OPENAI_BASE_URL`
+  provider detection, no-tools fallback, and per-server `cwd` (live mode launches
+  condor's servers with `uv run`, which only resolves inside the condor project —
+  condor doesn't need this because its own process is already there)
 - `agents/prompts.py` — condor model imports replaced with `Any`
 
-Re-syncing those is a manual diff-and-review against condor, keeping the local
-edits. `assistants/condor/AGENT.md` is a plain body copy (YAML frontmatter
-stripped) and is the one vendored file the drift test can check automatically.
+`acp/client.py` carries the usage types re-vendored from production
+(`UsageEvent`, `fold_usage_event`, the ACP usage parsers), and
+`pydantic_ai_client.py` carries `estimate_cost_usd()` / `_fold_run_usage()`.
+Re-syncing is a manual diff against condor, keeping the local edits.
+
+---
+
+## Consolidation with condor-evals
+
+condor-bench is the single harness. What was taken from condor-evals:
+
+| Asset | Action |
+|---|---|
+| `expected_tool_params` scoring | Ported → `metrics/tool_params.py`, minus DeepEval |
+| `condor_tasks.json` cases | Migrated → `datasets/tools.jsonl` and `datasets/agents.jsonl` (tagged `ported:<id>`) |
+| `load_assistant_prompt()` | Ported → `bench/client.py`, reading from the condor checkout |
+| Dashboard matrix UI | Reimplemented → the Matrix tab |
+| Live MCP wiring | **Not ported** — already drifted from production |
+| DeepEval | **Not ported** — condor-bench uses a direct Claude judge |
+
+One case was dropped rather than migrated: `condor_011` expected a
+`setup_connector` tool that production does not expose.
 
 ---
 
 ## Dev mode (hot-reload)
 
-Runs the FastAPI backend with `--reload` and the Vite dev server simultaneously:
-
 ```bash
 make dashboard-dev
 ```
 
-Backend: http://localhost:8001 · Frontend dev server: http://localhost:5173
+Backend: http://localhost:8001 · Vite dev server: http://localhost:5173
 
 ---
 
@@ -211,31 +335,33 @@ Backend: http://localhost:8001 · Frontend dev server: http://localhost:5173
 
 ```
 condor-bench/
-├── bench/              # Core benchmark logic
-│   ├── client.py       #   LLM client (pydantic-ai + ACP routing, multi-turn)
-│   ├── dataset.py      #   Case types and loaders
-│   ├── scorer.py       #   Composite scoring
-│   ├── baseline.py     #   Baseline latency store
-│   └── reporter.py     #   Save/load run results
-├── metrics/            # Individual metrics
-│   ├── answer_quality.py  # Reference-free GEval judge
-│   ├── tool_accuracy.py   # F1 on tool call sets
-│   └── latency.py         # Baseline-relative latency score
-├── mock_mcp/           # Mock MCP servers (mirror production tool stack)
-│   ├── hummingbot_server.py   # mcp-hummingbot tools
-│   └── condor_server.py       # condor memory/journal/skills tools
-├── condor_compat/      # Vendored clients from the condor repo
-│   ├── acp/            #   pydantic-ai client, ACP client, JSON-RPC peer
-│   ├── agents/         #   Tick prompt builder
-│   └── assistants/     #   AGENT.md (Condor system prompt, body only)
-├── datasets/           # JSONL benchmark cases + tool_surface.json (production surface pin)
-├── scripts/            # snapshot_tool_surface.py — re-capture the production tool surface
-├── dashboard/
-│   ├── backend/app.py  # FastAPI: providers, SSE run streaming, results API
-│   └── frontend/       # React + Vite + Recharts
-├── baseline/           # Stored baseline latency records (git-ignored)
-├── results/            # Benchmark run outputs (git-ignored)
-├── config.py           # Path constants and score weights
-├── runner.py           # CLI entry point (typer)
-└── .env                # API keys (never commit)
+├── bench/
+│   ├── client.py         # LLM client: mode-aware MCP, tool traces, token usage
+│   ├── mcp_provider.py   # live (condor's real wiring) vs mock MCP configs
+│   ├── staging_health.py # fail-closed live pre-flight
+│   ├── cleanup.py        # post-case teardown for mutating live cases
+│   ├── dataset.py        # 4 case types, risk levels, routing domains
+│   ├── scorer.py         # mode-aware composite scoring
+│   ├── matrix.py         # model × domain/tool aggregation + model registry
+│   ├── routing.py        # smallest-passing-model recommendations
+│   ├── baseline.py       # baseline latency store
+│   └── reporter.py       # save/load runs, usage roll-ups
+├── metrics/
+│   ├── answer_quality.py # reference-free Claude judge
+│   ├── judge.py          # judge client + separate token accounting
+│   ├── tool_accuracy.py  # F1 on tool names
+│   ├── tool_params.py    # argument correctness
+│   ├── live_validity.py  # did the calls actually work
+│   └── latency.py        # baseline-relative latency
+├── mock_mcp/             # offline mock servers (mirror the production surface)
+├── condor_compat/        # vendored condor agent stack
+├── datasets/             # 4 case files + tool_surface.json + models.json
+├── scripts/
+│   ├── snapshot_tool_surface.py  # re-capture the production tool surface
+│   ├── register_bench_server.py  # add bench_staging to condor's config.yml
+│   └── sync_case_prompts.py      # regenerate the dashboard's case prompt map
+├── dashboard/            # FastAPI + React (Run/Live/Prompt/Leaderboard/Matrix/Router/Results)
+├── docs/STAGING.md       # live mode setup and guard rails
+├── config.py             # paths, modes, weight profiles, thresholds
+└── runner.py             # CLI: baseline, staging-check, test, sweep, matrix, route, report
 ```

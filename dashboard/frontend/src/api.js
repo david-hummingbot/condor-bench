@@ -29,3 +29,22 @@ export const cancelRun = (id) =>
 export const listRuns = () => fetch('/api/runs').then(handle)
 export const getRun = (dir) => fetch(`/api/runs/${dir}`).then(handle)
 export const streamUrl = (id) => `/api/runs/${id}/stream`
+
+export const getStaging = () => fetch('/api/staging').then(handle)
+export const getDatasets = () => fetch('/api/datasets').then(handle)
+export const getModelRegistry = () => fetch('/api/models').then(handle)
+
+export function getMatrix({ mode } = {}) {
+  const params = new URLSearchParams()
+  if (mode) params.set('mode', mode)
+  return fetch('/api/matrix?' + params).then(handle)
+}
+
+export function getRouting({ mode, minPassRate, minCases, preferLowerTokens } = {}) {
+  const params = new URLSearchParams()
+  if (mode) params.set('mode', mode)
+  if (minPassRate != null) params.set('min_pass_rate', String(minPassRate))
+  if (minCases != null) params.set('min_cases', String(minCases))
+  if (preferLowerTokens) params.set('prefer_lower_tokens', 'true')
+  return fetch('/api/routing?' + params).then(handle)
+}

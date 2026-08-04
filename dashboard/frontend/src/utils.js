@@ -44,3 +44,70 @@ export function providerOf(modelKey) {
   if (!modelKey) return ''
   return modelKey.split(':')[0]
 }
+
+export function fmtPct(v) {
+  if (v == null || isNaN(v)) return '—'
+  return Math.round(Number(v) * 100) + '%'
+}
+
+export function fmtTokens(v) {
+  if (v == null || isNaN(v)) return '—'
+  const n = Number(v)
+  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k'
+  return String(Math.round(n))
+}
+
+export function fmtCost(v) {
+  if (v == null || isNaN(v)) return '—'
+  return '$' + Number(v).toFixed(Number(v) < 0.01 ? 4 : 3)
+}
+
+export function fmtSize(paramsB) {
+  return paramsB == null ? 'cloud' : `${paramsB}B`
+}
+
+/** Background for a heatmap cell. null (no data) is grey, never green. */
+export function heatColor(v) {
+  if (v == null || isNaN(v)) return 'var(--panel-2)'
+  const n = Math.max(0, Math.min(1, Number(v)))
+  // Red → orange → green ramp, alpha scaled so a low value reads as "bad" rather
+  // than just "faint".
+  if (n >= 0.8) return `rgba(39,195,110,${0.18 + n * 0.42})`
+  if (n >= 0.5) return `rgba(230,126,34,${0.18 + n * 0.4})`
+  return `rgba(232,64,64,${0.22 + (1 - n) * 0.34})`
+}
+
+/**
+ * Colour scale for a "lower is better" metric (tokens, cost, latency).
+ * Ranked within the row rather than against an absolute scale — token counts vary
+ * by orders of magnitude between models, so a fixed ramp would show one colour.
+ */
+export function inverseHeatColor(v, values) {
+  if (v == null || isNaN(v)) return 'var(--panel-2)'
+  const nums = (values || []).filter(x => x != null && !isNaN(x)).map(Number)
+  if (nums.length < 2) return 'rgba(79,140,255,0.18)'
+  const min = Math.min(...nums)
+  const max = Math.max(...nums)
+  if (max === min) return 'rgba(79,140,255,0.18)'
+  const t = (Number(v) - min) / (max - min)  // 0 = cheapest
+  return heatColor(1 - t)
+}
+
+/** Models in registry order (smallest first), unranked last. */
+export function orderedModels(matrix) {
+  const models = matrix?.models || {}
+  return Object.keys(models).sort((a, b) => {
+    const ma = models[a] || {}
+    const mb = models[b] || {}
+    const ra = ma.in_registry ? 0 : 1
+    const rb = mb.in_registry ? 0 : 1
+    if (ra !== rb) return ra - rb
+    const pa = ma.params_b == null ? Infinity : ma.params_b
+    const pb = mb.params_b == null ? Infinity : mb.params_b
+    if (pa !== pb) return pa - pb
+    return a.localeCompare(b)
+  })
+}
+
+export const isToolDomain = (d) => typeof d === 'string' && d.startsWith('tool:')
+export const stripToolPrefix = (d) => (isToolDomain(d) ? d.slice(5) : d)

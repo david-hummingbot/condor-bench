@@ -119,6 +119,8 @@ export default function CustomPrompt() {
   const [question, setQuestion] = useState('')
   const [turns, setTurns] = useState([])
   const [expectedTools, setExpectedTools] = useState('')
+  const [agentSlug, setAgentSlug] = useState('')
+  const [mode, setMode] = useState('')
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState([])  // [{model, response, tool_calls, scorecard, error}]
   const [status, setStatus] = useState('')
@@ -252,6 +254,8 @@ export default function CustomPrompt() {
         turns: turns.filter(t => t.trim()),
         expected_tools: parsedTools,
         mock_tools: {},
+        agent_slug: agentSlug.trim() || null,
+        mode: mode || null,
         models,
       })
 
@@ -343,6 +347,54 @@ export default function CustomPrompt() {
             onChange={e => setExpectedTools(e.target.value)}
             style={{ maxWidth: 420 }}
           />
+        </div>
+
+        {/* Agent scoping */}
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+            Agent slug <span style={{ fontSize: 11 }}>
+              (optional — scopes condor's memory and skill tools to that agent's own
+              stores. Leave blank to run chat-scoped, which is what a production
+              consult does.)
+            </span>
+          </div>
+          <input
+            type="text"
+            className="input"
+            placeholder="e.g. routine_builder"
+            value={agentSlug}
+            onChange={e => setAgentSlug(e.target.value)}
+            style={{ maxWidth: 420 }}
+          />
+        </div>
+
+        {/* Mode */}
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+            Execution mode
+          </div>
+          <div className="radio-group">
+            {[
+              { id: '', label: 'Use configured' },
+              { id: 'mock', label: 'Mock' },
+              { id: 'live', label: 'Live' },
+            ].map(o => (
+              <button
+                key={o.id}
+                className={`radio-btn ${mode === o.id ? 'active' : ''}`}
+                onClick={() => setMode(o.id)}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+          {mode === 'live' && (
+            <span className="run-meta">
+              A live prompt is a real agent with real tools attached, and nothing
+              constrains what it decides to call. The staging pre-flight runs first
+              and will refuse the run if it fails.
+            </span>
+          )}
         </div>
       </div>
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from config import BASELINE_DIR, BASELINE_MODEL
-from bench.client import BenchmarkResult, run_consult, run_tick, build_tick_prompt_for_case
+from bench.client import run_case
 
 
 @dataclass
@@ -84,15 +84,10 @@ async def generate_baselines(
     console.print(f"Generating baselines for {len(to_run)} cases with [bold]{model}[/bold]")
     for case in track(to_run, description="Baseline"):
         try:
-            if case.type == "tick":
-                prompt = build_tick_prompt_for_case(case, model)
-                result = await run_tick(case.id, prompt, model, case.mock_tools)
-            else:
-                result = await run_consult(
-                    case.id, case.question, model,
-                    extra_turns=getattr(case, "turns", None),
-                    mock_tools=getattr(case, "mock_tools", None),
-                )
+            # Baselines are latency references, so they must be produced by the
+            # same code path a test run uses — a mock-mode baseline compared
+            # against a live run would make every live case look slow.
+            result = await run_case(case, model)
         except Exception as exc:
             console.print(f"[red]Error on {case.id}: {exc}[/red]")
             continue

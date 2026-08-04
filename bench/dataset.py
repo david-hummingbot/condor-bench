@@ -1,12 +1,64 @@
-"""Benchmark dataset types and loaders."""
+"""Benchmark dataset types and loaders.
+
+Four layers, all loaded through :func:`load_all_cases`:
+
+* ``consult`` — end-to-end advisory + strategy-creation cases (Layer 1)
+* ``tick``    — simulated agent ticks (Layer 1, agent-scoped)
+* ``tool``    — one focused case per MCP tool (Layer 2)
+* ``agent``   — cases routed to a specific Condor assistant (Layer 3)
+
+Two fields drive the live-mode machinery and are worth reading before adding a
+case:
+
+``agent_slug``
+    Which condor store the MCP tools bind to. ``None`` means chat-scoped, which
+    is what a production consult does. Anything acting *as* an agent — ticks,
+    Layer 3 cases — must name its slug, or condor's memory/skill tools read the
+    chat's stores and the case fails for a harness reason (see
+    ``bench/mcp_provider.py``).
+
+``risk_level``
+    ``read_only`` | ``mutating`` | ``destructive``. Gates whether a case may run
+    against staging at all (``BENCH_ALLOW_MUTATING``) and raises the score bar
+    for destructive cases in routing. Unset defaults to ``read_only``, so a case
+    that *does* mutate must say so explicitly — the safe default is the one that
+    can't place an order.
+"""
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from config import DATASETS_DIR
+
+RISK_LEVELS = ("read_only", "mutating", "destructive")
+
+# Category → routing domain. The matrix and router group by domain, not by the
+# finer-grained categories, because a routing decision is per agent/assistant.
+CATEGORY_DOMAINS = {
+    "strategy-creation": "strategy_creation",
+    "routine-builder": "routine_builder",
+}
+
+# Tick categories all belong to one domain: they exercise the same agent path.
+_TICK_DOMAIN = "tick_execution"
+_DEFAULT_CONSULT_DOMAIN = "general_consult"
+
+# Layer 2 domains are namespaced so the router can tell a capability bucket
+# ("market_data") from something Condor can actually route ("routine_builder").
+TOOL_DOMAIN_PREFIX = "tool:"
+
+
+def is_routing_domain(domain: str) -> bool:
+    """True when a domain names something a Condor model assignment can target."""
+    return not domain.startswith(TOOL_DOMAIN_PREFIX)
+
+
+def _normalize_risk(value: Any) -> str:
+    risk = str(value or "read_only")
+    return risk if risk in RISK_LEVELS else "read_only"
 
 
 @dataclass
@@ -22,6 +74,15 @@ class ConsultCase:
     mock_tools: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     type: str = "consult"
+    # Live-mode fields
+    expected_tool_params: dict[str, dict] = field(default_factory=dict)
+    live_expected: dict[str, Any] = field(default_factory=dict)
+    risk_level: str = "read_only"
+    agent_slug: str | None = None
+
+    @property
+    def domain(self) -> str:
+        return CATEGORY_DOMAINS.get(self.category, _DEFAULT_CONSULT_DOMAIN)
 
 
 @dataclass
@@ -43,17 +104,112 @@ class TickCase:
     category: str = ""
     tags: list[str] = field(default_factory=list)
     type: str = "tick"
+    expected_tool_params: dict[str, dict] = field(default_factory=dict)
+    live_expected: dict[str, Any] = field(default_factory=dict)
+    risk_level: str = "read_only"
+    # Ticks run AS an agent, so they are agent-scoped by construction. Defaults to
+    # the case id so a dataset that forgets the field still gets its own store
+    # rather than silently borrowing the chat's.
+    agent_slug: str | None = None
+
+    @property
+    def domain(self) -> str:
+        return _TICK_DOMAIN
+
+    @property
+    def expected_tools(self) -> list[str]:
+        """Uniform accessor so callers don't branch on case type."""
+        return self.expected_tool_calls
+
+
+@dataclass
+class ToolCase:
+    """Layer 2: can this model size pick one tool with the right params?"""
+
+    id: str
+    tool: str
+    question: str
+    domain_name: str = ""
+    expected_tools: list[str] = field(default_factory=list)
+    expected_tool_params: dict[str, dict] = field(default_factory=dict)
+    expected_no_calls: list[str] = field(default_factory=list)
+    live_expected: dict[str, Any] = field(default_factory=dict)
+    mock_tools: dict[str, Any] = field(default_factory=dict)
+    risk_level: str = "read_only"
+    agent_slug: str | None = None
+    tags: list[str] = field(default_factory=list)
+    category: str = "tool"
+    type: str = "tool"
+
+    @property
+    def domain(self) -> str:
+        """A ``tool:`` namespace, deliberately not a routing domain.
+
+        Layer 2 groups are capability buckets (market_data, routines, …), not
+        things Condor can route to — there is no config key for "market_data". The
+        prefix keeps them visible in the matrix while the router skips them, and
+        stops a bucket named ``consult`` from colliding with the
+        ``general_consult`` routing domain. Per-tool verdicts come out of the
+        matrix's ``tools`` axis instead, where one case is a legitimate sample.
+        """
+        return f"{TOOL_DOMAIN_PREFIX}{self.domain_name or 'other'}"
+
+
+@dataclass
+class AgentCase:
+    """Layer 3: a task routed to a specific Condor assistant / agent."""
+
+    id: str
+    agent_slug: str | None
+    question: str
+    assistant: str = ""
+    expected_tools: list[str] = field(default_factory=list)
+    expected_tool_params: dict[str, dict] = field(default_factory=dict)
+    expected_no_calls: list[str] = field(default_factory=list)
+    turns: list[str] = field(default_factory=list)
+    live_expected: dict[str, Any] = field(default_factory=dict)
+    mock_tools: dict[str, Any] = field(default_factory=dict)
+    risk_level: str = "read_only"
+    tags: list[str] = field(default_factory=list)
+    category: str = "agent"
+    type: str = "agent"
+
+    @property
+    def domain(self) -> str:
+        """The routing target: an agent's slug, or the chat assistant.
+
+        An agent case's domain IS its assistant, because that is the unit a
+        recommendation is expressed in ("routine_builder → qwen2.5:14b"). A
+        chat-scoped case (``agent_slug: null``) belongs to ``general_consult``
+        alongside the Layer 1 consults rather than to a domain of its own — same
+        prompt, same stores, same config key, so splitting them would produce two
+        recommendations for one setting.
+        """
+        return self.agent_slug or _DEFAULT_CONSULT_DOMAIN
+
+
+Case = ConsultCase | TickCase | ToolCase | AgentCase
+
+
+def _iter_jsonl(path: Path) -> Iterable[dict]:
+    if not path.exists():
+        return []
+    records = []
+    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path.name}:{lineno} is not valid JSON: {exc}") from exc
+    return records
 
 
 def load_consult_cases(path: Path | None = None) -> list[ConsultCase]:
     path = path or DATASETS_DIR / "consult.jsonl"
-    cases = []
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        data = json.loads(line)
-        cases.append(ConsultCase(
+    return [
+        ConsultCase(
             id=data["id"],
             question=data.get("question", ""),
             context=data.get("context", ""),
@@ -63,49 +219,160 @@ def load_consult_cases(path: Path | None = None) -> list[ConsultCase]:
             mock_tools=data.get("mock_tools", {}),
             tags=data.get("tags", []),
             type=data.get("type", "consult"),
-        ))
-    return cases
+            expected_tool_params=data.get("expected_tool_params", {}),
+            live_expected=data.get("live_expected", {}),
+            risk_level=_normalize_risk(data.get("risk_level")),
+            agent_slug=data.get("agent_slug"),
+        )
+        for data in _iter_jsonl(path)
+    ]
 
 
 def load_tick_cases(path: Path | None = None) -> list[TickCase]:
     path = path or DATASETS_DIR / "tick.jsonl"
     cases = []
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        data = json.loads(line)
-        cases.append(TickCase(
-            id=data["id"],
-            scenario_name=data["scenario_name"],
-            agent_instructions=data["agent_instructions"],
-            strategy_instructions=data["strategy_instructions"],
-            config=data.get("config", {}),
-            risk_state=data.get("risk_state", {}),
-            core_data=data.get("core_data", {}),
-            learnings=data.get("learnings", ""),
-            summary=data.get("summary", ""),
-            recent_decisions=data.get("recent_decisions", ""),
-            tick_number=data.get("tick_number", 1),
-            mock_tools=data.get("mock_tools", {}),
-            expected_tool_calls=data.get("expected_tool_calls", []),
-            expected_no_calls=data.get("expected_no_calls", []),
-            category=data.get("category", ""),
-            tags=data.get("tags", []),
-        ))
+    for data in _iter_jsonl(path):
+        cases.append(
+            TickCase(
+                id=data["id"],
+                scenario_name=data["scenario_name"],
+                agent_instructions=data["agent_instructions"],
+                strategy_instructions=data["strategy_instructions"],
+                config=data.get("config", {}),
+                risk_state=data.get("risk_state", {}),
+                core_data=data.get("core_data", {}),
+                learnings=data.get("learnings", ""),
+                summary=data.get("summary", ""),
+                recent_decisions=data.get("recent_decisions", ""),
+                tick_number=data.get("tick_number", 1),
+                mock_tools=data.get("mock_tools", {}),
+                expected_tool_calls=data.get("expected_tool_calls", []),
+                expected_no_calls=data.get("expected_no_calls", []),
+                category=data.get("category", ""),
+                tags=data.get("tags", []),
+                expected_tool_params=data.get("expected_tool_params", {}),
+                live_expected=data.get("live_expected", {}),
+                risk_level=_normalize_risk(data.get("risk_level")),
+                # A tick that omits agent_slug would read the chat's journal and
+                # memory instead of the agent's, so fall back to a per-case slug
+                # rather than to None.
+                agent_slug=data.get("agent_slug") or f"bench_{data['id']}",
+            )
+        )
     return cases
 
 
-def load_all_cases() -> list[ConsultCase | TickCase]:
-    return load_consult_cases() + load_tick_cases()
+def load_tool_cases(path: Path | None = None) -> list[ToolCase]:
+    path = path or DATASETS_DIR / "tools.jsonl"
+    return [
+        ToolCase(
+            id=data["id"],
+            tool=data["tool"],
+            question=data.get("question", ""),
+            domain_name=data.get("domain", ""),
+            # Default the expectation to the tool under test: a per-tool case
+            # that names no expected_tools would score every model 1.0.
+            expected_tools=data.get("expected_tools") or [data["tool"]],
+            expected_tool_params=data.get("expected_tool_params", {}),
+            expected_no_calls=data.get("expected_no_calls", []),
+            live_expected=data.get("live_expected", {}),
+            mock_tools=data.get("mock_tools", {}),
+            risk_level=_normalize_risk(data.get("risk_level")),
+            agent_slug=data.get("agent_slug"),
+            tags=data.get("tags", []),
+        )
+        for data in _iter_jsonl(path)
+    ]
+
+
+def load_agent_cases(path: Path | None = None) -> list[AgentCase]:
+    path = path or DATASETS_DIR / "agents.jsonl"
+    return [
+        AgentCase(
+            id=data["id"],
+            # Explicit None (chat-scoped) is a legitimate value, so read the key
+            # rather than treating a falsy value as "not set".
+            agent_slug=data.get("agent_slug"),
+            question=data.get("question", ""),
+            assistant=data.get("assistant", ""),
+            expected_tools=data.get("expected_tools", []),
+            expected_tool_params=data.get("expected_tool_params", {}),
+            expected_no_calls=data.get("expected_no_calls", []),
+            turns=data.get("turns", []),
+            live_expected=data.get("live_expected", {}),
+            mock_tools=data.get("mock_tools", {}),
+            risk_level=_normalize_risk(data.get("risk_level")),
+            tags=data.get("tags", []),
+        )
+        for data in _iter_jsonl(path)
+    ]
+
+
+def load_all_cases(*, layers: Iterable[str] | None = None) -> list[Case]:
+    """Load every dataset layer, or just the named ones.
+
+    ``layers`` accepts any of ``consult``, ``tick``, ``tool``, ``agent``.
+    """
+    wanted = set(layers) if layers else {"consult", "tick", "tool", "agent"}
+    cases: list[Case] = []
+    if "consult" in wanted:
+        cases += load_consult_cases()
+    if "tick" in wanted:
+        cases += load_tick_cases()
+    if "tool" in wanted:
+        cases += load_tool_cases()
+    if "agent" in wanted:
+        cases += load_agent_cases()
+    return cases
 
 
 def case_prompt_map() -> dict[str, str]:
     """Map case_id → user-facing question / scenario name for UI + persistence."""
     prompts: dict[str, str] = {}
     for case in load_all_cases():
-        if case.type == "tick":
-            prompts[case.id] = case.scenario_name
-        else:
-            prompts[case.id] = case.question
+        prompts[case.id] = (
+            case.scenario_name if case.type == "tick" else getattr(case, "question", "")
+        )
     return prompts
+
+
+def case_domain(case: Case) -> str:
+    """Routing domain for a case. Kept as a function so results dicts can reuse it."""
+    return case.domain
+
+
+def is_mutating(case: Case) -> bool:
+    return _normalize_risk(getattr(case, "risk_level", None)) != "read_only"
+
+
+def filter_cases(
+    cases: list[Case],
+    *,
+    domain: str | None = None,
+    category: str | None = None,
+    layers: Iterable[str] | None = None,
+    max_risk: str | None = None,
+) -> list[Case]:
+    """Apply the CLI/dashboard filters in one place.
+
+    ``max_risk`` keeps cases at or below a risk level in ``RISK_LEVELS`` order, so
+    ``max_risk="read_only"`` is how a run against a staging API without
+    ``BENCH_ALLOW_MUTATING`` drops the cases it isn't allowed to run.
+    """
+    out = list(cases)
+    if layers:
+        wanted = set(layers)
+        out = [c for c in out if c.type in wanted]
+    if domain:
+        out = [c for c in out if c.domain == domain]
+    if category:
+        out = [c for c in out if getattr(c, "category", "") == category]
+    if max_risk:
+        ceiling = RISK_LEVELS.index(_normalize_risk(max_risk))
+        out = [
+            c
+            for c in out
+            if RISK_LEVELS.index(_normalize_risk(getattr(c, "risk_level", None)))
+            <= ceiling
+        ]
+    return out

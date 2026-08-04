@@ -1,9 +1,15 @@
-.PHONY: install baseline test report dashboard dashboard-dev clean tool-surface check-drift
+.PHONY: install test-suite baseline test report dashboard dashboard-dev clean \
+        tool-surface check-drift case-prompts staging-check register-server \
+        sweep matrix route
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
 install:
 	uv sync
+
+# Full unit test suite (fast — no model calls).
+test-suite:
+	uv run python -m pytest -q
 
 # ── Keeping the mocks honest ───────────────────────────────────────────────────
 
@@ -13,9 +19,26 @@ install:
 tool-surface:
 	uv run python scripts/snapshot_tool_surface.py
 
-# Fail if the mocks or the vendored system prompt have drifted from condor.
+# Fail if the mocks, the live MCP wiring, or the vendored system prompt have
+# drifted from condor. Run this after every condor pull.
 check-drift:
-	uv run pytest tests/test_tool_surface_drift.py tests/test_vendored_drift.py -q
+	uv run python -m pytest tests/test_tool_surface_drift.py tests/test_mcp_wiring_drift.py \
+	              tests/test_vendored_drift.py -q
+
+# Regenerate the dashboard's case_id → question map after editing a dataset.
+case-prompts:
+	uv run python scripts/sync_case_prompts.py
+
+# ── Live mode ──────────────────────────────────────────────────────────────────
+
+# Fail-closed pre-flight. Exits non-zero on a blocking failure, so it works as a
+# gate before any live run. See docs/STAGING.md.
+staging-check:
+	uv run python runner.py staging-check
+
+# Register BENCH_SERVER_NAME in condor's config.yml from bench's env vars.
+register-server:
+	uv run python scripts/register_bench_server.py
 
 # ── Workflow ───────────────────────────────────────────────────────────────────
 
@@ -28,11 +51,32 @@ baseline:
 test:
 	uv run python runner.py test $(MODEL)
 
-# Step 3: print a summary table of all runs
+# Step 3: benchmark every model in the registry, smallest first
+# Usage: make sweep [DOMAIN=routine_builder] [MAX_PARAMS_B=14]
+sweep:
+	uv run python runner.py sweep \
+		$(if $(DOMAIN),-d $(DOMAIN),) \
+		$(if $(MAX_PARAMS_B),--max-params-b $(MAX_PARAMS_B),)
+
+# Step 4: aggregate saved runs into a model × domain/tool matrix
+# Usage: make matrix [MODE=live]
+matrix:
+	uv run python runner.py matrix $(if $(MODE),--mode $(MODE),)
+
+# Step 5: recommend the smallest passing model per domain
+# Usage: make route [MIN_PASS_RATE=0.85] [PREFER_LOWER_TOKENS=1]
+route:
+	uv run python runner.py route \
+		$(if $(MIN_PASS_RATE),--min-pass-rate $(MIN_PASS_RATE),) \
+		$(if $(PREFER_LOWER_TOKENS),--prefer-lower-tokens,)
+
+# Print a summary table of all runs
 report:
 	uv run python runner.py report
 
-# Step 4: build the React frontend, then serve everything on http://localhost:8001
+# ── Dashboard ──────────────────────────────────────────────────────────────────
+
+# Build the React frontend, then serve everything on http://localhost:8001
 dashboard:
 	@bash -c 'fuser -k 8001/tcp 2>/dev/null; sleep 0.5; exit 0'
 	cd dashboard/frontend && npm install --silent && npm run build
