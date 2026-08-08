@@ -39,12 +39,16 @@ from bench.matrix import UNCLASSIFIED, ModelEntry, build_matrix, load_models
 # Domains whose recommendation maps onto a concrete condor config key. Domains
 # absent from this map still get a recommendation; they just don't produce a
 # config line, because bench doesn't know where they'd be applied.
+# Keys track condor's shipped agent roster. It changes: `routine_builder` and
+# `agent_builder` were agents once and are now a shared skill and a condor skill
+# respectively, so pointing a recommendation at them would write a config key
+# nothing reads.
 CONDOR_CONFIG_KEYS = {
-    "general_consult": "assistants/condor/default_model",
-    "routine_builder": "agents/routine_builder/agent_key",
+    "general_consult": "agents/condor/agent_key",
     "market_making_expert": "agents/market_making_expert/agent_key",
-    "agent_builder": "agents/agent_builder/agent_key",
-    "strategy_creation": "agents/market_making_expert/agent_key",
+    "directional_trader": "agents/directional_trader/agent_key",
+    "solana_dex_lp_expert": "agents/solana_dex_lp_expert/agent_key",
+    "delta_neutral_funding_agent": "agents/delta_neutral_funding_agent/agent_key",
     "tick_execution": "agents/_defaults/agent_key",
 }
 
@@ -168,6 +172,8 @@ def recommend(
 
     recommendations: dict[str, Any] = {}
     unmet: dict[str, Any] = {}
+    stale: dict[str, Any] = {}
+    live_domains = _dataset_domains()
 
     for domain, cells in (matrix.get("domains") or {}).items():
         # Layer 2 buckets ("tool:market_data") are capabilities, not routing
@@ -176,6 +182,19 @@ def recommend(
         # "unclassified" holds cases whose dataset entry no longer exists, so
         # there is nothing to route either.
         if not is_routing_domain(domain) or domain == UNCLASSIFIED:
+            continue
+
+        # A domain no current dataset produces exists only in older results —
+        # `routine_builder`, say, after condor deleted that agent. Reporting it as
+        # "unmet" would read as a gap to close by benchmarking harder, when the
+        # honest statement is that there is nothing left to route.
+        if live_domains and domain not in live_domains:
+            cells_with_data = {m: c for m, c in cells.items() if c.get("scored")}
+            stale[domain] = {
+                "reason": "no case in the current datasets produces this domain — "
+                "the results are historical",
+                "models_with_results": sorted(cells_with_data),
+            }
             continue
 
         candidates = _candidates(cells, registry)
@@ -261,6 +280,7 @@ def recommend(
         "routing_options": {"prefer_lower_tokens": prefer_lower_tokens},
         "recommendations": recommendations,
         "unmet_domains": unmet,
+        "stale_domains": stale,
         "unranked_models": unranked,
         "unranked_note": (
             "These models were benchmarked but are absent from datasets/models.json, "
@@ -273,6 +293,20 @@ def recommend(
         "config_conflicts": config_conflicts,
         "tool_gaps": _tool_gaps(matrix, registry, min_pass_rate),
     }
+
+
+def _dataset_domains() -> set[str]:
+    """Routing domains the current datasets actually produce.
+
+    Empty when the datasets can't be read, which makes the staleness check a no-op
+    rather than declaring every domain stale.
+    """
+    try:
+        from bench.dataset import load_all_cases
+
+        return {c.domain for c in load_all_cases() if is_routing_domain(c.domain)}
+    except Exception:
+        return set()
 
 
 def _config_snippet(

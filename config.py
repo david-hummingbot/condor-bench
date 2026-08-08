@@ -15,8 +15,8 @@ RESULTS_DIR = ROOT / "results"
 # editable installs (pip install -e .) and regular installs.
 MOCK_MCP_SCRIPT = ROOT / "mock_mcp" / "server.py"
 
-BASELINE_MODEL = os.environ.get("BENCH_BASELINE_MODEL", "anthropic:claude-sonnet-4-6")
-JUDGE_MODEL = os.environ.get("BENCH_JUDGE_MODEL", "claude-sonnet-4-6")
+BASELINE_MODEL = os.environ.get("BENCH_BASELINE_MODEL", "anthropic:claude-sonnet-5")
+JUDGE_MODEL = os.environ.get("BENCH_JUDGE_MODEL", "claude-sonnet-5")
 
 
 # ── Execution mode ─────────────────────────────────────────────────────────────
@@ -34,10 +34,54 @@ def condor_path() -> Path | None:
     Falls back to a sibling ../condor checkout, which is how the repos are laid
     out in development. Returns None when neither resolves to a real checkout,
     so live mode can fail with a clear message instead of an ImportError.
+
+    Set CONDOR_PATH explicitly if more than one condor clone exists on the
+    machine. The fallback cannot tell them apart, and picking the stale one makes
+    every drift check compare against the wrong upstream — which reads as "condor
+    changed" rather than "you're pointed at the wrong clone". See
+    :func:`condor_checkout_label`.
     """
     raw = os.environ.get("CONDOR_PATH") or os.environ.get("CONDOR_REPO")
     candidate = Path(raw).expanduser() if raw else ROOT.parent / "condor"
     return candidate.resolve() if (candidate / "mcp_servers").is_dir() else None
+
+
+def condor_head() -> str:
+    """Short HEAD commit of the resolved condor checkout, or "unknown"."""
+    import subprocess
+
+    repo = condor_path()
+    if repo is None:
+        return "unknown"
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def condor_checkout_label() -> str:
+    """"path @ commit (source: CONDOR_PATH | default)" for diagnostics.
+
+    Every drift failure quotes this. Without it, a mismatch caused by pointing at
+    the wrong clone is indistinguishable from real upstream drift, and the natural
+    response — re-vendoring — would sync bench to the wrong condor.
+    """
+    repo = condor_path()
+    if repo is None:
+        return "no condor checkout (set CONDOR_PATH)"
+    source = (
+        "CONDOR_PATH"
+        if os.environ.get("CONDOR_PATH")
+        else ("CONDOR_REPO" if os.environ.get("CONDOR_REPO") else "default ../condor")
+    )
+    return f"{repo} @ {condor_head()} (via {source})"
 
 
 # ── Staging environment (live mode) ────────────────────────────────────────────

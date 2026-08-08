@@ -30,6 +30,49 @@ MOCK_FOR_SERVER = {
 REFRESH_HINT = "Run `make tool-surface` if production changed; otherwise update the mock."
 
 
+def test_snapshot_matches_the_resolved_condor_checkout():
+    """The pinned surface should come from the checkout everything else reads.
+
+    With more than one condor clone on a machine, ``condor_path()`` can resolve a
+    different one than the snapshot was captured from — and then every drift check
+    compares bench against an upstream nobody is running. That failure looks
+    exactly like real drift, and the natural response (re-vendor, regenerate) would
+    sync bench to the wrong condor. So it is named explicitly.
+
+    Advisory: a snapshot legitimately lags HEAD between syncs, so this only fires
+    when the recorded commit is absent from the resolved checkout entirely.
+    """
+    import subprocess
+
+    from config import condor_checkout_label, condor_path
+
+    repo = condor_path()
+    if repo is None:
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+
+    recorded = _snapshot().get("source_commit", "").split()[0]
+    if not recorded or recorded == "unknown":
+        pytest.skip("snapshot records no source commit")
+
+    try:
+        known = subprocess.run(
+            ["git", "cat-file", "-e", f"{recorded}^{{commit}}"],
+            cwd=repo,
+            capture_output=True,
+            timeout=5,
+        ).returncode == 0
+    except Exception:
+        pytest.skip("git unavailable")
+
+    assert known, (
+        f"datasets/tool_surface.json was captured at condor commit {recorded}, which "
+        f"does not exist in the checkout bench resolves: {condor_checkout_label()}.\n"
+        "That usually means CONDOR_PATH points at a different clone than the one the "
+        "snapshot came from. Set CONDOR_PATH to the right checkout before treating "
+        "any other drift failure as real."
+    )
+
+
 def _snapshot() -> dict:
     if not SNAPSHOT_PATH.exists():
         pytest.skip(f"{SNAPSHOT_PATH.name} missing — run `make tool-surface`")

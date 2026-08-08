@@ -11,7 +11,7 @@ Three rules that decide what a cell actually means:
 together would blend a run made before a prompt fix with one made after, and the
 number would move for reasons unrelated to the model. But "newest run per model"
 would be wrong too: the documented workflow sweeps domain by domain
-(``sweep -d routine_builder``), and that would erase every other domain for that
+(``sweep -d market_making_expert``), and that would erase every other domain for that
 model. So resolution is per *(model, cell)*: each cell takes the newest run that
 actually has cases for it, and cells carry ``run_dir`` so a surprising value can
 be traced back to the run that produced it.

@@ -13,6 +13,11 @@ import anthropic
 
 from config import JUDGE_MODEL
 
+# Output cap for a judge call. Generous on purpose — see the note at the call
+# sites. It is a ceiling, not a spend: judge usage is metered separately and never
+# enters a model's score.
+JUDGE_MAX_TOKENS = 2048
+
 
 class JudgeUsage:
     """Thread-safe running total of judge tokens and cost.
@@ -87,20 +92,54 @@ class ClaudeJudge:
     def generate(self, prompt: str) -> str:
         msg = self._client.messages.create(
             model=self.model_name,
-            max_tokens=512,
+            # The verdict itself is ~80 tokens of JSON. The rest is headroom for
+            # models that emit extended thinking before answering: at 512 a long
+            # transcript could consume the whole budget on thinking blocks and
+            # return no text at all, which scored the case 0 on quality.
+            max_tokens=JUDGE_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         )
         _record(msg)
-        return msg.content[0].text
+        return _text_of(msg)
 
     async def a_generate(self, prompt: str) -> str:
         msg = await self._async_client.messages.create(
             model=self.model_name,
-            max_tokens=512,
+            # The verdict itself is ~80 tokens of JSON. The rest is headroom for
+            # models that emit extended thinking before answering: at 512 a long
+            # transcript could consume the whole budget on thinking blocks and
+            # return no text at all, which scored the case 0 on quality.
+            max_tokens=JUDGE_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         )
         _record(msg)
-        return msg.content[0].text
+        return _text_of(msg)
+
+
+def _text_of(msg: object) -> str:
+    """Join the text blocks of a response, ignoring non-text ones.
+
+    This used to be ``msg.content[0].text``, which assumed the first block is
+    text. On a model that returns extended thinking the first block is a
+    ``ThinkingBlock`` with no ``.text``, so every judge call raised — and
+    ``AnswerQualityMetric`` catches judge errors and returns 0.0, so the whole
+    suite silently scored zero quality while looking like it ran fine. Quality is
+    ~half the composite, so that is not a small wrong number; it is every model
+    failing every case for a reason unrelated to the model.
+    """
+    parts = [
+        block.text
+        for block in (getattr(msg, "content", None) or [])
+        if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+    ]
+    if parts:
+        return "".join(parts)
+    # No text block at all — surface it rather than returning "" and letting the
+    # JSON parse fail with a confusing message.
+    kinds = [getattr(b, "type", "?") for b in (getattr(msg, "content", None) or [])]
+    raise ValueError(
+        f"judge response carried no text block (blocks: {kinds or 'none'})"
+    )
 
 
 def _record(msg: object) -> None:

@@ -177,12 +177,13 @@ This is subtle and it caused the review correction that this whole design hinges
 on, so it is worth stating plainly.
 
 condor's MCP tools read and write memory and skills scoped to whoever is asking.
-Passing `--agent-slug routine_builder` scopes them to `agents/routine_builder/`.
-Omitting it scopes them to the **chat** condor's stores, `assistants/condor/`.
+Passing `--agent-slug market_making_expert` scopes them to
+`agents/market_making_expert/`. Omitting it scopes them to the **chat** condor's
+own stores.
 
-A `routine_builder` case run without the flag therefore cannot find its
-`routine_cookbook` skill. It fails. And the matrix would report
-"routine_builder needs a 14B model" when the truth is that the harness was
+A `market_making_expert` case run without the flag therefore cannot find its
+`pmm_config_playbook` skill. It fails. And the matrix would report
+"market_making_expert needs a 14B model" when the truth is that the harness was
 misconfigured — a harness artifact laundered into a production routing decision.
 
 So:

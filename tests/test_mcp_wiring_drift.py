@@ -4,20 +4,27 @@ Same philosophy as ``test_tool_surface_drift.py``, one layer down: that file kee
 the *mocks* honest about which tools exist, this one keeps *live mode* honest
 about how the real servers are started.
 
-Two things are checked, and both matter:
+Three things are checked, and all three matter:
 
 1. **bench == condor.** ``bench/mcp_provider.build_mcp_configs("live", …)`` must
    produce the same ``name``/``command``/``args`` as condor's own
-   ``build_mcp_servers_for_agent()`` / ``build_mcp_servers_for_session()``. bench
-   loads those functions rather than copying them, so this mostly guards the
-   *call site* — a new required parameter on the condor side (an
-   ``--execution-mode``, say) would change production's output while bench keeps
-   calling the old signature.
+   ``build_mcp_servers_for_session()``. bench loads that function rather than
+   copying it, so this mostly guards the *call site* — a new required parameter on
+   the condor side would change production's output while bench keeps calling the
+   old signature.
 
 2. **Both == a pinned shape.** The expected arg list is spelled out literally
    below. Comparing bench against condor alone can't catch a condor-side change,
    because bench would follow it silently. The pin is what turns "condor changed
-   its MCP wiring" into a failing test someone has to look at.
+   its MCP wiring" into a failing test someone has to look at. It already earned
+   its keep once: condor deleted ``build_mcp_servers_for_agent()`` and folded it
+   into the session builder, and this file is where that surfaced.
+
+3. **No secret rides on argv.** condor moved the API credentials and the bot token
+   off the command line into the subprocess ``env`` (SEC-095) — argv is
+   world-readable through ``ps``. Values are never pinned here (they differ per
+   machine, and pinning a token would put it in the repo); what is pinned is
+   *placement*: credentials in ``env``, coordinates in ``args``.
 
 condor-evals' ``build_mcp_servers()`` fails check 2 today: no ``--server-name``
 on either server and no ``--agent-slug`` on condor. That is why its wiring was
@@ -42,18 +49,45 @@ USER_ID = 999001
 SERVER = "bench_drift_probe"
 HOST = "staging.internal"
 PORT = 8123
-USERNAME = "bench"
-PASSWORD = "bench-secret"
-AGENT_SLUG = "routine_builder"
+# Deliberately unlike every other identifier here: the argv leak check scans for
+# these values as substrings, and a username that appeared inside the server name
+# would make it report a leak that isn't one.
+USERNAME = "probe-user-xyzzy"
+PASSWORD = "probe-pass-plugh"
+AGENT_SLUG = "market_making_expert"
+
+
+def _strip_bot_id(args: list[str]) -> list[str]:
+    """Drop ``--bot-id <digest>``, which is machine-dependent by construction.
+
+    The digest is derived from whatever TELEGRAM_TOKEN the environment holds, so
+    pinning its value would make this test pass or fail based on the developer's
+    ``.env``. Its *presence* is asserted separately.
+    """
+    out: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg == "--bot-id":
+            skip = True
+            continue
+        out.append(arg)
+    return out
 
 
 def _expected_hummingbot_args() -> list[str]:
-    """Pinned mcp-hummingbot spawn args.
+    """Pinned mcp-hummingbot spawn args, ``--bot-id`` removed.
 
     ``--server-name`` is the one condor-evals omits. It selects which
     hummingbot-api instance the tools bind to and is what ``start_agent``
     resolves against; without it the server falls back to HUMMINGBOT_API_URL and
     then to localhost:8000.
+
+    Note what is *not* here: ``--username`` and ``--password``. They used to sit
+    on argv and moved into ``env`` under SEC-095. If they reappear in this list,
+    the fix regressed.
     """
     return [
         "run",
@@ -62,22 +96,21 @@ def _expected_hummingbot_args() -> list[str]:
         "mcp_servers.hummingbot_api",
         "--url",
         f"http://{HOST}:{PORT}",
-        "--username",
-        USERNAME,
-        "--password",
-        PASSWORD,
         "--server-name",
         SERVER,
     ]
 
 
-def _expected_condor_args(agent_slug: str | None, bot_token: str) -> list[str]:
-    """Pinned condor MCP spawn args.
+def _expected_condor_args(agent_slug: str | None) -> list[str]:
+    """Pinned condor MCP spawn args, ``--bot-id`` removed.
 
     ``--agent-slug`` is present only for agent-scoped runs and scopes the
     memory/skill tools to ``agents/{slug}/``. Chat-scoped consults omit it, which
     is what production does for a consult session — so its absence there is
     correct, not a gap.
+
+    ``--bot-token`` used to be here in clear text; SEC-095 replaced it with the
+    non-secret ``--bot-id`` digest and moved the token into ``env``.
     """
     args = [
         "run",
@@ -88,8 +121,6 @@ def _expected_condor_args(agent_slug: str | None, bot_token: str) -> list[str]:
         str(CHAT_ID),
         "--user-id",
         str(USER_ID),
-        "--bot-token",
-        bot_token,
     ]
     if agent_slug:
         args += ["--agent-slug", agent_slug]
@@ -105,6 +136,19 @@ def condor_repo() -> Path:
     if repo is None:
         pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
     return repo
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _report_checkout(condor_repo):
+    """Name the checkout under test, so a failure here can be read correctly.
+
+    A mismatch caused by pointing at a stale clone produces the same red as real
+    upstream drift; the fix for one is CONDOR_PATH and for the other is
+    re-vendoring, so the message has to say which checkout it compared against.
+    """
+    from config import condor_checkout_label
+
+    print(f"\nMCP wiring drift compared against: {condor_checkout_label()}")
 
 
 @pytest.fixture(scope="module")
@@ -180,20 +224,18 @@ def _by_name(configs: list[dict]) -> dict[str, dict]:
     return {c["name"]: c for c in configs}
 
 
+def _production_configs(shared, agent_slug: str | None) -> list[dict]:
+    """What condor itself builds for these inputs."""
+    return shared.build_mcp_servers_for_session(
+        user_id=USER_ID, chat_id=CHAT_ID, server_name=SERVER, agent_slug=agent_slug
+    )
+
+
 # ── Check 2: production output matches the pinned shape ────────────────────────
 @pytest.mark.parametrize("agent_slug", [AGENT_SLUG, None])
 def test_condor_helpers_match_pinned_spawn_args(wiring, agent_slug):
     shared, _ = wiring
-    bot_token = os.environ.get("TELEGRAM_TOKEN", "")
-
-    if agent_slug:
-        produced = shared.build_mcp_servers_for_agent(
-            server_name=SERVER, user_id=USER_ID, chat_id=CHAT_ID, agent_slug=agent_slug
-        )
-    else:
-        produced = shared.build_mcp_servers_for_session(
-            user_id=USER_ID, chat_id=CHAT_ID, server_name=SERVER, agent_slug=None
-        )
+    produced = _production_configs(shared, agent_slug)
 
     by_name = _by_name(produced)
     assert set(by_name) == {"mcp-hummingbot", "condor"}, (
@@ -202,11 +244,11 @@ def test_condor_helpers_match_pinned_spawn_args(wiring, agent_slug):
         "pinned expectations no longer describe."
     )
 
-    assert by_name["mcp-hummingbot"]["args"] == _expected_hummingbot_args(), (
+    assert _strip_bot_id(by_name["mcp-hummingbot"]["args"]) == _expected_hummingbot_args(), (
         "condor's mcp-hummingbot spawn args changed. Update the pin in this test "
         "only after confirming bench passes whatever the new args need."
     )
-    assert by_name["condor"]["args"] == _expected_condor_args(agent_slug, bot_token), (
+    assert _strip_bot_id(by_name["condor"]["args"]) == _expected_condor_args(agent_slug), (
         "condor's condor-MCP spawn args changed. Update the pin in this test only "
         "after confirming bench passes whatever the new args need."
     )
@@ -217,20 +259,26 @@ def test_condor_helpers_match_pinned_spawn_args(wiring, agent_slug):
         )
 
 
+def test_agent_builder_removal_is_handled(wiring):
+    """condor folded build_mcp_servers_for_agent() into the session builder.
+
+    Pinned so that if it comes back — or the survivor is renamed — bench is
+    updated deliberately rather than silently falling back to a private copy of
+    the spawn args.
+    """
+    shared, _ = wiring
+    assert hasattr(shared, "build_mcp_servers_for_session")
+    assert not hasattr(shared, "build_mcp_servers_for_agent"), (
+        "condor re-introduced build_mcp_servers_for_agent(). Decide which builder "
+        "bench should call for agent-scoped cases and update bench/mcp_provider.py."
+    )
+
+
 # ── Check 1: bench reproduces production output ────────────────────────────────
 @pytest.mark.parametrize("agent_slug", [AGENT_SLUG, None])
 def test_bench_live_configs_match_condor(wiring, monkeypatch, agent_slug):
     shared, mcp_provider = wiring
-
-    if agent_slug:
-        expected = shared.build_mcp_servers_for_agent(
-            server_name=SERVER, user_id=USER_ID, chat_id=CHAT_ID, agent_slug=agent_slug
-        )
-    else:
-        expected = shared.build_mcp_servers_for_session(
-            user_id=USER_ID, chat_id=CHAT_ID, server_name=SERVER, agent_slug=None
-        )
-
+    expected = _production_configs(shared, agent_slug)
     actual = _bench_configs(mcp_provider, monkeypatch, agent_slug)
 
     exp, act = _by_name(expected), _by_name(actual)
@@ -252,8 +300,9 @@ def test_bench_adds_only_documented_extras(wiring, monkeypatch):
     Anything else appearing here means live mode is diverging from production in a
     way check 1 can't see, since it only compares command and args.
     """
-    _, mcp_provider = wiring
+    shared, mcp_provider = wiring
     actual = _bench_configs(mcp_provider, monkeypatch, AGENT_SLUG)
+    produced = _by_name(_production_configs(shared, AGENT_SLUG))
 
     for cfg in actual:
         extra = set(cfg) - {"name", "command", "args", "env"}
@@ -267,10 +316,75 @@ def test_bench_adds_only_documented_extras(wiring, monkeypatch):
         assert cfg["cwd"] == str(condor_path()), (
             f"{cfg['name']} cwd={cfg['cwd']!r} — must be the condor repo root"
         )
-        assert mcp_provider.env_overlay_keys(cfg) <= {"HUMMINGBOT_API_URL"}, (
-            f"{cfg['name']} env overlay grew beyond the documented URL pin: "
-            f"{sorted(mcp_provider.env_overlay_keys(cfg))}"
+        # condor populates env itself now (credentials, bot token). bench may add
+        # exactly one key on top; anything more is bench diverging silently.
+        added = mcp_provider.env_overlay_keys(cfg) - mcp_provider.env_overlay_keys(
+            produced[cfg["name"]]
         )
+        assert added <= {"HUMMINGBOT_API_URL"}, (
+            f"{cfg['name']} env overlay grew beyond the documented URL pin: "
+            f"{sorted(added)}"
+        )
+        # And bench must not drop what condor put there — without the credentials
+        # the subprocess would fall back to admin/admin.
+        dropped = mcp_provider.env_overlay_keys(produced[cfg["name"]]) - (
+            mcp_provider.env_overlay_keys(cfg)
+        )
+        assert not dropped, (
+            f"{cfg['name']} lost env entries condor set: {sorted(dropped)}"
+        )
+
+
+@pytest.mark.parametrize("agent_slug", [AGENT_SLUG, None])
+def test_no_secret_rides_on_argv(wiring, monkeypatch, agent_slug):
+    """SEC-095: credentials travel in env, never on the command line.
+
+    argv is world-readable through ``ps``, so an API password or a bot token there
+    is readable by every local user. condor moved them into the subprocess ``env``;
+    this pins that so a future refactor can't quietly put them back — and so bench,
+    which launches the same subprocesses, can't reintroduce them on its own side.
+    """
+    _, mcp_provider = wiring
+    configs = _by_name(_bench_configs(mcp_provider, monkeypatch, agent_slug))
+
+    secrets = {PASSWORD, USERNAME, os.environ.get("TELEGRAM_TOKEN", "")} - {""}
+    for name, cfg in configs.items():
+        argv = " ".join(str(a) for a in cfg["args"])
+        for flag in ("--password", "--username", "--bot-token"):
+            assert flag not in cfg["args"], (
+                f"{name} passes {flag} on argv — SEC-095 moved credentials into env "
+                "because argv is readable via `ps`."
+            )
+        for secret in secrets:
+            assert secret not in argv, (
+                f"{name} leaks a credential value on argv ({secret[:4]}…). Secrets "
+                "belong in the config's env entries."
+            )
+
+    # The credentials must actually be somewhere, or the subprocess falls back to
+    # admin/admin against whatever answers on the resolved URL.
+    hb_env = mcp_provider.env_overlay_keys(configs["mcp-hummingbot"])
+    assert {"HUMMINGBOT_API_USERNAME", "HUMMINGBOT_API_PASSWORD"} <= hb_env, (
+        "mcp-hummingbot got no credentials in env — condor changed how they are "
+        f"delivered (env keys: {sorted(hb_env)}). Update bench to match."
+    )
+
+
+def test_bot_id_digest_replaces_the_raw_token(wiring, monkeypatch):
+    """``--bot-id`` is a non-secret digest; the token itself stays in env."""
+    _, mcp_provider = wiring
+    token = os.environ.get("TELEGRAM_TOKEN", "")
+    if not token:
+        pytest.skip("no TELEGRAM_TOKEN in this environment — nothing to digest")
+
+    configs = _by_name(_bench_configs(mcp_provider, monkeypatch, AGENT_SLUG))
+    for name, cfg in configs.items():
+        assert "--bot-id" in cfg["args"], (
+            f"{name} lost --bot-id. condor's startup reaper seeds on that digest to "
+            "find subprocess trees orphaned by a crash."
+        )
+        digest = cfg["args"][cfg["args"].index("--bot-id") + 1]
+        assert token not in digest, "--bot-id is carrying the raw token, not a digest"
 
 
 def test_playwright_never_enters_the_bench_server_list(wiring, monkeypatch):

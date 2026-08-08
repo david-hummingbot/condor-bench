@@ -1,10 +1,15 @@
 """MCP server configs for benchmark runs — live (production wiring) or mock.
 
 Live mode does not reimplement condor's MCP spawn args. It loads condor's own
-``handlers/agents/_shared.py`` and calls ``build_mcp_servers_for_agent()`` /
-``build_mcp_servers_for_session()``, so the benchmark launches the same
-subprocesses production does — including the two args condor-evals' harness
-drops (``--server-name`` on both servers, ``--agent-slug`` on condor).
+``handlers/agents/_shared.py`` and calls ``build_mcp_servers_for_session()``, so
+the benchmark launches the same subprocesses production does — including the two
+args condor-evals' harness drops (``--server-name`` on both servers,
+``--agent-slug`` on condor).
+
+That loading is also what caught condor's SEC-095 change: credentials used to sit
+on argv, where any local ``ps`` could read them, and now travel in the subprocess
+``env`` instead. A vendored copy of the spawn args would have kept putting the
+API password on the command line while production had stopped.
 
 Why those two matter:
 
@@ -14,10 +19,10 @@ Why those two matter:
   (see condor's ``mcp_servers/hummingbot_api/settings.py``) — on a dev machine,
   plausibly the real API rather than staging.
 * ``--agent-slug`` scopes condor's memory/skill tools to ``agents/{slug}/``.
-  Without it a ``routine_builder`` case reads the *chat* condor's stores, never
-  finds its ``routine_cookbook`` skill, and fails — which the matrix would then
-  report as "routine_builder needs a bigger model". A harness artifact laundered
-  into a routing recommendation.
+  Without it a ``market_making_expert`` case reads the *chat* condor's stores,
+  never finds its ``pmm_config_playbook`` skill, and fails — which the matrix
+  would then report as "market_making_expert needs a bigger model". A harness
+  artifact laundered into a routing recommendation.
 
 The condor package's ``__init__`` chain imports python-telegram-bot, which bench
 does not depend on, so ``_shared.py`` is loaded by file path instead of as
@@ -105,12 +110,16 @@ def load_condor_shared() -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    for required in ("build_mcp_servers_for_agent", "build_mcp_servers_for_session"):
-        if not hasattr(module, required):
-            raise LiveWiringError(
-                f"condor's _shared.py no longer exports {required}(). "
-                "Update bench/mcp_provider.py to match production."
-            )
+    # condor once had a separate build_mcp_servers_for_agent(); it was folded into
+    # the session builder, which now takes server_name and agent_slug and covers
+    # both. Only the survivor is required — but loudly, because a rename here is
+    # exactly the drift that would otherwise send bench off a private copy.
+    if not hasattr(module, "build_mcp_servers_for_session"):
+        raise LiveWiringError(
+            "condor's _shared.py no longer exports build_mcp_servers_for_session(). "
+            "Update bench/mcp_provider.py to match production — do not vendor a copy "
+            "of the spawn args."
+        )
 
     _shared_module = module
     return module
@@ -164,23 +173,17 @@ def _live_configs(agent_slug: str | None, server_name: str | None) -> list[dict]
             "Register it with: uv run python scripts/register_bench_server.py"
         )
 
-    # Agent-scoped cases go through the agent builder (server resolved by name);
-    # chat-scoped consults go through the session builder, matching how
-    # production runs a consult. Both pass server_name to BOTH servers.
-    if agent_slug:
-        configs = shared.build_mcp_servers_for_agent(
-            server_name=server_name,
-            user_id=int(staging["user_id"]),
-            chat_id=int(staging["chat_id"]),
-            agent_slug=agent_slug,
-        )
-    else:
-        configs = shared.build_mcp_servers_for_session(
-            user_id=int(staging["user_id"]),
-            chat_id=int(staging["chat_id"]),
-            server_name=server_name,
-            agent_slug=None,
-        )
+    # One builder covers both scopes: server_name pins the hummingbot instance and
+    # agent_slug decides whether condor's memory/skill tools read the agent's own
+    # stores or the chat's. Passing server_name explicitly also skips condor's
+    # chat-preference resolution, which would otherwise pick whatever server the
+    # bench chat id happens to default to.
+    configs = shared.build_mcp_servers_for_session(
+        user_id=int(staging["user_id"]),
+        chat_id=int(staging["chat_id"]),
+        server_name=server_name,
+        agent_slug=agent_slug,
+    )
 
     configs = [c for c in configs if c.get("name") not in EXCLUDED_MCP_SERVERS]
 

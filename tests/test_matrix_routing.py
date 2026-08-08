@@ -19,6 +19,21 @@ import pytest
 from bench.matrix import build_matrix
 from bench.routing import recommend
 
+# Domains these fixtures use must be domains the datasets actually produce: the
+# router classifies anything else as *stale* (a domain only older results carry),
+# which is correct behaviour and would silently stop these tests exercising their
+# subject. Resolved from the dataset so a roster change moves the tests with it.
+def _routing_domains() -> list[str]:
+    from bench.dataset import is_routing_domain, load_all_cases
+
+    return sorted({c.domain for c in load_all_cases() if is_routing_domain(c.domain)})
+
+
+_DOMAINS = _routing_domains()
+DOMAIN_A = "general_consult"
+DOMAIN_B = next(d for d in _DOMAINS if d != DOMAIN_A)
+DOMAIN_C = next(d for d in _DOMAINS if d not in (DOMAIN_A, DOMAIN_B))
+
 MODELS_JSON = {
     "models": [
         {"key": "ollama:small:3b", "params_b": 3, "provider": "local"},
@@ -109,11 +124,11 @@ def test_harness_artifacts_are_excluded(tmp_path, registry):
     write_run(
         results,
         "ollama:mid:14b",
-        _four("routine_builder", 0.9, "ok")
+        _four(DOMAIN_B, 0.9, "ok")
         + [
             case(
                 "misscoped",
-                "routine_builder",
+                DOMAIN_B,
                 0.1,
                 harness_artifact="assistant prompt fell back (fallback:vendored)",
             )
@@ -121,7 +136,7 @@ def test_harness_artifacts_are_excluded(tmp_path, registry):
     )
 
     matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
-    cell = matrix["domains"]["routine_builder"]["ollama:mid:14b"]
+    cell = matrix["domains"][DOMAIN_B]["ollama:mid:14b"]
     assert cell["excluded"] == 1
     assert cell["pass_rate"] == 1.0
     assert cell["excluded_reasons"], "the exclusion must be visible, not silent"
@@ -183,17 +198,17 @@ def test_destructive_failure_blocks_a_recommendation(tmp_path, registry):
     write_run(
         results,
         "ollama:small:3b",
-        _four("strategy_creation", 0.95, "s")
-        + [case("danger", "strategy_creation", 0.4, risk_level="destructive")],
+        _four(DOMAIN_B, 0.95, "s")
+        + [case("danger", DOMAIN_B, 0.4, risk_level="destructive")],
     )
-    write_run(results, "ollama:mid:14b", _four("strategy_creation", 0.9, "m")
-              + [case("danger", "strategy_creation", 0.9, risk_level="destructive")])
+    write_run(results, "ollama:mid:14b", _four(DOMAIN_B, 0.9, "m")
+              + [case("danger", DOMAIN_B, 0.9, risk_level="destructive")])
 
     matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
-    assert matrix["domains"]["strategy_creation"]["ollama:small:3b"]["destructive_failures"]
+    assert matrix["domains"][DOMAIN_B]["ollama:small:3b"]["destructive_failures"]
 
     routing = recommend(matrix, models_path=registry)
-    rec = routing["recommendations"]["strategy_creation"]
+    rec = routing["recommendations"][DOMAIN_B]
     assert rec["model"] == "ollama:mid:14b", (
         "the 3B model was recommended despite botching a destructive case"
     )
@@ -202,15 +217,15 @@ def test_destructive_failure_blocks_a_recommendation(tmp_path, registry):
 def test_thin_evidence_is_reported_as_thin(tmp_path, registry):
     """One passing case is not a verdict, and must not be reported as a failure."""
     results = tmp_path / "results"
-    write_run(results, "ollama:mid:14b", [case("only", "agent_builder", 1.0)])
+    write_run(results, "ollama:mid:14b", [case("only", DOMAIN_C, 1.0)])
 
     routing = recommend(
         build_matrix(mode="live", results_dir=results, models_path=registry),
         min_cases=3,
         models_path=registry,
     )
-    assert "agent_builder" not in routing["recommendations"]
-    gap = routing["unmet_domains"]["agent_builder"]
+    assert DOMAIN_C not in routing["recommendations"]
+    gap = routing["unmet_domains"][DOMAIN_C]
     assert gap["insufficient_evidence"] is True
     assert "scored case" in gap["reason"]
 
@@ -307,7 +322,7 @@ def test_domain_by_domain_sweeps_accumulate(tmp_path, registry):
     write_run(
         results,
         "ollama:mid:14b",
-        _four("routine_builder", 0.9, "rb"),
+        _four(DOMAIN_B, 0.9, "rb"),
         timestamp="2026-08-04T00:00:00Z",
     )
 
@@ -315,10 +330,10 @@ def test_domain_by_domain_sweeps_accumulate(tmp_path, registry):
     assert matrix["domains"]["general_consult"]["ollama:mid:14b"]["scored"] == 4, (
         "the older general_consult run was dropped when a newer domain-only run landed"
     )
-    assert matrix["domains"]["routine_builder"]["ollama:mid:14b"]["scored"] == 4
+    assert matrix["domains"][DOMAIN_B]["ollama:mid:14b"]["scored"] == 4
 
     routing = recommend(matrix, models_path=registry)
-    assert set(routing["recommendations"]) == {"general_consult", "routine_builder"}
+    assert set(routing["recommendations"]) == {DOMAIN_A, DOMAIN_B}
 
 
 def test_unregistered_model_is_reported_not_silently_dropped(tmp_path, registry):
@@ -401,30 +416,112 @@ def test_unclassified_is_not_routed(tmp_path, registry):
     assert "unclassified" not in routing["unmet_domains"]
 
 
-def test_shared_config_key_conflict_is_surfaced(tmp_path, registry):
-    """Two domains, one config key, different winners — don't let a dict decide."""
+def test_shared_config_key_conflict_is_surfaced(tmp_path, registry, monkeypatch):
+    """Two domains, one config key, different winners — don't let a dict decide.
+
+    The key map is monkeypatched rather than relying on two real domains happening
+    to share a key: condor's agent roster changes (``routine_builder`` was an agent
+    and is now a shared skill), and a test that silently stops exercising its
+    subject when the roster shifts is worse than no test.
+    """
+    import bench.routing as routing_mod
+
+    key = "agents/shared_probe/agent_key"
+    monkeypatch.setattr(
+        routing_mod,
+        "CONDOR_CONFIG_KEYS",
+        {DOMAIN_A: key, DOMAIN_B: key},
+    )
+
     results = tmp_path / "results"
     write_run(
         results,
         "ollama:small:3b",
-        _four("market_making_expert", 0.95, "mm3")
-        + _four("strategy_creation", 0.3, "sc3"),
+        _four(DOMAIN_A, 0.95, "a3") + _four(DOMAIN_B, 0.3, "b3"),
     )
     write_run(
         results,
         "ollama:mid:14b",
-        _four("market_making_expert", 0.95, "mm14")
-        + _four("strategy_creation", 0.95, "sc14"),
+        _four(DOMAIN_A, 0.95, "a14") + _four(DOMAIN_B, 0.95, "b14"),
     )
 
     routing = recommend(
         build_matrix(mode="live", results_dir=results, models_path=registry),
         models_path=registry,
     )
-    key = "agents/market_making_expert/agent_key"
-    assert routing["recommendations"]["market_making_expert"]["model"] == "ollama:small:3b"
-    assert routing["recommendations"]["strategy_creation"]["model"] == "ollama:mid:14b"
+    assert routing["recommendations"][DOMAIN_A]["model"] == "ollama:small:3b"
+    assert routing["recommendations"][DOMAIN_B]["model"] == "ollama:mid:14b"
     assert routing["condor_config_snippet"][key] == "ollama:mid:14b", (
         "the shared key took the smaller model, which one of its domains fails"
     )
     assert key in routing["config_conflicts"]
+
+
+def test_config_keys_name_agents_condor_actually_ships():
+    """A recommendation is only useful if its config key exists upstream.
+
+    condor deleted ``routine_builder`` and ``agent_builder`` as agents; a key
+    pointing at ``agents/routine_builder/agent_key`` would be written into a config
+    nothing reads, and the recommendation would look applied while changing
+    nothing. Skips without a condor checkout.
+    """
+    from bench.routing import CONDOR_CONFIG_KEYS
+    from config import condor_path
+
+    repo = condor_path()
+    if repo is None or not (repo / "agents").is_dir():
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+
+    shipped = {p.name for p in (repo / "agents").iterdir() if p.is_dir()}
+    missing = {}
+    for domain, key in CONDOR_CONFIG_KEYS.items():
+        if not key.startswith("agents/"):
+            continue
+        slug = key.split("/")[1]
+        # `_defaults` is condor's fallback config, not an agent — it is a valid
+        # target and legitimately has no AGENT.md.
+        if slug not in shipped:
+            missing[domain] = key
+
+    assert not missing, (
+        f"routing would write config keys for agents condor does not ship: {missing}. "
+        f"condor's roster is {sorted(shipped)}. Update CONDOR_CONFIG_KEYS in "
+        "bench/routing.py."
+    )
+
+
+def test_domain_deleted_from_the_datasets_is_stale_not_unmet(tmp_path, registry):
+    """A domain only older results carry can't be routed — and isn't a gap to close.
+
+    condor deletes agents (`routine_builder` went away), so results outlive the
+    domains that produced them. Calling that "unmet" reads as "benchmark harder";
+    the honest statement is that there is nothing left to route.
+    """
+    results = tmp_path / "results"
+    write_run(results, "ollama:mid:14b", _four("a_domain_no_dataset_produces", 0.2, "old"))
+
+    routing = recommend(
+        build_matrix(mode="live", results_dir=results, models_path=registry),
+        models_path=registry,
+    )
+    assert "a_domain_no_dataset_produces" not in routing["unmet_domains"]
+    assert "a_domain_no_dataset_produces" in routing["stale_domains"]
+    assert routing["stale_domains"]["a_domain_no_dataset_produces"]["models_with_results"] == [
+        "ollama:mid:14b"
+    ]
+
+
+def test_a_live_domain_is_still_reported_as_unmet(tmp_path, registry):
+    """The staleness check must not swallow a real gap."""
+    from bench.dataset import load_all_cases
+
+    live = next(c.domain for c in load_all_cases() if c.domain == "general_consult")
+    results = tmp_path / "results"
+    write_run(results, "ollama:mid:14b", _four(live, 0.2, "bad"))
+
+    routing = recommend(
+        build_matrix(mode="live", results_dir=results, models_path=registry),
+        models_path=registry,
+    )
+    assert live in routing["unmet_domains"]
+    assert live not in routing["stale_domains"]

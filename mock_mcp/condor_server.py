@@ -36,10 +36,14 @@ def _mock(tool: str, default: dict) -> dict:
 
 @mcp.tool()
 async def trading_agent_journal_write(
+    agent_id: str | None = None,
     entry_type: str = "action",
     text: str = "",
+    reasoning: str = "",
+    risk_note: str = "",
+    tick: int = 0,
     category: str | None = None,
-    agent_id: str | None = None,
+    section: str = "",
 ) -> dict:
     args = {"entry_type": entry_type, "text": text}
     result = {"status": "written", "entry_id": "mock-journal-001"}
@@ -50,10 +54,10 @@ async def trading_agent_journal_write(
 @mcp.tool()
 async def trading_agent_journal_read(
     agent_id: str | None = None,
-    limit: int = 20,
-    entry_type: str | None = None,
+    max_entries: int = 20,
+    section: str | None = None,
 ) -> dict:
-    args = {"agent_id": agent_id, "limit": limit}
+    args = {"agent_id": agent_id, "max_entries": max_entries}
     result = _mock("trading_agent_journal_read", {"entries": [], "total": 0})
     _log("trading_agent_journal_read", args, result)
     return result
@@ -74,6 +78,8 @@ async def manage_memory(
     description: str | None = None,
     content: str | None = None,
     type: str | None = None,
+    max_entries: int | None = None,
+    query: str | None = None,
 ) -> dict:
     args = {"action": action, "name": name}
     if action == "list":
@@ -95,6 +101,14 @@ async def manage_skill(
     description: str | None = None,
     when_to_use: str | None = None,
     body: str | None = None,
+    agent: str | None = None,
+    content: str | None = None,
+    file: str | None = None,
+    max_entries: int | None = None,
+    query: str | None = None,
+    references_routine: str | None = None,
+    shared: bool | None = None,
+    strategy_id: str | None = None,
 ) -> dict:
     args = {"action": action, "name": name}
     if action == "list":
@@ -112,6 +126,10 @@ async def manage_routines(
     action: str = "list",
     name: str | None = None,
     config: dict | None = None,
+    agent: str | None = None,
+    code: str | None = None,
+    shared: bool | None = None,
+    strategy_id: str | None = None,
 ) -> dict:
     args = {"action": action, "name": name}
     if action == "list":
@@ -128,17 +146,17 @@ async def manage_routines(
 async def manage_servers(
     action: str = "list",
     name: str | None = None,
-    host: str | None = None,
-    port: int | None = None,
-    username: str | None = None,
-    password: str | None = None,
 ) -> dict:
     args = {"action": action, "name": name}
     if action == "list":
         result = _mock("manage_servers_list", {"servers": []})
-    elif action == "add":
-        result = {"status": "added", "name": name, "message": f"Server '{name}' added successfully."}
+    elif action == "status":
+        result = _mock("manage_servers_status", {
+            "server": name or "default", "status": "online", "message": "Connected",
+        })
     elif action == "test":
+        # Not a documented production action, but c013 in the dataset exercises
+        # it — kept so that case's mock_tools key stays live.
         result = _mock("manage_servers_test", {"status": "connected", "latency_ms": 45})
     else:
         result = {"status": "ok"}
@@ -149,8 +167,11 @@ async def manage_servers(
 @mcp.tool()
 async def get_user_context() -> dict:
     result = _mock("get_user_context", {
-        "preferences": {},
-        "profile": {"timezone": "UTC", "currency": "USD"},
+        "active_server": "default",
+        "user_role": "user",
+        "is_admin": False,
+        "active_agent_key": "claude-acp:sonnet",
+        "custom_llm_endpoints": [],
     })
     _log("get_user_context", {}, result)
     return result
@@ -171,7 +192,7 @@ async def manage_trading_agent(
     config: dict | None = None,
 ) -> dict:
     args = {"action": action, "agent_id": agent_id}
-    if action == "list":
+    if action in ("list", "list_agents", "list_agent_definitions"):
         result = _mock("manage_trading_agent_list", {"agents": []})
     elif action == "start":
         result = {"status": "started", "agent_id": agent_id}
@@ -189,6 +210,7 @@ async def delegate(
     agent: str | None = None,
     task: str | None = None,
     task_id: str | None = None,
+    on_complete: str = "notify",
 ) -> dict:
     args = {"action": action, "agent": agent, "task_id": task_id}
     if action == "start":
@@ -206,13 +228,10 @@ async def delegate(
 
 @mcp.tool()
 async def get_available_models(
-    tick_tokens: int | None = None,
-    strategy_chars: int | None = None,
-    frequency_sec: int | None = None,
     openrouter_query: str | None = None,
     openrouter_limit: int | None = None,
 ) -> dict:
-    args = {"tick_tokens": tick_tokens, "frequency_sec": frequency_sec}
+    args = {"openrouter_query": openrouter_query, "openrouter_limit": openrouter_limit}
     result = _mock("get_available_models", {"models": [], "recommended": None})
     _log("get_available_models", args, result)
     return result

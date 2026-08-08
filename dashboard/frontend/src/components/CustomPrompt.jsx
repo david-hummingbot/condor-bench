@@ -361,7 +361,7 @@ export default function CustomPrompt() {
           <input
             type="text"
             className="input"
-            placeholder="e.g. routine_builder"
+            placeholder="e.g. market_making_expert"
             value={agentSlug}
             onChange={e => setAgentSlug(e.target.value)}
             style={{ maxWidth: 420 }}

@@ -35,19 +35,19 @@ from config import DATASETS_DIR
 
 RISK_LEVELS = ("read_only", "mutating", "destructive")
 
-# Category → routing domain. The matrix and router group by domain, not by the
-# finer-grained categories, because a routing decision is per agent/assistant.
-CATEGORY_DOMAINS = {
-    "strategy-creation": "strategy_creation",
-    "routine-builder": "routine_builder",
-}
+# Category → routing domain, for consult categories that map onto a *different*
+# routing target than the default. Empty today: the consult set is one "everyday"
+# category and all of it is chat-scoped Condor work. The hook stays because it is
+# how a future category (a specialist-only consult set, say) would be routed
+# without touching the loaders.
+CATEGORY_DOMAINS: dict[str, str] = {}
 
 # Tick categories all belong to one domain: they exercise the same agent path.
 _TICK_DOMAIN = "tick_execution"
 _DEFAULT_CONSULT_DOMAIN = "general_consult"
 
 # Layer 2 domains are namespaced so the router can tell a capability bucket
-# ("market_data") from something Condor can actually route ("routine_builder").
+# ("market_data") from something Condor can actually route ("market_making_expert").
 TOOL_DOMAIN_PREFIX = "tool:"
 
 
@@ -179,7 +179,7 @@ class AgentCase:
         """The routing target: an agent's slug, or the chat assistant.
 
         An agent case's domain IS its assistant, because that is the unit a
-        recommendation is expressed in ("routine_builder → qwen2.5:14b"). A
+        recommendation is expressed in ("market_making_expert → qwen2.5:14b"). A
         chat-scoped case (``agent_slug: null``) belongs to ``general_consult``
         alongside the Layer 1 consults rather than to a domain of its own — same
         prompt, same stores, same config key, so splitting them would produce two

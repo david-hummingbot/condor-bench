@@ -52,7 +52,7 @@ test:
 	uv run python runner.py test $(MODEL)
 
 # Step 3: benchmark every model in the registry, smallest first
-# Usage: make sweep [DOMAIN=routine_builder] [MAX_PARAMS_B=14]
+# Usage: make sweep [DOMAIN=market_making_expert] [MAX_PARAMS_B=14]
 sweep:
 	uv run python runner.py sweep \
 		$(if $(DOMAIN),-d $(DOMAIN),) \

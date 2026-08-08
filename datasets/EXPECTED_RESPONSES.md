@@ -25,224 +25,115 @@ mock mode rather than against 1.0; live mode has no such artifact.
 
 ## Consult cases (`consult.jsonl`)
 
-### Concepts
+The dataset was refactored (2026-08-09) to a single "everyday usage" category: 15 simple, high-frequency status-lookup questions real users ask most often, each resolving to exactly one tool call. See `FRAMEWORK_IMPROVEMENTS.md` §10 for the roadmap toward broader per-tool/per-agent coverage.
 
-#### c001 — Grid vs CLMM
-**Question:** Difference between grid trading and CLMM liquidity provision; when to choose each.
+### Everyday usage
 
-**Favorable outcome**
-- Explain grid: discrete buy/low–sell/high levels in a range; profits from mean reversion / sideways markets.
-- Explain CLMM: continuous concentrated liquidity around a price band; earns fees; different inventory and IL dynamics.
-- Choose grid for CEX range-bound pairs and simple inventory control; choose CLMM for DEX fee farming when you accept IL and want to provide liquidity in a band.
-- No tools required.
-
-#### c006 — Strategy tick
-**Question:** What happens during a strategy tick; role of the journal.
+#### c001 — Portfolio balance
+**Question:** What's my current portfolio balance?
 
 **Favorable outcome**
-- Describe the tick loop: context/risk injected → agent gathers market data via MCP → decides hold/create/stop → executes only via `manage_executors` (not raw `place_order`) → journals action/learning.
-- Journal: short action line per tick; optional market/execution learnings; used as memory for later ticks.
-- No tools required.
+- Call `get_portfolio_overview` and report total/available balance in plain terms.
+- Don't fabricate numbers if the tool result is empty/unavailable — say so.
+- Tools: `get_portfolio_overview`.
 
-#### c008 — Consult vs loop mode
-**Question:** Difference between consult and loop mode; when to use each; mid-session switching.
-
-**Favorable outcome**
-- Consult: interactive Q&A / one-shot setup with the user in the loop.
-- Loop: autonomous recurring ticks that trade under strategy + risk limits.
-- Use consult to design/configure; use loop to run. Switching mid-session is a config/mode change (stop loop before redesigning if needed) — be clear and practical.
-- No tools required.
-
----
-
-### Troubleshooting
-
-#### c002 — Grid with no fills (uptrend)
-**Question:** BTC/USDT grid running 4h with no fills while market trends up.
+#### c002 — Active API server
+**Question:** What API server am I connected to right now?
 
 **Favorable outcome**
-- Diagnose: price likely walked above the grid / all levels filled on one side; range too narrow or misplaced for a trending market.
-- Recommend: check mid vs min/max; widen or re-center range; consider stopping and switching to trend/DCA if trend continues.
-- Safety-first; do not suggest blindly restarting the same config.
-- No tools required (advisory).
+- Call `get_user_context` and state the `active_server` value directly.
+- Tools: `get_user_context`.
 
-#### c011 — Local model never calls tools
-**Question:** `ollama:llama3.1:8b` only journals, never calls tools on ticks.
+#### c003 — BTC/USDT price
+**Question:** What's the current price of BTC/USDT?
 
 **Favorable outcome**
-- Likely causes: weak tool-calling on small local models; MCP/tool preload issues; prompt not exposing tools; temperature/agent config.
-- Fixes: use a stronger tool-capable model; verify MCP servers attached; confirm pydantic-ai / tool schema wiring; test with a known tool-calling model.
-- No tools required.
+- Call `get_market_data` and report the mid/bid/ask price.
+- Tools: `get_market_data`.
 
-#### c015 — Losing grid (multi-turn)
-**Turn 1:** Help diagnose losses on BTC grid.  
-**Turn 2:** Grid was $62k–$68k / 20 levels; BTC now $61,200.
+#### c004 — Open orders
+**Question:** Do I have any open orders right now?
 
 **Favorable outcome**
-- Call `get_market_data` and `manage_executors` (expected tools).
-- Conclude price is **below the grid** (out of range) → buy wall / adverse inventory / continued losses if left alone.
-- Recommend stop or re-center lower, tighten risk, avoid “hope” holds without a plan.
-- Multi-turn: use the user’s range details in the diagnosis.
+- Call `get_portfolio_overview` and list any `open_orders`, or state there are none.
+- Tools: `get_portfolio_overview`.
 
----
-
-### Risk
-
-#### c003 — Max drawdown stop
-**Question:** Executor stopped at 12% DD (limit 10%). Restart immediately? With what changes?
+#### c005 — Running bots
+**Question:** What bots do I have running?
 
 **Favorable outcome**
-- **Do not** recommend immediate restart at the same size/limits.
-- Advise cooling off, reviewing why DD hit, reducing size, optionally tightening or consciously adjusting `max_drawdown_pct`, fixing the strategy cause.
-- Emphasize capital preservation.
-- No tools required.
+- Call `manage_bots` and summarize bot names/status.
+- Tools: `manage_bots`.
 
-#### c007 — Volatile SOL grid risk limits
-**Question:** Risk limits for $2,000 SOL/USDT volatile grid: `max_drawdown_pct`, `max_position_size`, `max_open_executors`.
+#### c006 — Server online check
+**Question:** Is my Hummingbot API server online?
 
 **Favorable outcome**
-- Conservative numeric guidance, e.g. DD ~5–10%, position size well under $2k total (often ≤50–80% of capital), few open executors (1–2 for a single volatile pair).
-- Justify tighter limits for altcoin volatility.
-- No tools required.
+- Call `manage_servers` (status check on the active server) and report online/offline plainly.
+- Tools: `manage_servers`.
 
----
-
-### Configuration & sizing
-
-#### c004 — $5,000 portfolio sizing
-**Question:** How many executors, position sizing, risk across pairs.
+#### c007 — Total P&L
+**Question:** What's my total P&L across my active positions?
 
 **Favorable outcome**
-- Concrete but conservative plan: e.g. 2–4 executors, sized so sum of risk stays under capital with headroom; diversify across uncorrelated pairs; leave cash buffer.
-- Tie sizing to max DD / max position limits.
-- No tools required.
+- Call `manage_executors` (performance report) and report realized/total PnL.
+- Tools: `manage_executors`.
 
-#### c013 — Connect Binance (multi-turn)
-**Turn 1:** Connect Binance to Condor.  
-**Turn 2:** User supplies API key/secret and server name `my-binance`.
+#### c008 — Trade history
+**Question:** Show me my trade history from the past week.
 
 **Favorable outcome**
-- **Do not** accept or store API keys in chat. Do **not** call `manage_servers` for key setup.
-- Direct the user to the Condor web dashboard **Settings → Keys**, with label/name `my-binance`.
-- Warn that pasting secrets in chat is unsafe; recommend rotating if they were real keys.
-- No required tools (`expected_tools: []`).
+- Call `search_history` and summarize recent fills (pair, side, price, time).
+- Tools: `search_history`.
 
----
-
-### Strategy advice
-
-#### c005 — ETH trend-following setup
-**Question:** Executor type/config and indicators for ETH/USDT trend following.
+#### c009 — Active executors
+**Question:** What executors do I have active right now?
 
 **Favorable outcome**
-- Prefer trend/DCA or directional executor over a static mean-reversion grid.
-- Suggest monitoring trend indicators (e.g. MA crossover, momentum/RSI filters, volume) and clear entry/exit or invalidation rules.
-- Condor-specific: configure via executors/controllers, respect risk limits.
-- No tools required.
+- Call `manage_executors` (list/search) and summarize active executors by pair/type.
+- Tools: `manage_executors`.
 
-#### c010 — When grids win vs switch
-**Question:** When grids outperform; when to switch to trend or DCA; decision framework.
+#### c010 — Accessible servers
+**Question:** List the API servers I have access to.
 
 **Favorable outcome**
-- Grids: range-bound, mean-reverting, moderate vol.
-- Trend: clear directional moves / breakouts.
-- DCA: accumulating through dips / longer horizon.
-- Give a simple decision framework (regime → strategy) without hedging into uselessness.
-- No tools required.
+- Call `manage_servers` (list) and enumerate server names/permissions, noting which is active.
+- Tools: `manage_servers`.
 
-#### c012 — BTC DCA 30 days / $10k
-**Question:** Configure DCA, intervals, flash-crash handling.
+#### c011 — Configured trading agents
+**Question:** What trading agents do I have set up?
 
 **Favorable outcome**
-- Rough plan: ~$10k over 30 days → interval + order size that sum to budget (e.g. daily or every few hours).
-- Flash crash: pause / widen stops / optional reserve tranche / max DD — do not blindly keep buying without risk caps.
-- No tools required.
+- Call `manage_trading_agent` (list agents) and summarize agent names/slugs/status.
+- Tools: `manage_trading_agent`.
 
-#### c014 — New grid, unsure pair/size (multi-turn)
-**Turn 1:** Help set up grid; unsure pair/sizing.  
-**Turn 2:** ETH/USDT Binance, ~$2,000, moderate risk.
+#### c012 — Available skills
+**Question:** What skills do you have available to you?
 
 **Favorable outcome**
-- Call `get_market_data` (expected).
-- Propose a concrete moderate grid: range around mid (~$3,200), levels, quote amount using a fraction of $2k, risk notes.
-- Ask only if a critical param is still missing; otherwise be actionable.
+- Call `manage_skill` (list) and summarize available playbooks.
+- Tools: `manage_skill`.
 
----
-
-### Analysis
-
-#### c009 — PnL attribution
-**Question:** Interpreting Condor performance reports; realized vs unrealized for grids.
+#### c013 — Active model
+**Question:** Which LLM model are you currently running on?
 
 **Favorable outcome**
-- Call `manage_executors` (expected) and use returned PnL figures.
-- Realized: closed grid fills / completed cycles booked to PnL.
-- Unrealized: open inventory / open levels mark-to-market.
-- Explain how grid partial fills can show mixed realized + unrealized.
-- Ground explanation in Condor/executor reporting language.
+- Call `get_user_context` and report the `active_agent_key` value directly.
+- Tools: `get_user_context`.
 
----
-
-### Strategy creation (action cases)
-
-#### sc001 — Create BTC grid ($800, ±2%, 10 levels)
-**Favorable outcome**
-- Tools: `get_market_data`, then `manage_executors` (create).
-- With mid ~$65,000 → range ≈ **$63,700–$66,300**, **10** levels, **~$800** quote, Binance BTC-USDT.
-- Confirm creation (mock: `grid-btc-001`).
-
-#### sc002 — Create ETH DCA
-**Favorable outcome**
-- Tool: `manage_executors` (create DCA).
-- Params: Binance ETH-USDT, **$50** every **4h**, max **10** orders, stop below **$2,500**.
-- Confirm (mock: `dca-eth-001`).
-
-#### sc003 — XRP grid from portfolio (multi-turn)
-**Turns:** XRPL → switch to XRP-USDT Binance → create grid.
+#### c014 — BTC perpetual funding rate
+**Question:** What's the funding rate on BTC perpetual right now?
 
 **Favorable outcome**
-- Tools: `get_portfolio_overview`, `get_market_data`, `manage_executors`.
-- Use ~90% of available (~$219 of ~$243), create grid after market fetch.
-- Confirm (mock: `grid-xrp-001`). Follow the user’s pivot off XRPL.
+- Call `get_market_data` (funding rate, on a `_perpetual` connector) and report the rate plainly.
+- Tools: `get_market_data`.
 
-#### sc004 — PMM controller on `eth-maker`
-**Favorable outcome**
-- Tools: `manage_bots`, `manage_controllers`.
-- Deploy PMM for ETH-USDT on Binance: **0.1%** spread, **$500** each side, on bot `eth-maker`.
-- Confirm deployment (mock: `pmm-eth-001`).
-
----
-
-### Routine builder
-
-#### rb001 — Skill vs routine
-**Favorable outcome**
-- Skill: playbook / know-how (when + steps); advisory.
-- Routine: executable scheduled script (`run(ctx)`), can notify/journal.
-- Write a routine when the check is repeated on a schedule; use a skill (or manual) for one-off reasoning.
-- No tools required.
-
-#### rb002 — Broken `funding-rate-alert`
-**Favorable outcome**
-- Call `manage_routines` (list/status).
-- Diagnose: last run error `KeyError: 'funding_rate'` / schema change; not “funding never high.”
-- Propose fix: update field access to new schema, retest, confirm schedule.
-- Do not claim the routine is healthy.
-
-#### rb003 — Correlation routine (follow skill)
-**Favorable outcome**
-- Tools: `manage_skill` (read `routine_builder`), then `manage_routines` (list, then create).
-- Avoid name collision with existing `funding-rate-alert`.
-- Propose/create daily BTC/ETH 30d correlation routine that logs results, following the skill structure.
-
-#### rb004 — Morning drawdown alert (multi-turn)
-**Turn 1:** Routine: 9am portfolio DD check, notify if >15%.  
-**Turn 2:** Run it now.
+#### c015 — Open LP positions
+**Question:** Do I have any LP positions open?
 
 **Favorable outcome**
-- Tools: `manage_routines` (create/configure, then run).
-- On run, report mock output: DD 6.2%, within threshold, no alert.
-- Multi-turn: actually run when asked.
+- Call `get_portfolio_overview` (LP positions included) and list any open positions, or state there are none.
+- Tools: `get_portfolio_overview`.
 
 ---
 
@@ -307,21 +198,26 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 
 `risk` gates whether a case runs at all in live mode: without
 `BENCH_ALLOW_MUTATING`, only `read_only` cases run. `slug` is the `agent_slug` the
-case is run under — blank means chat-scoped.
+case is run under — blank means chat-scoped, which is what a production consult
+does.
 
 | ID | Expected tools | Must not call | Risk | Slug |
 |----|----------------|---------------|------|------|
-| c001–c008, c010–c013, rb001 | _(none — advisory)_ | — | read_only | (rb001: `routine_builder`) |
+| c001 | `get_portfolio_overview` | — | read_only | — |
+| c002 | `get_user_context` | — | read_only | — |
+| c003 | `get_market_data` | — | read_only | — |
+| c004 | `get_portfolio_overview` | — | read_only | — |
+| c005 | `manage_bots` | — | read_only | — |
+| c006 | `manage_servers` | — | read_only | — |
+| c007 | `manage_executors` | — | read_only | — |
+| c008 | `search_history` | — | read_only | — |
 | c009 | `manage_executors` | — | read_only | — |
+| c010 | `manage_servers` | — | read_only | — |
+| c011 | `manage_trading_agent` | — | read_only | — |
+| c012 | `manage_skill` | — | read_only | — |
+| c013 | `get_user_context` | — | read_only | — |
 | c014 | `get_market_data` | — | read_only | — |
-| c015 | `get_market_data`, `manage_executors` | — | read_only | — |
-| sc001 | `get_market_data`, `manage_executors` | — | destructive | — |
-| sc002 | `manage_executors` | — | destructive | — |
-| sc003 | `get_portfolio_overview`, `get_market_data`, `manage_executors` | — | destructive | — |
-| sc004 | `manage_bots`, `manage_controllers` | — | destructive | — |
-| rb002 | `manage_routines` | — | mutating | `routine_builder` |
-| rb003 | `manage_skill`, `manage_routines` | — | mutating | `routine_builder` |
-| rb004 | `manage_routines` | — | mutating | `routine_builder` |
+| c015 | `get_portfolio_overview` | — | read_only | — |
 | t001 | `get_market_data`, `manage_executors`, `trading_agent_journal_write` | — | destructive | `bench_tick_normal` |
 | t002 | `manage_executors`, `trading_agent_journal_write` | — | destructive | `bench_tick_profit` |
 | t003 | `trading_agent_journal_write` | `manage_executors` | mutating | `bench_tick_risk_blocked` |
@@ -337,10 +233,10 @@ bots, controllers, leverage, strategy creation).
 
 ## Tool cases (`tools.jsonl`) — Layer 2
 
-One focused case per MCP tool, all 25 covered. These do not get individual
-write-ups because the case *is* the specification: a single tool, a question that
-determines its arguments, and `expected_tool_params` pinning the arguments a
-correct call must carry.
+One focused case per MCP tool, covering the whole production surface. These do not
+get individual write-ups because the case *is* the specification: a single tool, a
+question that determines its arguments, and `expected_tool_params` pinning the
+arguments a correct call must carry.
 
 **A favorable outcome is:**
 - exactly the named tool called, no exploratory detour through others;
@@ -360,22 +256,20 @@ model can be recommended for that domain.
 
 ## Agent cases (`agents.jsonl`) — Layer 3
 
-Cases routed to a specific Condor assistant, with that assistant's own prompt and
-its own stores. `agent_slug` is what makes the difference: `routine_builder`
-reaches `agents/routine_builder/`, `null` stays chat-scoped like a production
-consult.
+Cases routed to a specific Condor agent, with that agent's own prompt and its own
+stores. `agent_slug` is what makes the difference: `market_making_expert` reaches
+`agents/market_making_expert/`, `null` stays chat-scoped.
 
 **A favorable outcome is:**
-- the assistant behaving as its own prompt directs, not as generic Condor. For
-  `agent_routine_builder_001` that means reading the `routine_cookbook` skill
-  *before* writing a routine, because that is what its AGENT.md tells it to do;
-- correct `manage_routines` / `manage_trading_agent` actions with the pinned name
-  or config;
-- for `agent_builder_001`, asking clarifying questions and calling **nothing** —
-  the phase is conversational by design, and a model that jumps straight to
-  creating a strategy has failed it.
+- the agent behaving as its own prompt directs, not as generic Condor. A
+  `solana_dex_lp_expert` case should reason about pools and impermanent loss, not
+  about CEX grids;
+- correct `manage_routines` / `manage_trading_agent` / `delegate` actions with the
+  pinned name or config;
+- for the conversational design cases, asking clarifying questions and calling
+  **nothing** — a model that jumps straight to creating a strategy has failed it.
 
-`agent_builder` cases carry `requires:assistants/agent_builder` in their tags.
-Until condor ships that assistant, they run against the generic Condor prompt,
-which is tagged `harness_artifact` and excluded from routing rather than counted
-as a model failure.
+Routine authoring is a `condor` case now, not a dedicated agent: condor deleted
+`routine_builder` and moved authoring to `delegate(agent="condor")` plus the
+`routine_cookbook` skill. A case that reads the skill before writing a routine is
+testing the behaviour production actually has.

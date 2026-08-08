@@ -54,7 +54,7 @@ PROVIDERS = [
      "needs_api_key": False, "supports_url": False, "models": []},
     {"id": "anthropic", "label": "Anthropic", "kind": "cloud",
      "needs_api_key": True, "supports_url": False,
-     "models": ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+     "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
      "key_hint": "sk-ant-..."},
     {"id": "openai", "label": "OpenAI", "kind": "cloud",
      "needs_api_key": True, "supports_url": False,

@@ -45,13 +45,13 @@
       "notes": "Last local rung before tool_filter_mode goes full."
     },
     {
-      "key": "anthropic:claude-haiku-4-5-20251001",
+      "key": "anthropic:claude-haiku-4-5",
       "params_b": null,
       "provider": "cloud",
       "notes": "Cheap cloud baseline via the direct Anthropic API — the key the dashboard's Anthropic provider produces."
     },
     {
-      "key": "anthropic:claude-sonnet-4-6",
+      "key": "anthropic:claude-sonnet-5",
       "params_b": null,
       "provider": "cloud",
       "notes": "Quality ceiling, direct API. Also the default baseline model."

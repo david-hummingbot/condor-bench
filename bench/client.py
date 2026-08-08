@@ -41,7 +41,7 @@ from bench.mcp_provider import build_mcp_configs, wiring_metadata
 from config import bench_mode, condor_path
 
 # ── Agent instructions ─────────────────────────────────────────────────────────
-_AGENT_MD = Path(__file__).parent.parent / "condor_compat" / "assistants" / "condor" / "AGENT.md"
+_AGENT_MD = Path(__file__).parent.parent / "condor_compat" / "agents" / "condor" / "AGENT.md"
 _AGENT_INSTRUCTIONS: str = _AGENT_MD.read_text() if _AGENT_MD.exists() else ""
 
 _CONFIRM_RE = re.compile(
@@ -67,8 +67,8 @@ def load_assistant_prompt(slug: str | None) -> str:
 
     Ported from condor-evals' ``load_assistant_prompt()`` — the one piece of that
     harness worth keeping. Layer 3 cases are only meaningful if the model is given
-    the same instructions production gives it: benchmarking ``routine_builder``
-    against the generic Condor prompt measures nothing about routine_builder.
+    the same instructions production gives it: grading ``solana_dex_lp_expert``
+    against the generic Condor prompt measures nothing about that agent.
 
     Falls back to the vendored Condor prompt (with a note in the result metadata
     via :func:`assistant_prompt_source`) so a missing checkout degrades to a

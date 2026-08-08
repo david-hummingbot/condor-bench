@@ -185,6 +185,31 @@ export default function ModelRouter() {
             </div>
           )}
 
+          {Object.keys(routing.stale_domains || {}).length > 0 && (
+            <div className="card">
+              <div className="card-title">Stale domains</div>
+              <div className="matrix-note" style={{ marginTop: -8, marginBottom: 14 }}>
+                Results exist for these, but no case in the current datasets produces
+                them — condor deleted the agent, or the dataset was retargeted. Not a
+                gap to close by benchmarking harder; there is nothing left to route.
+              </div>
+              {Object.entries(routing.stale_domains).map(([domain, info]) => (
+                <div key={domain} className="unmet-row">
+                  <div className="unmet-head">
+                    <span className="model-cell">{domain}</span>
+                    <span className="unmet-tag thin">historical</span>
+                  </div>
+                  <div className="run-meta">{info.reason}</div>
+                  {info.models_with_results?.length > 0 && (
+                    <div className="run-meta">
+                      results from: {info.models_with_results.join(', ')}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
           {Object.keys(routing.config_conflicts || {}).length > 0 && (
             <div className="card">
               <div className="card-title">Shared config keys</div>

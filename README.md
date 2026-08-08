@@ -7,8 +7,8 @@ against a fixed dataset using the same agent stack Condor runs in production
 > **What is the smallest model that can do each job?**
 
 The output is a routing config — `general_consult → qwen2.5:7b`,
-`routine_builder → qwen2.5:14b`, `tick_execution → claude-sonnet` — not just a
-leaderboard.
+`market_making_expert → qwen2.5:14b`, `tick_execution → claude-sonnet` — not just
+a leaderboard.
 
 ## Two execution modes
 
@@ -136,10 +136,10 @@ model for being judged by Sonnet would make the cheap option look expensive.
 | `harness_artifact` | The *harness* is why this row is bad: a live run with no resolved API URL, an agent case graded against the generic Condor prompt instead of its own, or ACP auto-discovery adding tools that shift the small-model tool cut. Excluded from the routing matrix. |
 
 That second category is the point of the whole live-mode design. A
-`routine_builder` case run without `--agent-slug` reads the chat's stores, never
-finds its `routine_cookbook` skill, and fails — and without this tagging the
-matrix would report "routine_builder needs a bigger model" when the truth is a
-misconfiguration. See [docs/STAGING.md](docs/STAGING.md#agent-scoping---agent-slug).
+`market_making_expert` case run without `--agent-slug` reads the chat's stores,
+never finds its `pmm_config_playbook` skill, and fails — and without this tagging
+the matrix would report "market_making_expert needs a bigger model" when the truth
+is a misconfiguration. See [docs/STAGING.md](docs/STAGING.md#agent-scoping---agent-slug).
 
 ---
 
@@ -176,8 +176,8 @@ Output lands in `results/routing_recommendations.json`, including a
 
 ```json
 {
-  "assistants/condor/default_model": "ollama:qwen2.5:7b",
-  "agents/routine_builder/agent_key": "ollama:qwen2.5:14b",
+  "agents/condor/agent_key": "ollama:qwen2.5:7b",
+  "agents/market_making_expert/agent_key": "ollama:qwen2.5:14b",
   "agents/_defaults/agent_key": "openrouter:anthropic/claude-sonnet-4-5"
 }
 ```
@@ -208,12 +208,12 @@ slow. Generate baselines in the mode you intend to benchmark in.
 ```bash
 # Single model
 make test MODEL=ollama:llama3.1:8b
-uv run python runner.py test anthropic:claude-sonnet-4-6
 
 # Filter by layer, routing domain, category
 uv run python runner.py test ollama:qwen2.5:14b --layers tool,agent
-uv run python runner.py test ollama:qwen2.5:14b -d routine_builder
-uv run python runner.py test ollama:qwen2.5:14b --tick-only -c risk
+uv run python runner.py test ollama:qwen2.5:14b -d market_making_expert
+uv run python runner.py test ollama:qwen2.5:14b --tick-only -c risk-blocked
+uv run python runner.py test anthropic:claude-sonnet-5 --consult-only
 
 # Force a mode for one run
 uv run python runner.py test ollama:qwen2.5:14b --mode live
@@ -237,20 +237,24 @@ Results are saved to `results/<run-id>_<model>/` as JSON.
 
 ## Dataset
 
-74 cases across three layers.
+Three layers.
 
 | File | Cases | What it measures |
 |---|---|---|
-| `datasets/consult.jsonl` | 23 | **Layer 1** — end-to-end advisory, strategy creation, routine building. 5 multi-turn. |
+| `datasets/consult.jsonl` | 15 | **Layer 1** — "everyday usage": the high-frequency status lookups real users ask most (portfolio balance, active server, market price, open orders, bots, executors, trade history, skills, model in use). Each resolves to exactly one tool call; single-turn. |
 | `datasets/tick.jsonl` | 6 | **Layer 1** — strategy ticks: normal, profit-taking, risk-blocked, near-capacity, error recovery, dry-run. Agent-scoped. |
-| `datasets/tools.jsonl` | 29 | **Layer 2** — at least one focused case per MCP tool. All 25 production tools covered; a drift test fails if one isn't. |
-| `datasets/agents.jsonl` | 16 | **Layer 3** — routed to a specific Condor assistant with its own prompt and stores. |
-| `datasets/models.json` | 8 | Model registry with parameter counts. Drives sweep order and routing. |
+| `datasets/tools.jsonl` | — | **Layer 2** — at least one focused case per MCP tool. The whole production surface is covered; a drift test fails if a tool isn't. |
+| `datasets/agents.jsonl` | — | **Layer 3** — routed to a specific Condor agent with its own prompt and stores. |
+| `datasets/models.json` | — | Model registry with parameter counts. Drives sweep order and routing. |
 
 Every case carries a `risk_level` (`read_only` / `mutating` / `destructive`) and
 resolves to a **routing domain**. Layer 2 domains are namespaced `tool:` because a
 capability bucket like "market data" is not something Condor can route to — those
 verdicts come out of the matrix's per-tool axis instead.
+
+`FRAMEWORK_IMPROVEMENTS.md` §10 proposed a per-tool competency matrix and a
+capability→recommendation report as future work. Layers 2 and 3 plus the Matrix
+and Router tabs are that work; the section is kept as the rationale.
 
 ---
 
@@ -271,16 +275,30 @@ output while bench kept calling the old signature. The **pinned literal arg list
 is what turns "condor changed its MCP wiring" into a failing test someone has to
 look at, instead of a change bench follows silently.
 
+It has already earned that twice. condor deleted `build_mcp_servers_for_agent()`
+and folded it into the session builder; and under SEC-095 it moved the API
+credentials and bot token off argv (world-readable via `ps`) into the subprocess
+`env`. A vendored copy of the spawn args would have kept putting the API password
+on the command line. The pin now asserts *placement* — credentials in `env`,
+coordinates in `args` — and never pins a secret's value.
+
 condor-evals' `build_mcp_servers()` fails that pin today: no `--server-name` on
 either server, no `--agent-slug` on condor. That is why its wiring was not
 ported.
+
+> **Point `CONDOR_PATH` at the right clone.** With more than one condor checkout
+> on a machine, the `../condor` fallback cannot tell them apart, and a stale one
+> makes every drift check compare bench against an upstream nobody runs — which
+> looks exactly like real drift, and whose natural fix (re-vendor, regenerate)
+> would sync bench to the wrong condor. `make check-drift` prints the clone it
+> used, and one check fails specifically on that mismatch.
 
 After pulling condor:
 
 ```bash
 make check-drift
 make tool-surface                        # re-capture if production legitimately changed
-CONDOR_REPO=/path/to/condor make tool-surface
+CONDOR_PATH=/path/to/condor make tool-surface
 ```
 
 Never hand-edit `datasets/tool_surface.json`.
@@ -299,7 +317,9 @@ bench-specific edits and cannot be re-vendored by copying:
 `acp/client.py` carries the usage types re-vendored from production
 (`UsageEvent`, `fold_usage_event`, the ACP usage parsers), and
 `pydantic_ai_client.py` carries `estimate_cost_usd()` / `_fold_run_usage()`.
-Re-syncing is a manual diff against condor, keeping the local edits.
+Re-syncing those is a manual diff-and-review against condor, keeping the local
+edits. `agents/condor/AGENT.md` is a plain body copy (YAML frontmatter stripped)
+and is the one vendored file the drift test can check automatically.
 
 ---
 
@@ -355,6 +375,8 @@ condor-bench/
 │   └── latency.py        # baseline-relative latency
 ├── mock_mcp/             # offline mock servers (mirror the production surface)
 ├── condor_compat/        # vendored condor agent stack
+│   ├── acp/              #   pydantic-ai client, ACP client, JSON-RPC peer
+│   └── agents/           #   tick prompt builder + condor/AGENT.md (body only)
 ├── datasets/             # 4 case files + tool_surface.json + models.json
 ├── scripts/
 │   ├── snapshot_tool_surface.py  # re-capture the production tool surface
@@ -362,6 +384,8 @@ condor-bench/
 │   └── sync_case_prompts.py      # regenerate the dashboard's case prompt map
 ├── dashboard/            # FastAPI + React (Run/Live/Prompt/Leaderboard/Matrix/Router/Results)
 ├── docs/STAGING.md       # live mode setup and guard rails
+├── baseline/             # baseline latency records (tracked — shared reference)
+├── results/              # benchmark run outputs (git-ignored)
 ├── config.py             # paths, modes, weight profiles, thresholds
 └── runner.py             # CLI: baseline, staging-check, test, sweep, matrix, route, report
 ```

@@ -506,6 +506,12 @@ def route(
             )
         )
 
+    for domain, info in routing.get("stale_domains", {}).items():
+        console.print(
+            f"[dim]stale[/dim] {domain}: {info['reason']} "
+            f"({', '.join(info['models_with_results']) or 'no scored results'})"
+        )
+
     gaps = routing["tool_gaps"]["unhandled"]
     if gaps:
         console.print(f"\n[yellow]No model passes these tools:[/yellow] {', '.join(gaps)}")
