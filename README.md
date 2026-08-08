@@ -286,12 +286,18 @@ condor-evals' `build_mcp_servers()` fails that pin today: no `--server-name` on
 either server, no `--agent-slug` on condor. That is why its wiring was not
 ported.
 
-> **Point `CONDOR_PATH` at the right clone.** With more than one condor checkout
-> on a machine, the `../condor` fallback cannot tell them apart, and a stale one
-> makes every drift check compare bench against an upstream nobody runs — which
-> looks exactly like real drift, and whose natural fix (re-vendor, regenerate)
-> would sync bench to the wrong condor. `make check-drift` prints the clone it
-> used, and one check fails specifically on that mismatch.
+> **Point `CONDOR_PATH` at the checkout you mean.** More than one condor clone on
+> a machine is normal — typically one on `main` and one on a feature branch with
+> work in progress — and the `../condor` fallback cannot tell them apart. The
+> drift checks read condor's *working tree*, so pointing them at a feature branch
+> measures a condor nobody is running: it looks exactly like real drift, and its
+> natural fix (re-vendor, regenerate) would sync bench to the wrong tree.
+>
+> `make check-drift` prints the checkout it used — path, branch, commit and
+> whether it has uncommitted files. One check fails when the snapshot's commit
+> isn't in that checkout's history (ancestry, not just "the object exists", so a
+> `git fetch` on the wrong branch can't quietly satisfy it), and another warns
+> when the checkout is dirty, since local edits correspond to no commit.
 
 After pulling condor:
 

@@ -36,9 +36,10 @@ def condor_path() -> Path | None:
     so live mode can fail with a clear message instead of an ImportError.
 
     Set CONDOR_PATH explicitly if more than one condor clone exists on the
-    machine. The fallback cannot tell them apart, and picking the stale one makes
-    every drift check compare against the wrong upstream — which reads as "condor
-    changed" rather than "you're pointed at the wrong clone". See
+    machine. The fallback cannot tell them apart, and it is normal for one clone
+    to be a feature branch with work in progress — benchmarking against that
+    measures a condor nobody is running, and every drift check then reads as
+    "condor changed" rather than "you're pointed at the wrong checkout". See
     :func:`condor_checkout_label`.
     """
     raw = os.environ.get("CONDOR_PATH") or os.environ.get("CONDOR_REPO")
@@ -46,42 +47,71 @@ def condor_path() -> Path | None:
     return candidate.resolve() if (candidate / "mcp_servers").is_dir() else None
 
 
-def condor_head() -> str:
-    """Short HEAD commit of the resolved condor checkout, or "unknown"."""
+def _git(repo: Path, *args: str) -> str | None:
+    """Run a git command in ``repo``, or None if it fails."""
     import subprocess
 
+    try:
+        result = subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, timeout=5
+        )
+    except Exception:
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def condor_head() -> str:
+    """Short HEAD commit of the resolved condor checkout, or "unknown"."""
     repo = condor_path()
     if repo is None:
         return "unknown"
-    try:
-        return subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        ).stdout.strip()
-    except Exception:
-        return "unknown"
+    return _git(repo, "rev-parse", "--short", "HEAD") or "unknown"
 
 
-def condor_checkout_label() -> str:
-    """"path @ commit (source: CONDOR_PATH | default)" for diagnostics.
+def condor_checkout_state() -> dict[str, object]:
+    """Path, branch, commit, dirtiness and how the path was resolved.
 
-    Every drift failure quotes this. Without it, a mismatch caused by pointing at
-    the wrong clone is indistinguishable from real upstream drift, and the natural
-    response — re-vendoring — would sync bench to the wrong condor.
+    Branch and dirtiness matter as much as the commit: the drift checks read
+    condor's *working tree*, so a feature branch — or uncommitted edits — makes
+    them measure a condor that exists on no one else's machine.
     """
     repo = condor_path()
     if repo is None:
+        return {"path": None}
+    dirty = _git(repo, "status", "--porcelain")
+    return {
+        "path": repo,
+        "branch": _git(repo, "rev-parse", "--abbrev-ref", "HEAD") or "unknown",
+        "commit": _git(repo, "rev-parse", "--short", "HEAD") or "unknown",
+        "dirty_files": len([ln for ln in (dirty or "").splitlines() if ln.strip()]),
+        "source": (
+            "CONDOR_PATH"
+            if os.environ.get("CONDOR_PATH")
+            else (
+                "CONDOR_REPO"
+                if os.environ.get("CONDOR_REPO")
+                else "default ../condor"
+            )
+        ),
+    }
+
+
+def condor_checkout_label() -> str:
+    """One-line description of the checkout every drift failure quotes.
+
+    Without it, a mismatch caused by pointing at another checkout is
+    indistinguishable from real upstream drift — and the natural response,
+    re-vendoring, would sync bench to the wrong condor.
+    """
+    state = condor_checkout_state()
+    if state.get("path") is None:
         return "no condor checkout (set CONDOR_PATH)"
-    source = (
-        "CONDOR_PATH"
-        if os.environ.get("CONDOR_PATH")
-        else ("CONDOR_REPO" if os.environ.get("CONDOR_REPO") else "default ../condor")
+    dirty = state["dirty_files"]
+    suffix = f", {dirty} uncommitted file(s)" if dirty else ""
+    return (
+        f"{state['path']} on {state['branch']} @ {state['commit']}"
+        f"{suffix} (via {state['source']})"
     )
-    return f"{repo} @ {condor_head()} (via {source})"
 
 
 # ── Staging environment (live mode) ────────────────────────────────────────────

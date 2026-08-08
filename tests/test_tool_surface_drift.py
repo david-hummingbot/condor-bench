@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import json
+import warnings
 from pathlib import Path
 
 import pytest
@@ -30,21 +31,29 @@ MOCK_FOR_SERVER = {
 REFRESH_HINT = "Run `make tool-surface` if production changed; otherwise update the mock."
 
 
-def test_snapshot_matches_the_resolved_condor_checkout():
-    """The pinned surface should come from the checkout everything else reads.
+def test_snapshot_commit_is_reachable_from_the_resolved_checkout():
+    """The pinned surface must come from the checkout everything else reads.
 
-    With more than one condor clone on a machine, ``condor_path()`` can resolve a
-    different one than the snapshot was captured from — and then every drift check
-    compares bench against an upstream nobody is running. That failure looks
-    exactly like real drift, and the natural response (re-vendor, regenerate) would
-    sync bench to the wrong condor. So it is named explicitly.
+    With more than one condor clone on a machine — normal, since one is usually a
+    feature branch with work in progress — ``condor_path()`` can resolve a
+    different one than the snapshot came from. Every drift check then compares
+    bench against a condor nobody is running, which looks exactly like real drift;
+    the natural response (re-vendor, regenerate) would sync bench to the wrong
+    tree. So it is named explicitly.
 
-    Advisory: a snapshot legitimately lags HEAD between syncs, so this only fires
-    when the recorded commit is absent from the resolved checkout entirely.
+    **Reachability, not object existence.** An earlier version asked whether the
+    commit was in the object database, which a plain ``git fetch`` in a
+    feature-branch clone would satisfy while that clone's *working tree* — the
+    thing the drift checks actually read — still held different code. Ancestry from
+    HEAD is the question that matches what gets loaded.
+
+    A snapshot legitimately lags HEAD between syncs, so being *behind* is fine;
+    what fails is the snapshot's commit not being in this checkout's history at
+    all.
     """
     import subprocess
 
-    from config import condor_checkout_label, condor_path
+    from config import condor_checkout_label, condor_checkout_state, condor_path
 
     repo = condor_path()
     if repo is None:
@@ -55,22 +64,51 @@ def test_snapshot_matches_the_resolved_condor_checkout():
         pytest.skip("snapshot records no source commit")
 
     try:
-        known = subprocess.run(
-            ["git", "cat-file", "-e", f"{recorded}^{{commit}}"],
-            cwd=repo,
-            capture_output=True,
-            timeout=5,
-        ).returncode == 0
+        reachable = (
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", recorded, "HEAD"],
+                cwd=repo,
+                capture_output=True,
+                timeout=5,
+            ).returncode
+            == 0
+        )
     except Exception:
         pytest.skip("git unavailable")
 
-    assert known, (
+    state = condor_checkout_state()
+    assert reachable, (
         f"datasets/tool_surface.json was captured at condor commit {recorded}, which "
-        f"does not exist in the checkout bench resolves: {condor_checkout_label()}.\n"
-        "That usually means CONDOR_PATH points at a different clone than the one the "
-        "snapshot came from. Set CONDOR_PATH to the right checkout before treating "
-        "any other drift failure as real."
+        f"is not in the history of the checkout bench resolves:\n"
+        f"  {condor_checkout_label()}\n"
+        f"That checkout is on '{state['branch']}'. Either CONDOR_PATH points at a "
+        "different clone or branch than the snapshot came from, or that branch "
+        "predates the snapshot. Fix this before treating any other drift failure as "
+        "real — re-vendoring against the wrong tree is worse than the drift."
     )
+
+
+def test_resolved_condor_checkout_is_clean():
+    """Uncommitted condor edits make the drift checks unreproducible.
+
+    The checks import condor's ``_shared.py`` and read its ``agents/`` tree from
+    the working directory, so local edits are what gets measured — a result no one
+    else can reproduce and that corresponds to no commit. Advisory (a warning, not
+    a failure): editing condor while iterating on bench is a legitimate workflow,
+    it just shouldn't be invisible.
+    """
+    from config import condor_checkout_label, condor_checkout_state
+
+    state = condor_checkout_state()
+    if state.get("path") is None:
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+
+    if state["dirty_files"]:
+        warnings.warn(
+            f"condor checkout has {state['dirty_files']} uncommitted file(s); drift "
+            f"results reflect local edits, not any commit: {condor_checkout_label()}",
+            stacklevel=1,
+        )
 
 
 def _snapshot() -> dict:
