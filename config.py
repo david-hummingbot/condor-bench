@@ -15,8 +15,8 @@ RESULTS_DIR = ROOT / "results"
 # editable installs (pip install -e .) and regular installs.
 MOCK_MCP_SCRIPT = ROOT / "mock_mcp" / "server.py"
 
-BASELINE_MODEL = os.environ.get("BENCH_BASELINE_MODEL", "anthropic:claude-sonnet-4-6")
-JUDGE_MODEL = os.environ.get("BENCH_JUDGE_MODEL", "claude-sonnet-4-6")
+BASELINE_MODEL = os.environ.get("BENCH_BASELINE_MODEL", "anthropic:claude-sonnet-5")
+JUDGE_MODEL = os.environ.get("BENCH_JUDGE_MODEL", "claude-sonnet-5")
 
 # Composite score weights
 SCORE_WEIGHTS = {

@@ -21,7 +21,7 @@ from condor_compat.acp.acp_client import ACPClient, is_acp_model, resolve_acp
 from condor_compat.acp.client import TextChunk, ToolCallEvent
 
 # ── Agent instructions ─────────────────────────────────────────────────────────
-_AGENT_MD = Path(__file__).parent.parent / "condor_compat" / "assistants" / "condor" / "AGENT.md"
+_AGENT_MD = Path(__file__).parent.parent / "condor_compat" / "agents" / "condor" / "AGENT.md"
 _AGENT_INSTRUCTIONS: str = _AGENT_MD.read_text() if _AGENT_MD.exists() else ""
 
 # ── Mock MCP server paths ──────────────────────────────────────────────────────

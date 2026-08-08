@@ -130,10 +130,10 @@ make test MODEL=ollama:llama3.1:8b
 make test MODEL=openrouter:google/gemini-flash-2.0
 
 # Consult cases only
-uv run python runner.py test anthropic:claude-sonnet-4-6 --consult-only
+uv run python runner.py test anthropic:claude-sonnet-5 --consult-only
 
 # Tick cases only, filter by category
-uv run python runner.py test ollama:qwen2.5:14b --tick-only -c risk
+uv run python runner.py test ollama:qwen2.5:14b --tick-only -c risk-blocked
 
 # Print a summary table of all runs
 make report
@@ -147,8 +147,10 @@ Results are saved to `results/<run-id>_<model>/` as JSON.
 
 | File | Cases | Description |
 |------|-------|-------------|
-| `datasets/consult.jsonl` | 23 | Q&A cases covering concepts, strategy, risk, troubleshooting, configuration, strategy creation, and routine building. Includes 5 multi-turn cases. |
+| `datasets/consult.jsonl` | 15 | "Everyday usage" cases — the simple, high-frequency status-lookup questions real users ask most (portfolio balance, active server, market price, open orders, bots, executors, trade history, skills, model in use, etc.). Each resolves to exactly one tool call; single-turn. |
 | `datasets/tick.jsonl` | 6 | Strategy tick cases: normal execution, profit-taking, risk-blocked, near-capacity, error recovery, dry-run observation. |
+
+See `FRAMEWORK_IMPROVEMENTS.md` §10 for the roadmap toward broader per-tool/per-agent coverage (specialist-agent tests, delegation-flow tests, per-tool competency matrix).
 
 ---
 
@@ -190,7 +192,7 @@ bench-specific edits and so cannot be re-vendored by copying:
 - `agents/prompts.py` — condor model imports replaced with `Any`
 
 Re-syncing those is a manual diff-and-review against condor, keeping the local
-edits. `assistants/condor/AGENT.md` is a plain body copy (YAML frontmatter
+edits. `agents/condor/AGENT.md` is a plain body copy (YAML frontmatter
 stripped) and is the one vendored file the drift test can check automatically.
 
 ---
@@ -226,14 +228,13 @@ condor-bench/
 │   └── condor_server.py       # condor memory/journal/skills tools
 ├── condor_compat/      # Vendored clients from the condor repo
 │   ├── acp/            #   pydantic-ai client, ACP client, JSON-RPC peer
-│   ├── agents/         #   Tick prompt builder
-│   └── assistants/     #   AGENT.md (Condor system prompt, body only)
+│   └── agents/         #   Tick prompt builder + condor/AGENT.md (system prompt, body only)
 ├── datasets/           # JSONL benchmark cases + tool_surface.json (production surface pin)
 ├── scripts/            # snapshot_tool_surface.py — re-capture the production tool surface
 ├── dashboard/
 │   ├── backend/app.py  # FastAPI: providers, SSE run streaming, results API
 │   └── frontend/       # React + Vite + Recharts
-├── baseline/           # Stored baseline latency records (git-ignored)
+├── baseline/           # Stored baseline latency records (tracked in git — shared reference)
 ├── results/            # Benchmark run outputs (git-ignored)
 ├── config.py           # Path constants and score weights
 ├── runner.py           # CLI entry point (typer)

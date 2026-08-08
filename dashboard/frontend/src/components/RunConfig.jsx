@@ -5,8 +5,6 @@ const CASE_FILTER_OPTS = [
   { id: 'all', label: 'All cases' },
   { id: 'consult', label: 'Consult only' },
   { id: 'tick', label: 'Tick only' },
-  { id: 'strategy-creation', label: 'Strategy creation' },
-  { id: 'routine-builder', label: 'Routine builder' },
 ]
 
 export default function RunConfig({ onRunStarted, isRunning }) {
@@ -94,9 +92,9 @@ export default function RunConfig({ onRunStarted, isRunning }) {
     try {
       const body = {
         models,
-        consult_only: caseFilter === 'consult' || caseFilter === 'strategy-creation' || caseFilter === 'routine-builder',
+        consult_only: caseFilter === 'consult',
         tick_only: caseFilter === 'tick',
-        category: ['strategy-creation', 'routine-builder'].includes(caseFilter) ? caseFilter : category.trim() || null,
+        category: category.trim() || null,
       }
       const data = await createRun(body)
       onRunStarted(data.run_id)
@@ -299,7 +297,7 @@ export default function RunConfig({ onRunStarted, isRunning }) {
           <input
             type="text"
             className="input"
-            placeholder="e.g. risk, concepts, troubleshooting"
+            placeholder="e.g. everyday"
             value={category}
             onChange={e => setCategory(e.target.value)}
             style={{ maxWidth: 320 }}

@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-VENDORED = ROOT / "condor_compat" / "assistants" / "condor" / "AGENT.md"
-UPSTREAM_REL = Path("assistants") / "condor" / "AGENT.md"
+VENDORED = ROOT / "condor_compat" / "agents" / "condor" / "AGENT.md"
+UPSTREAM_REL = Path("agents") / "condor" / "AGENT.md"
 
 
 def _strip_frontmatter(text: str) -> str:
