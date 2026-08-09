@@ -53,16 +53,13 @@ Treat 4B–9B as the primary design constraint. If a flow works on a 7B tool-cal
 
 This moves “did it succeed?” out of the LLM’s mouth for money-moving ops.
 
-### 2.3 Fix dead specialist routing (P0)
+### 2.3 Fix dead specialist routing (P0) — partially resolved upstream (2026-08-04)
 
-**Problem:** `assistants/condor/AGENT.md` steers deploys to `executor_manager`, but shipped agents are only `routine_builder` and `market_making_expert`. Condor free-forms grid/DCA creates and fabricates.
+**Original problem:** `assistants/condor/AGENT.md` steered deploys to `executor_manager`, but shipped agents were only `routine_builder` and `market_making_expert`. Condor free-formed grid/DCA creates and fabricated.
 
-**Recommendation:**
+**Current state:** condor never shipped `executor_manager`. Instead it resolved the `routine_builder` half of this problem a different way: `routine_builder` was deleted outright (`9061934`, "delete the routine_builder agent") and routine authoring now goes through `delegate(action="start", agent="condor", task="...")` reading the shared `routine_cookbook` skill (`76a5ecd`). The coordinator prompt also moved to `agents/condor/AGENT.md` (`547a4fb`, Condor is now loaded through the same `Agent`/`AgentStore` path as every specialist).
 
-- **Either** ship `agents/executor_manager/` with a short AGENT.md, narrow tool allowlist (`get_market_data`, `get_portfolio_overview`, `manage_executors`, optionally bots/controllers), and hard rule: no success without tool result.
-- **Or** remove/rewrite the `executor_manager` references so routing matches reality (`market_making_expert` for PMM; raw high-level tools for grid/DCA).
-
-Keep `[AGENTS]` index generation in sync with disk (fail loud if AGENT.md cites a missing slug).
+The `executor_manager` half is **still open** — condor's current `agents/condor/AGENT.md` still says "that's `executor_manager`'s domain → consult it" for grid/DCA deploys, and no such agent exists. This is a live bug in condor's own prompt, not something for condor-bench to route around — track it as upstream's problem to fix (ship the agent, or rewrite the line to point at `market_making_expert`/raw tools), and re-check on the next sync rather than assuming it's resolved.
 
 ### 2.4 Force tool-first on live-state questions (P1)
 
@@ -116,12 +113,14 @@ Implementation: thin wrappers over existing Hummingbot APIs with Pydantic valida
 | Role | Approximate tool set |
 |------|----------------------|
 | Condor (coordinator) | consult, delegate, memory, skill, notify, get_user_context, portfolio/market read, routine **run/list** only |
-| executor_manager | market, portfolio, manage_executors (+ high-level create_* ) |
-| routine_builder | manage_routines*, manage_skill |
+| executor_manager *(proposed, not shipped)* | market, portfolio, manage_executors (+ high-level create_* ) |
+| ~~routine_builder~~ *(deleted upstream, `9061934`; routine authoring is now `delegate(agent="condor")` + `routine_cookbook`)* | — |
 | market_making_expert | market, portfolio, bots, controllers, executors (as today) |
 | Tick agent | market, manage_executors, journal_write, notify, memory/skill/routines as needed |
 
 Use existing agent `tools:` frontmatter + MCP filter strictly. Do not expose `place_order` / gateway mutate to the coordinator if specialists own them.
+
+*Note (2026-08-09): `routine_builder` and `executor_manager` do not exist in condor's shipped agent set today — the actual roster is `condor`, `market_making_expert`, `directional_trader`, `delta_neutral_funding_agent`, `solana_dex_lp_expert`. The rows above are kept for historical context on the original proposal, not as a statement of current tool allocation.*
 
 ### 3.3 Deterministic tick providers (already strong — extend)
 
@@ -194,8 +193,8 @@ Bench shows Qwen/`request_limit of 50` mid-case → aq=0.
 
 Coordinator on 7B should not write routines or invent PMM configs. Force:
 
-- Routine create/edit/debug → `consult(routine_builder)` (already in AGENT.md; enforce in router).
-- Grid/DCA create → high-level tool or `executor_manager`.
+- Routine create/edit/debug → `delegate(action="start", agent="condor", task="...")` reading `routine_cookbook` (current upstream behavior as of `76a5ecd`/`9061934` — no longer a `consult(routine_builder)` call, since that agent was removed).
+- Grid/DCA create → high-level tool or `executor_manager` (still unshipped — see §2.3).
 - PMM deploy → `delegate(market_making_expert)` when long.
 
 If local backend can’t run the specialist, show a clear “this task needs a stronger/specialty agent” instead of attempting with empty tool skill.
@@ -215,7 +214,7 @@ Document recommended local stacks (e.g. Qwen3 8B / Gemma tool-tuned builds) with
 ### Phase A — Accuracy foundations (1–2 weeks)
 
 1. Session grounding injection + optional anti-fabrication guard.
-2. Align AGENT.md with shipped agents (add or remove `executor_manager`).
+2. Align AGENT.md with shipped agents (add or remove `executor_manager` — still open, see §2.3; the `routine_builder` half of this item is done upstream).
 3. Propose → confirm → execute for `manage_executors` create/stop (and place_order).
 4. Server-side `controller_id` on tick creates + richer schema errors.
 
@@ -270,10 +269,23 @@ Track on condor-bench + production telemetry:
 | Tick loop / snapshots | `condor/agents/engine.py`, `prompts.py` |
 | Confirm gate | `handlers/agents/confirmation.py`, `_shared.py` (`is_dangerous_tool_call`) |
 | Consult / delegate | `condor/agents/consult.py`, `delegate.py` |
-| Coordinator prompt | `assistants/condor/AGENT.md` |
-| Specialists | `agents/routine_builder/`, `agents/market_making_expert/` |
+| Coordinator prompt | `agents/condor/AGENT.md` |
+| Specialists | `agents/market_making_expert/`, `agents/directional_trader/`, `agents/delta_neutral_funding_agent/`, `agents/solana_dex_lp_expert/` |
 | Executor MCP | `mcp_servers/hummingbot_api/tools/executors.py` |
 | Bench evidence | sister repo `condor-bench` (`datasets/`, `results/`) |
+
+---
+
+## 10. Roadmap — per-tool / per-agent capability matrix (2026-08-09)
+
+The `consult` dataset was refactored to 15 focused "everyday usage" cases (simple, single-tool status lookups — portfolio balance, active server, bot status, etc.), replacing a mixed 23-case set that skewed toward troubleshooting/strategy-creation with no baseline coverage of the questions users ask most often. The longer-term goal this sets up: benchmark which LLM performs well with which tool/agent, so condor can recommend the smallest/cheapest capable model for a given role (e.g. "reliable and cheap on read-only lookups → good for the tick loop" vs "needed for multi-step delegated strategy work").
+
+**Status: 1, 2 and 4 are built** (Layers 2/3 plus the Matrix and Router dashboard tabs). Item 3 is partially built. Kept here as the rationale for what shipped.
+
+1. **Per-tool competency matrix** — ✅ **built.** `datasets/tools.jsonl` carries at least one case per production tool, and `tests/test_tool_surface_drift.py` fails if a tool has no case. `bench/matrix.py` aggregates per model × tool; the Matrix tab renders it with a per-tool axis. Goes beyond the original proposal in one way that turned out to matter: name-level F1 alone scores a model 1.0 for calling the right tool with wrong arguments, so `metrics/tool_params.py` scores the arguments too.
+2. **Per-specialist-agent tests** — ✅ **built.** `datasets/agents.jsonl` carries an `agent_slug` per case; `bench/client.py` loads that agent's real `AGENT.md` from the condor checkout rather than vendoring a copy per specialist (a vendored copy is one more thing to drift), and `--agent-slug` scopes the MCP tools to that agent's own stores. A case whose prompt falls back to the generic Condor one is tagged `harness_artifact` and excluded from routing, so a missing prompt can't be mistaken for a model failing.
+3. **Delegation-flow tests** — 🟡 **partial.** `agent_condor_delegate_001` checks that a long multi-step request is handed to `delegate` rather than answered directly. The proposed `expected_call_mode` field is not built: `expected_tools` plus `expected_no_calls` already expresses "delegate, don't consult", and a second mechanism for the same assertion would be one more thing to keep in sync. Revisit if a case appears that these two can't express.
+4. **Capability → recommendation report** — ✅ **built.** `bench/routing.py` picks the smallest model that passes each domain and writes `results/routing_recommendations.json` with a Condor config snippet; the Router tab exposes the criteria as live controls. Two additions the proposal didn't anticipate: domains with too little evidence are reported as *insufficient evidence* rather than as failures, and token cost is a tie-breaker only — never a reason to reject a model that passes.
 
 ---
 

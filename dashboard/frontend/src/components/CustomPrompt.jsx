@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { getProviders, getProviderModels, createCustomPrompt, streamCustomPromptUrl } from '../api.js'
+import PageHeader from './PageHeader.jsx'
 
 const SCORE_COLOR = (v) => v >= 0.8 ? 'var(--green)' : v >= 0.5 ? 'var(--yellow)' : 'var(--red)'
 
@@ -119,6 +120,8 @@ export default function CustomPrompt() {
   const [question, setQuestion] = useState('')
   const [turns, setTurns] = useState([])
   const [expectedTools, setExpectedTools] = useState('')
+  const [agentSlug, setAgentSlug] = useState('')
+  const [mode, setMode] = useState('')
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState([])  // [{model, response, tool_calls, scorecard, error}]
   const [status, setStatus] = useState('')
@@ -252,6 +255,8 @@ export default function CustomPrompt() {
         turns: turns.filter(t => t.trim()),
         expected_tools: parsedTools,
         mock_tools: {},
+        agent_slug: agentSlug.trim() || null,
+        mode: mode || null,
         models,
       })
 
@@ -276,12 +281,10 @@ export default function CustomPrompt() {
 
   return (
     <div>
-      <div className="section-header" style={{ marginBottom: 20 }}>
-        <span className="section-title">Custom Prompt</span>
-        <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 12 }}>
-          Run a free-form question against any model — compare results across providers or against live Condor
-        </span>
-      </div>
+      <PageHeader
+        title="Prompt"
+        description="Run one free-form question against any set of models side by side. Useful for sanity-checking a change or a new model before committing it to a full benchmark — results are scored but do not enter the leaderboard as a dataset run."
+      />
 
       {/* Question */}
       <div className="card" style={{ marginBottom: 16 }}>
@@ -343,6 +346,54 @@ export default function CustomPrompt() {
             onChange={e => setExpectedTools(e.target.value)}
             style={{ maxWidth: 420 }}
           />
+        </div>
+
+        {/* Agent scoping */}
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+            Agent slug <span style={{ fontSize: 11 }}>
+              (optional — scopes condor's memory and skill tools to that agent's own
+              stores. Leave blank to run chat-scoped, which is what a production
+              consult does.)
+            </span>
+          </div>
+          <input
+            type="text"
+            className="input"
+            placeholder="e.g. market_making_expert"
+            value={agentSlug}
+            onChange={e => setAgentSlug(e.target.value)}
+            style={{ maxWidth: 420 }}
+          />
+        </div>
+
+        {/* Mode */}
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+            Execution mode
+          </div>
+          <div className="radio-group">
+            {[
+              { id: '', label: 'Use configured' },
+              { id: 'mock', label: 'Mock' },
+              { id: 'live', label: 'Live' },
+            ].map(o => (
+              <button
+                key={o.id}
+                className={`radio-btn ${mode === o.id ? 'active' : ''}`}
+                onClick={() => setMode(o.id)}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+          {mode === 'live' && (
+            <span className="run-meta">
+              A live prompt is a real agent with real tools attached, and nothing
+              constrains what it decides to call. The staging pre-flight runs first
+              and will refuse the run if it fails.
+            </span>
+          )}
         </div>
       </div>
 

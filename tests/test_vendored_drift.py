@@ -1,6 +1,6 @@
 """AGENT.md must match the system prompt condor actually ships.
 
-bench/client.py injects condor_compat/assistants/condor/AGENT.md verbatim as the
+bench/client.py injects condor_compat/agents/condor/AGENT.md verbatim as the
 Condor system prompt. When condor edits its prompt and this copy doesn't follow,
 the benchmark grades models against rules production no longer states — and the
 tool-accuracy metric in particular starts measuring the wrong behaviour.
@@ -15,14 +15,13 @@ manual review — see README "Keeping condor_compat in sync".
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-VENDORED = ROOT / "condor_compat" / "assistants" / "condor" / "AGENT.md"
-UPSTREAM_REL = Path("assistants") / "condor" / "AGENT.md"
+VENDORED = ROOT / "condor_compat" / "agents" / "condor" / "AGENT.md"
+UPSTREAM_REL = Path("agents") / "condor" / "AGENT.md"
 
 
 def _strip_frontmatter(text: str) -> str:
@@ -33,14 +32,26 @@ def _strip_frontmatter(text: str) -> str:
 
 
 def _condor_repo() -> Path | None:
-    candidate = Path(os.environ.get("CONDOR_REPO", ROOT.parent / "condor"))
-    return candidate if (candidate / UPSTREAM_REL).is_file() else None
+    """The same checkout every other part of bench resolves.
+
+    This used to read CONDOR_REPO directly while ``config.condor_path()`` accepted
+    CONDOR_PATH as well. With more than one condor clone on a machine that is a
+    way to validate the vendored prompt against one checkout while live runs use
+    another — so resolution goes through one function.
+    """
+    from config import condor_path
+
+    candidate = condor_path()
+    return candidate if candidate and (candidate / UPSTREAM_REL).is_file() else None
 
 
 def test_agent_md_matches_condor():
     repo = _condor_repo()
     if repo is None:
-        pytest.skip("no condor checkout — set CONDOR_REPO to enable this check")
+        pytest.skip(
+            "no condor checkout — set CONDOR_PATH to the condor repo root to enable "
+            "this check"
+        )
 
     upstream = _strip_frontmatter((repo / UPSTREAM_REL).read_text())
     vendored = VENDORED.read_text()
@@ -63,5 +74,7 @@ def test_agent_md_matches_condor():
     pytest.fail(
         "Vendored AGENT.md has drifted from condor's system prompt.\n"
         "Re-vendor it (frontmatter stripped) so benchmarks grade against the "
-        f"rules production states.\n\n{diff}"
+        f"rules production states.\n"
+        f"Compared against: {repo}  (set CONDOR_PATH if that is the wrong "
+        f"checkout)\n\n{diff}"
     )

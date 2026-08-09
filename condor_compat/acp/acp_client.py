@@ -18,7 +18,8 @@ from typing import Any, AsyncIterator
 
 from .client import (
     ACPEvent, PermissionCallback, PromptDone, TextChunk, ThoughtChunk,
-    ToolCallEvent, ToolCallUpdate, Heartbeat,
+    ToolCallEvent, ToolCallUpdate, Heartbeat, UsageEvent,
+    parse_meta_usage, parse_prompt_usage,
 )
 from .jsonrpc import JSONRPCPeer
 
@@ -252,6 +253,16 @@ class ACPClient:
             else:
                 result = fut.result()
                 reason = result.get("stopReason", "end_turn") if isinstance(result, dict) else "end_turn"
+                if isinstance(result, dict):
+                    # Two dialects: claude-agent-acp answers with a `usage`
+                    # object, the Gemini CLI reports via the `_meta` vendor
+                    # extension. Try both so a bridge speaking either one is
+                    # measured rather than looking free.
+                    usage = parse_prompt_usage(result.get("usage")) or parse_meta_usage(
+                        result.get("_meta")
+                    )
+                    if usage is not None:
+                        self._event_queue.put_nowait(usage)
                 self._event_queue.put_nowait(PromptDone(stop_reason=reason))
 
         future.add_done_callback(_on_response)
@@ -304,6 +315,21 @@ class ACPClient:
                 status=update.get("status"),
                 title=update.get("title"),
                 output=update.get("output"),
+            ))
+        elif kind == "usage_update":
+            # claude-agent-acp emits this once per assistant result with the
+            # context-window occupancy and the session's cumulative USD cost. The
+            # token breakdown arrives separately on the session/prompt response
+            # (see _on_response); both fold into one usage row.
+            cost = update.get("cost") or {}
+            self._event_queue.put_nowait(UsageEvent(
+                context_used=update.get("used"),
+                context_size=update.get("size"),
+                cost_usd=(
+                    cost.get("amount")
+                    if str(cost.get("currency", "USD")).upper() == "USD"
+                    else None
+                ),
             ))
 
     async def _on_request_permission(self, sessionId: str = "", options: list[dict[str, Any]] | None = None, toolCall: dict[str, Any] | None = None, _meta: dict | None = None, **kw: Any) -> dict[str, Any]:

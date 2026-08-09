@@ -10,7 +10,7 @@ tests/test_tool_surface_drift.py can fail loudly when they diverge.
 Run it after pulling condor:
 
     make tool-surface                    # uses ../condor
-    CONDOR_REPO=/path/to/condor make tool-surface
+    CONDOR_PATH=/path/to/condor make tool-surface
 
 Requires the condor repo checked out and its `uv` environment usable, since it
 launches the real servers over stdio and asks them to list their tools.
@@ -39,11 +39,23 @@ SERVERS = {
 
 
 def condor_repo() -> Path:
-    path = Path(os.environ.get("CONDOR_REPO", ROOT.parent / "condor")).resolve()
-    if not (path / "mcp_servers").is_dir():
+    """Resolve through config.condor_path() so every drift check reads one checkout.
+
+    With more than one condor clone around, a script with its own resolution rule
+    can capture the surface from one checkout while live runs use another — and
+    the snapshot then "proves" a surface production doesn't have.
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from config import condor_path
+
+    path = condor_path()
+    if path is None or not (path / "mcp_servers").is_dir():
         sys.exit(
-            f"No condor checkout at {path}. Set CONDOR_REPO to the condor repo root."
+            "No condor checkout found. Set CONDOR_PATH to the condor repo root "
+            f"(tried: {os.environ.get('CONDOR_PATH') or os.environ.get('CONDOR_REPO') or ROOT.parent / 'condor'})."
         )
+    print(f"using condor checkout: {path}", file=sys.stderr)
     return path
 
 

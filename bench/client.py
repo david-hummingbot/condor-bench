@@ -1,33 +1,48 @@
 """Benchmark client.
 
 Routes each case to the correct agent stack (PydanticAIClient or ACPClient),
-attaches both mock MCP servers, and captures events + latency.
+attaches MCP servers — condor's real ones in live mode, ``mock_mcp/`` in mock
+mode — and captures events, tool traces, latency and token usage.
 Multi-turn cases loop prompt_stream() calls preserving message history.
+
+Three things are captured here that the pre-live client did not:
+
+* **Tool arguments and responses**, not just names. Param correctness and live
+  response validity are what separate "picked the right tool" from "actually got
+  the data", which is the distinction a model-sizing study lives on.
+* **Token usage**, via ``UsageEvent``. Session-cumulative, so a multi-turn case
+  reports the whole case.
+* **Wiring metadata** — mode, ``agent_slug``, resolved API URL, effective tool
+  count — so a bad row can be identified as a harness artifact instead of being
+  averaged into a routing recommendation.
 """
 from __future__ import annotations
 
 import json
 import re
-import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from condor_compat.acp.pydantic_ai_client import PydanticAIClient
 from condor_compat.acp.acp_client import ACPClient, is_acp_model, resolve_acp
-from condor_compat.acp.client import TextChunk, ToolCallEvent
+from condor_compat.acp.client import (
+    TextChunk,
+    ToolCallEvent,
+    ToolCallUpdate,
+    UsageEvent,
+    fold_usage_event,
+)
+
+from bench.mcp_provider import build_mcp_configs, wiring_metadata
+from config import bench_mode, condor_path
 
 # ── Agent instructions ─────────────────────────────────────────────────────────
-_AGENT_MD = Path(__file__).parent.parent / "condor_compat" / "assistants" / "condor" / "AGENT.md"
+_AGENT_MD = Path(__file__).parent.parent / "condor_compat" / "agents" / "condor" / "AGENT.md"
 _AGENT_INSTRUCTIONS: str = _AGENT_MD.read_text() if _AGENT_MD.exists() else ""
-
-# ── Mock MCP server paths ──────────────────────────────────────────────────────
-_ROOT = Path(__file__).parent.parent
-_HB_SCRIPT = _ROOT / "mock_mcp" / "hummingbot_server.py"
-_CONDOR_SCRIPT = _ROOT / "mock_mcp" / "condor_server.py"
 
 _CONFIRM_RE = re.compile(
     r"(shall i|do you want(?: me)? to|please confirm|confirm (?:with|before|deploy|to)|"
@@ -37,41 +52,90 @@ _CONFIRM_RE = re.compile(
 _AUTO_CONFIRM_MSG = "Yes, proceed. Deploy / execute with the parameters you proposed."
 
 
-def _build_consult_prompt(question: str) -> str:
+def _build_consult_prompt(question: str, instructions: str | None = None) -> str:
     """Mirror production build_agent_context(): instructions + [CONSULT REQUEST]."""
     parts = []
-    if _AGENT_INSTRUCTIONS:
-        parts.append(_AGENT_INSTRUCTIONS)
+    prompt_body = instructions if instructions is not None else _AGENT_INSTRUCTIONS
+    if prompt_body:
+        parts.append(prompt_body)
     parts.append(f"[CONSULT REQUEST]\n{question}")
     return "\n\n".join(parts)
 
 
-def _mock_mcp_configs(scenario_path: str, tool_log_path: str) -> list[dict]:
-    """Return two named MCP server configs mirroring production (hummingbot + condor)."""
-    env = [
-        {"name": "BENCH_SCENARIO_FILE", "value": scenario_path},
-        {"name": "BENCH_TOOL_LOG", "value": tool_log_path},
-    ]
-    py = sys.executable
+def load_assistant_prompt(slug: str | None) -> str:
+    """System prompt for an assistant / agent, from the condor checkout.
 
-    def _cmd(script: Path) -> list[str]:
-        return [str(py), str(script)] if script.exists() else [str(py), "-m", f"mock_mcp.{script.stem}"]
+    Ported from condor-evals' ``load_assistant_prompt()`` — the one piece of that
+    harness worth keeping. Layer 3 cases are only meaningful if the model is given
+    the same instructions production gives it: grading ``solana_dex_lp_expert``
+    against the generic Condor prompt measures nothing about that agent.
 
-    return [
-        {"name": "mcp-hummingbot", "command": _cmd(_HB_SCRIPT)[0], "args": _cmd(_HB_SCRIPT)[1:], "env": env},
-        {"name": "condor",         "command": _cmd(_CONDOR_SCRIPT)[0], "args": _cmd(_CONDOR_SCRIPT)[1:], "env": env},
-    ]
+    Falls back to the vendored Condor prompt (with a note in the result metadata
+    via :func:`assistant_prompt_source`) so a missing checkout degrades to a
+    weaker but still-runnable case rather than an exception.
+    """
+    if not slug:
+        return _AGENT_INSTRUCTIONS
+    repo = condor_path()
+    if repo is None:
+        return _AGENT_INSTRUCTIONS
+    for candidate in (
+        repo / "agents" / slug / "AGENT.md",
+        repo / "assistants" / slug / "AGENT.md",
+        repo / "assistants" / f"{slug}.md",
+    ):
+        if candidate.is_file():
+            return _strip_frontmatter(candidate.read_text())
+    return _AGENT_INSTRUCTIONS
+
+
+def assistant_prompt_source(slug: str | None) -> str:
+    """Where :func:`load_assistant_prompt` got its text, for results metadata."""
+    if not slug:
+        return "vendored:condor/AGENT.md"
+    repo = condor_path()
+    if repo is None:
+        return "fallback:vendored (no condor checkout — prompt is NOT the agent's)"
+    for candidate in (
+        repo / "agents" / slug / "AGENT.md",
+        repo / "assistants" / slug / "AGENT.md",
+        repo / "assistants" / f"{slug}.md",
+    ):
+        if candidate.is_file():
+            return f"condor:{candidate.relative_to(repo)}"
+    return f"fallback:vendored (no prompt found for '{slug}')"
+
+
+def _strip_frontmatter(text: str) -> str:
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            return parts[2].lstrip("\n")
+    return text
 
 
 def _asks_confirmation(text: str) -> bool:
     return bool(_CONFIRM_RE.search(text or ""))
 
 
-def _missing_required_tools(logged: list[dict], required: list[str]) -> list[str]:
+def _compact(value: Any, limit: int) -> str:
+    """One-line, length-capped rendering of tool args or a tool response."""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, default=str)
+        except (TypeError, ValueError):
+            text = str(value)
+    text = " ".join(text.split())
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def _missing_required_tools(called: list[str], required: list[str]) -> list[str]:
     from metrics.tool_accuracy import normalize_tool_name
 
-    called = {normalize_tool_name(r["tool"]) for r in logged}
-    return [t for t in required if normalize_tool_name(t) not in called]
+    seen = {normalize_tool_name(t) for t in called}
+    return [t for t in required if normalize_tool_name(t) not in seen]
 
 
 # ── Result types ───────────────────────────────────────────────────────────────
@@ -81,6 +145,8 @@ class TurnResult:
     tool_calls: list[dict[str, Any]]
     latency_s: float
     error: str | None = None
+    # Captured tool responses: [{"tool": name, "output": str, "tool_call_id": id}]
+    tool_responses: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -89,6 +155,10 @@ class BenchmarkResult:
     model: str
     turns: list[TurnResult]          # one entry per conversation turn
     error: str | None = None
+    # Session-cumulative token usage; {} when the provider reported none.
+    usage: dict[str, Any] = field(default_factory=dict)
+    # Mode / agent_slug / resolved URL / effective tool count for this case.
+    wiring: dict[str, Any] = field(default_factory=dict)
 
     @property
     def response(self) -> str:
@@ -104,36 +174,89 @@ class BenchmarkResult:
         return calls
 
     @property
+    def tool_responses(self) -> list[dict[str, Any]]:
+        responses: list[dict] = []
+        for t in self.turns:
+            responses.extend(t.tool_responses)
+        return responses
+
+    @property
     def latency_s(self) -> float:
         return sum(t.latency_s for t in self.turns)
 
     def tool_names(self) -> list[str]:
         return [c["tool"] for c in self.tool_calls]
 
-    def transcript_for_judge(self) -> str:
-        """Full multi-turn transcript including tool names for the quality judge."""
+    def transcript_for_judge(self, *, output_chars: int = 700) -> str:
+        """Full transcript with the tool log, for the quality judge.
+
+        Tool *outputs* are included, not just names. The judge is instructed to
+        penalise fabricated tool results heavily, and without the outputs it cannot
+        tell a figure the tool returned from one the model invented — so it
+        defaults to assuming the latter and marks down every correct, well-grounded
+        answer whose content came from a tool. That penalty lands hardest on the
+        Layer 2 tool cases, where the answer *is* the tool's data.
+
+        Outputs are truncated: a full candle series would crowd out the answer
+        itself in the judge's context, and the judge only needs enough to check
+        that the figures quoted actually appear.
+        """
         if not self.turns:
             return ""
         if len(self.turns) == 1 and not self.turns[0].tool_calls:
             return self.turns[0].response
+
+        outputs_by_id = {
+            r.get("tool_call_id"): r.get("output")
+            for r in self.tool_responses
+            if r.get("tool_call_id")
+        }
+        # Fall back to name-based pairing: the mock tool log has no call ids, and
+        # some providers don't echo them either.
+        outputs_by_name: dict[str, list[Any]] = {}
+        for record in self.tool_responses:
+            outputs_by_name.setdefault(str(record.get("tool", "")), []).append(
+                record.get("output")
+            )
+
         parts: list[str] = []
         for i, turn in enumerate(self.turns, 1):
-            tools = ", ".join(c["tool"] for c in turn.tool_calls) or "(none)"
-            parts.append(
-                f"--- Turn {i} ---\n"
-                f"Tools called: {tools}\n"
-                f"Response:\n{turn.response}"
-            )
+            lines = [f"--- Turn {i} ---"]
+            if not turn.tool_calls:
+                lines.append("Tools called: (none)")
+            else:
+                lines.append("Tool log:")
+                for call in turn.tool_calls:
+                    name = str(call.get("tool", ""))
+                    args = call.get("args") or {}
+                    output = outputs_by_id.get(call.get("tool_call_id"))
+                    if output is None:
+                        queue = outputs_by_name.get(name)
+                        output = queue.pop(0) if queue else None
+                    lines.append(f"  {name}({_compact(args, 300)})")
+                    lines.append(
+                        f"    → {_compact(output, output_chars)}"
+                        if output is not None
+                        else "    → (no output captured)"
+                    )
+            lines.append(f"Response:\n{turn.response}")
+            parts.append("\n".join(lines))
+
         if self.error:
             parts.append(f"--- Error ---\n{self.error}")
         return "\n\n".join(parts)
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
-async def _stream_turn(client: Any, prompt: str) -> TurnResult:
-    """Send one prompt, collect text + tool events, return a TurnResult."""
+async def _stream_turn(
+    client: Any, prompt: str, usage_acc: dict[str, Any]
+) -> TurnResult:
+    """Send one prompt, collect text + tool events + usage, return a TurnResult."""
     text_chunks: list[str] = []
     tool_calls: list[dict] = []
+    tool_responses: list[dict] = []
+    # tool_call_id → tool name, so a ToolCallUpdate's output can be attributed.
+    call_names: dict[str, str] = {}
     error: str | None = None
     t0 = time.monotonic()
     try:
@@ -141,7 +264,31 @@ async def _stream_turn(client: Any, prompt: str) -> TurnResult:
             if isinstance(event, TextChunk):
                 text_chunks.append(event.text)
             elif isinstance(event, ToolCallEvent):
-                tool_calls.append({"tool": event.title, "args": event.input or {}})
+                call_names[event.tool_call_id] = event.title
+                tool_calls.append(
+                    {
+                        "tool": event.title,
+                        "args": event.input or {},
+                        "tool_call_id": event.tool_call_id,
+                        "status": event.status,
+                    }
+                )
+            elif isinstance(event, ToolCallUpdate):
+                if event.output is None:
+                    continue
+                tool_responses.append(
+                    {
+                        "tool": call_names.get(event.tool_call_id)
+                        or event.title
+                        or "unknown",
+                        "tool_call_id": event.tool_call_id,
+                        "output": event.output,
+                        "status": event.status,
+                    }
+                )
+            elif isinstance(event, UsageEvent):
+                # Cumulative totals: fold (last non-None wins), never sum.
+                fold_usage_event(usage_acc, event)
     except Exception as exc:
         error = str(exc)
     return TurnResult(
@@ -149,10 +296,13 @@ async def _stream_turn(client: Any, prompt: str) -> TurnResult:
         tool_calls=tool_calls,
         latency_s=time.monotonic() - t0,
         error=error,
+        tool_responses=tool_responses,
     )
 
 
-def _read_tool_log(path: str) -> list[dict]:
+def _read_tool_log(path: str | None) -> list[dict]:
+    if not path:
+        return []
     try:
         records = []
         for line in Path(path).read_text().splitlines():
@@ -164,15 +314,105 @@ def _read_tool_log(path: str) -> list[dict]:
         return []
 
 
-def _assign_logged_tools(all_turns: list[TurnResult], logged: list[dict]) -> None:
-    """Attach MCP tool-log records to turns (aggregate on last turn for scoring)."""
+def _merge_mock_tool_log(all_turns: list[TurnResult], logged: list[dict]) -> None:
+    """Reconcile streamed tool calls with the mock servers' own log.
+
+    Mock mode only. The log is authoritative for *which* tools ran — some
+    providers announce a tool call they then fail to dispatch, and only the server
+    knows what it was actually asked. But each log record keeps a hand-picked
+    subset of the arguments, so taking it verbatim would blank out args the mock
+    doesn't record and make param scoring punish correct calls. So: log decides
+    the call list, streamed events fill in the full argument dict.
+
+    Everything lands on the last turn because the mock servers don't record turn
+    boundaries. Scoring aggregates across turns anyway, so this only affects the
+    per-turn view in the dashboard.
+    """
     if not logged or not all_turns:
         return
-    for t in all_turns:
-        t.tool_calls = []
-    all_turns[-1].tool_calls = [
-        {"tool": r["tool"], "args": r.get("args", {})} for r in logged
-    ]
+
+    from metrics.tool_accuracy import normalize_tool_name
+
+    # Streamed calls by tool name, in order, so repeated calls to the same tool
+    # pair up with their own log records rather than all taking the first one.
+    streamed: dict[str, list[dict]] = {}
+    for turn in all_turns:
+        for call in turn.tool_calls:
+            streamed.setdefault(normalize_tool_name(str(call.get("tool", ""))), []).append(call)
+
+    merged_calls: list[dict] = []
+    merged_responses: list[dict] = []
+    for record in logged:
+        name = str(record.get("tool", ""))
+        queue = streamed.get(normalize_tool_name(name), [])
+        streamed_args = queue.pop(0).get("args", {}) if queue else {}
+        args = {**(streamed_args or {}), **(record.get("args") or {})}
+        merged_calls.append({"tool": name, "args": args})
+        if "result" in record:
+            merged_responses.append({"tool": name, "output": record["result"]})
+
+    for turn in all_turns:
+        turn.tool_calls = []
+        turn.tool_responses = []
+    all_turns[-1].tool_calls = merged_calls
+    all_turns[-1].tool_responses = merged_responses
+
+
+def _make_client(
+    model: str,
+    mcp_configs: list[dict],
+    *,
+    tool_filter_mode: str | None = None,
+) -> tuple[Any, bool]:
+    """Build the right client for a model key. Returns (client, is_acp)."""
+    if is_acp_model(model):
+        command, extra_env = resolve_acp(model)
+        # ACP agents auto-discover stdio MCP servers from .mcp.json in their cwd.
+        # In live mode that cwd must be the condor repo (that is where the real
+        # servers resolve from), which also means condor's playwright entry is
+        # visible to the agent — reported in wiring metadata, since the by-name
+        # overrides can replace servers but not remove one.
+        working_dir = None
+        if bench_mode() == "live":
+            repo = condor_path()
+            working_dir = str(repo) if repo else None
+        return (
+            ACPClient(
+                command=command,
+                mcp_servers=mcp_configs,
+                extra_env=extra_env or None,
+                working_dir=working_dir,
+            ),
+            True,
+        )
+    kwargs: dict[str, Any] = {}
+    if tool_filter_mode:
+        kwargs["tool_filter_mode"] = tool_filter_mode
+    return PydanticAIClient(model=model, mcp_servers=mcp_configs, **kwargs), False
+
+
+class _MockScratch:
+    """Temp scenario + tool-log files for mock mode; no-ops in live mode."""
+
+    def __init__(self, mode: str, mock_tools: dict[str, Any] | None) -> None:
+        self.scenario_path: str | None = None
+        self.tool_log_path: str | None = None
+        if mode == "live":
+            return
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as sf:
+            json.dump({"mock_tools": mock_tools or {}}, sf)
+            self.scenario_path = sf.name
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as lf:
+            self.tool_log_path = lf.name
+
+    def cleanup(self) -> None:
+        for path in (self.scenario_path, self.tool_log_path):
+            if not path:
+                continue
+            try:
+                Path(path).unlink()
+            except Exception:
+                pass
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -185,56 +425,59 @@ async def run_consult(
     *,
     auto_confirm: bool = True,
     required_tools: list[str] | None = None,
+    agent_slug: str | None = None,
+    instructions: str | None = None,
+    mode: str | None = None,
+    tool_filter_mode: str | None = None,
 ) -> BenchmarkResult:
-    """Run a consult case (with MCP tools available, same as production).
+    """Run a consult / tool / agent case with MCP tools available, as production does.
 
     extra_turns: additional user messages after the initial question (multi-turn).
     auto_confirm: if the model asks for confirmation and required tools are still
       missing, send one follow-up "Yes, proceed" turn (covers strategy-creation stalls).
+    agent_slug: None keeps the run chat-scoped (a production consult); a slug
+      scopes condor's memory/skill tools to that agent's own stores.
     """
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as sf:
-        json.dump({"mock_tools": mock_tools or {}}, sf)
-        scenario_path = sf.name
-    with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as lf:
-        tool_log_path = lf.name
-
-    mcp_configs = _mock_mcp_configs(scenario_path, tool_log_path)
+    mode = mode or bench_mode()
+    scratch = _MockScratch(mode, mock_tools)
     all_turns: list[TurnResult] = []
+    usage_acc: dict[str, Any] = {}
     outer_error: str | None = None
+    mcp_configs: list[dict] = []
+    is_acp = False
 
     try:
-        if is_acp_model(model):
-            command, extra_env = resolve_acp(model)
-            client: Any = ACPClient(command=command, mcp_servers=mcp_configs, extra_env=extra_env or None)
-        else:
-            client = PydanticAIClient(model=model, mcp_servers=mcp_configs)
+        mcp_configs = build_mcp_configs(
+            mode,
+            agent_slug=agent_slug,
+            scenario_path=scratch.scenario_path,
+            tool_log_path=scratch.tool_log_path,
+        )
+        client, is_acp = _make_client(
+            model, mcp_configs, tool_filter_mode=tool_filter_mode
+        )
 
         await client.start()
         try:
-            first_prompt = _build_consult_prompt(question)
-            turn = await _stream_turn(client, first_prompt)
+            first_prompt = _build_consult_prompt(question, instructions)
+            turn = await _stream_turn(client, first_prompt, usage_acc)
             all_turns.append(turn)
             if turn.error:
                 outer_error = turn.error
             else:
                 for follow_up in (extra_turns or []):
-                    turn = await _stream_turn(client, follow_up)
+                    turn = await _stream_turn(client, follow_up, usage_acc)
                     all_turns.append(turn)
                     if turn.error:
                         outer_error = turn.error
                         break
 
                 # Auto-confirm when the model gated a fully-specified action
-                if (
-                    auto_confirm
-                    and not outer_error
-                    and required_tools
-                    and all_turns
-                ):
-                    logged = _read_tool_log(tool_log_path)
-                    missing = _missing_required_tools(logged, required_tools)
+                if auto_confirm and not outer_error and required_tools and all_turns:
+                    called = _called_tool_names(all_turns, scratch.tool_log_path, mode)
+                    missing = _missing_required_tools(called, required_tools)
                     if missing and _asks_confirmation(all_turns[-1].response):
-                        turn = await _stream_turn(client, _AUTO_CONFIRM_MSG)
+                        turn = await _stream_turn(client, _AUTO_CONFIRM_MSG, usage_acc)
                         all_turns.append(turn)
                         if turn.error:
                             outer_error = turn.error
@@ -245,16 +488,21 @@ async def run_consult(
         if not all_turns:
             all_turns.append(TurnResult(response="", tool_calls=[], latency_s=0.0, error=str(exc)))
 
-    logged = _read_tool_log(tool_log_path)
-    _assign_logged_tools(all_turns, logged)
+    if mode != "live":
+        _merge_mock_tool_log(all_turns, _read_tool_log(scratch.tool_log_path))
+    scratch.cleanup()
 
-    for p in (scenario_path, tool_log_path):
-        try:
-            Path(p).unlink()
-        except Exception:
-            pass
-
-    return BenchmarkResult(case_id=case_id, model=model, turns=all_turns, error=outer_error)
+    return BenchmarkResult(
+        case_id=case_id,
+        model=model,
+        turns=all_turns,
+        error=outer_error,
+        usage=usage_acc,
+        wiring=wiring_metadata(
+            mcp_configs, mode=mode, agent_slug=agent_slug, is_acp=is_acp
+        )
+        | {"assistant_prompt": assistant_prompt_source(agent_slug) if agent_slug else None},
+    )
 
 
 async def run_tick(
@@ -262,28 +510,40 @@ async def run_tick(
     prompt: str,
     model: str,
     mock_tools: dict[str, Any] | None = None,
+    *,
+    agent_slug: str | None = None,
+    mode: str | None = None,
 ) -> BenchmarkResult:
-    """Run a tick case with both mock MCP servers attached."""
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as sf:
-        json.dump({"mock_tools": mock_tools or {}}, sf)
-        scenario_path = sf.name
-    with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as lf:
-        tool_log_path = lf.name
+    """Run a tick case with both MCP servers attached.
 
-    mcp_configs = _mock_mcp_configs(scenario_path, tool_log_path)
+    Ticks are agent-scoped by construction — they run *as* a trading agent — so
+    ``agent_slug`` should always be set in live mode. Without it condor's journal
+    and memory tools write to the chat's stores, and a case asserting
+    ``trading_agent_journal_write`` measures the wrong thing.
+    """
+    mode = mode or bench_mode()
+    scratch = _MockScratch(mode, mock_tools)
     all_turns: list[TurnResult] = []
+    usage_acc: dict[str, Any] = {}
     outer_error: str | None = None
+    mcp_configs: list[dict] = []
+    is_acp = False
 
     try:
-        if is_acp_model(model):
-            command, extra_env = resolve_acp(model)
-            client: Any = ACPClient(command=command, mcp_servers=mcp_configs, extra_env=extra_env or None)
-        else:
-            client = PydanticAIClient(model=model, mcp_servers=mcp_configs, tool_filter_mode="full")
+        mcp_configs = build_mcp_configs(
+            mode,
+            agent_slug=agent_slug,
+            scenario_path=scratch.scenario_path,
+            tool_log_path=scratch.tool_log_path,
+        )
+        # Ticks get the full tool set: production does not filter an agent's tools
+        # by model size on the tick path, and a truncated set would make a tick
+        # failure indistinguishable from a tool that was never offered.
+        client, is_acp = _make_client(model, mcp_configs, tool_filter_mode="full")
 
         await client.start()
         try:
-            turn = await _stream_turn(client, prompt)
+            turn = await _stream_turn(client, prompt, usage_acc)
             all_turns.append(turn)
             if turn.error:
                 outer_error = turn.error
@@ -293,17 +553,31 @@ async def run_tick(
         outer_error = str(exc)
         all_turns.append(TurnResult(response="", tool_calls=[], latency_s=0.0, error=str(exc)))
 
-    logged = _read_tool_log(tool_log_path)
-    if logged and all_turns:
-        all_turns[0].tool_calls = [{"tool": r["tool"], "args": r.get("args", {})} for r in logged]
+    if mode != "live":
+        _merge_mock_tool_log(all_turns, _read_tool_log(scratch.tool_log_path))
+    scratch.cleanup()
 
-    for p in (scenario_path, tool_log_path):
-        try:
-            Path(p).unlink()
-        except Exception:
-            pass
+    return BenchmarkResult(
+        case_id=case_id,
+        model=model,
+        turns=all_turns,
+        error=outer_error,
+        usage=usage_acc,
+        wiring=wiring_metadata(
+            mcp_configs, mode=mode, agent_slug=agent_slug, is_acp=is_acp
+        ),
+    )
 
-    return BenchmarkResult(case_id=case_id, model=model, turns=all_turns, error=outer_error)
+
+def _called_tool_names(
+    all_turns: list[TurnResult], tool_log_path: str | None, mode: str
+) -> list[str]:
+    """Tool names called so far — from the mock log when it exists, else the stream."""
+    if mode != "live":
+        logged = _read_tool_log(tool_log_path)
+        if logged:
+            return [r["tool"] for r in logged]
+    return [c["tool"] for t in all_turns for c in t.tool_calls]
 
 
 def build_tick_prompt_for_case(case: Any, model: str) -> str:
@@ -311,8 +585,9 @@ def build_tick_prompt_for_case(case: Any, model: str) -> str:
     agent = SimpleNamespace(
         name=case.id, agent_key=model, instructions=case.agent_instructions, tools=[],
     )
+    slug = getattr(case, "agent_slug", None) or "bench"
     strategy = SimpleNamespace(
-        key=f"bench.{case.id}", agent_slug="bench", instructions=case.strategy_instructions,
+        key=f"bench.{case.id}", agent_slug=slug, instructions=case.strategy_instructions,
         agent_key=model, name=case.scenario_name,
     )
     return build_tick_prompt(
@@ -322,3 +597,41 @@ def build_tick_prompt_for_case(case: Any, model: str) -> str:
         tick_number=case.tick_number, agent_id=f"bench-{case.id}",
         cached_routines_section="", user_memory="", skills_index="",
     )
+
+
+async def run_case(case: Any, model: str, *, mode: str | None = None) -> BenchmarkResult:
+    """Run any dataset case, dispatching on its type.
+
+    One entry point so the CLI, the dashboard and the sweep runner cannot drift on
+    which cases get an ``agent_slug`` or an assistant prompt.
+    """
+    mode = mode or bench_mode()
+    if case.type == "tick":
+        prompt = build_tick_prompt_for_case(case, model)
+        return await run_tick(
+            case.id,
+            prompt,
+            model,
+            getattr(case, "mock_tools", {}),
+            agent_slug=getattr(case, "agent_slug", None),
+            mode=mode,
+        )
+
+    slug = getattr(case, "agent_slug", None)
+    expected = list(getattr(case, "expected_tools", []) or [])
+    return await run_consult(
+        case.id,
+        case.question,
+        model,
+        extra_turns=list(getattr(case, "turns", []) or []),
+        mock_tools=getattr(case, "mock_tools", {}),
+        required_tools=expected or None,
+        agent_slug=slug,
+        instructions=load_assistant_prompt(slug) if slug else None,
+        mode=mode,
+    )
+
+
+def case_input_text(case: Any) -> str:
+    """The text the judge is shown as "what the user asked"."""
+    return case.scenario_name if case.type == "tick" else getattr(case, "question", "")

@@ -208,39 +208,6 @@ async def configure_server(
     return result
 
 
-@mcp.tool()
-async def run_backtest(
-    config_name: str = "mock-config",
-    start_time: int = 0,
-    end_time: int = 0,
-    backtesting_resolution: str = "1m",
-    trade_cost: float = 0.0006,
-) -> dict:
-    args = {"config_name": config_name, "start_time": start_time, "end_time": end_time}
-    result = _mock("run_backtest", {
-        "task_id": "mock-backtest-001",
-        "status": "queued",
-    })
-    _log("run_backtest", args, result)
-    return result
-
-
-@mcp.tool()
-async def manage_backtest_tasks(
-    action: str = "list",
-    task_id: str | None = None,
-    config_name: str | None = None,
-    start_time: int | None = None,
-    end_time: int | None = None,
-    backtesting_resolution: str | None = None,
-    trade_cost: float | None = None,
-) -> dict:
-    args = {"action": action, "task_id": task_id}
-    result = _mock("manage_backtest_tasks", {"tasks": [], "status": "ok"})
-    _log("manage_backtest_tasks", args, result)
-    return result
-
-
 if __name__ == "__main__":
     _load()
     mcp.run(transport="stdio")

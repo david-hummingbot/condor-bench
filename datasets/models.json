@@ -1,0 +1,72 @@
+{
+  "_comment": "Models to benchmark, smallest first. params_b drives routing: the router recommends the smallest model that passes a domain. Hand-maintained — no registry reports parameter counts reliably, and cloud models don't publish them at all.",
+  "_fields": {
+    "key": "agent_key as condor would configure it (provider:model)",
+    "params_b": "parameter count in billions; null for cloud models, which sort last",
+    "provider": "local | cloud",
+    "tool_filter_mode": "essential | moderate | full — omit to let _infer_tool_filter_mode() decide, which is what production does",
+    "notes": "why this model is in the sweep"
+  },
+  "models": [
+    {
+      "key": "ollama:llama3.2:3b",
+      "params_b": 3,
+      "provider": "local",
+      "notes": "Floor of the study. Expected to pass single-tool cases only."
+    },
+    {
+      "key": "ollama:qwen2.5:7b",
+      "params_b": 7,
+      "provider": "local",
+      "notes": "Cheapest plausible candidate for advisory / general_consult."
+    },
+    {
+      "key": "ollama:llama3.1:8b",
+      "params_b": 8,
+      "provider": "local",
+      "notes": "Current condor default local model."
+    },
+    {
+      "key": "ollama:qwen2.5:14b",
+      "params_b": 14,
+      "provider": "local",
+      "notes": "First size that reliably handles multi-tool sequences."
+    },
+    {
+      "key": "ollama:mistral-small:24b",
+      "params_b": 24,
+      "provider": "local",
+      "notes": "Upper end of what fits a single consumer GPU."
+    },
+    {
+      "key": "ollama:qwen2.5:32b",
+      "params_b": 32,
+      "provider": "local",
+      "notes": "Last local rung before tool_filter_mode goes full."
+    },
+    {
+      "key": "anthropic:claude-haiku-4-5",
+      "params_b": null,
+      "provider": "cloud",
+      "notes": "Cheap cloud baseline via the direct Anthropic API — the key the dashboard's Anthropic provider produces."
+    },
+    {
+      "key": "anthropic:claude-sonnet-5",
+      "params_b": null,
+      "provider": "cloud",
+      "notes": "Quality ceiling, direct API. Also the default baseline model."
+    },
+    {
+      "key": "openrouter:anthropic/claude-haiku-4-5",
+      "params_b": null,
+      "provider": "cloud",
+      "notes": "Same model via OpenRouter. Listed separately because it is priced at OpenRouter's rates, not Anthropic's."
+    },
+    {
+      "key": "openrouter:anthropic/claude-sonnet-4-5",
+      "params_b": null,
+      "provider": "cloud",
+      "notes": "Fallback recommendation when no local model passes a domain."
+    }
+  ]
+}

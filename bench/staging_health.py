@@ -1,0 +1,376 @@
+"""Fail-closed pre-flight for live benchmark runs.
+
+The failure this exists to prevent: condor's ``.mcp.json`` declares
+``mcp-hummingbot`` with no CLI args, so the MCP server's own settings chain falls
+back to ``HUMMINGBOT_API_URL`` and then to ``http://localhost:8000`` with
+``admin``/``admin``. On a developer machine that last hop is plausibly the *real*
+hummingbot-api. A benchmark that quietly lands there would place orders against
+live capital while reporting tool scores.
+
+So this module refuses to run rather than guessing. Every check returns a
+verdict; ``assert_ready()`` raises unless the ones marked blocking pass, and
+mutating cases need a strictly stronger set than read-only ones.
+
+    from bench.staging_health import assert_ready
+    assert_ready(mutating=False)     # raises StagingUnhealthy on any blocking failure
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+
+from config import bench_mode, condor_path, staging_config
+from bench.mcp_provider import (
+    LiveWiringError,
+    build_mcp_configs,
+    condor_server_entry,
+    effective_api_url,
+)
+
+
+class StagingUnhealthy(RuntimeError):
+    """A blocking pre-flight check failed. Do not run against this target."""
+
+
+@dataclass
+class Check:
+    name: str
+    ok: bool
+    detail: str
+    blocking: bool = True
+    # Blocking only when the run may mutate staging state.
+    mutating_only: bool = False
+
+
+@dataclass
+class HealthReport:
+    mode: str
+    api_url: str | None
+    server_name: str | None
+    allow_mutating: bool
+    checks: list[Check] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """All read-only-blocking checks passed."""
+        return all(c.ok for c in self.checks if c.blocking and not c.mutating_only)
+
+    @property
+    def mutating_ok(self) -> bool:
+        """Every blocking check passed, including the mutating-only ones."""
+        return all(c.ok for c in self.checks if c.blocking)
+
+    def failures(self, *, mutating: bool = False) -> list[Check]:
+        return [
+            c
+            for c in self.checks
+            if c.blocking and not c.ok and (mutating or not c.mutating_only)
+        ]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "api_url": self.api_url,
+            "server_name": self.server_name,
+            "allow_mutating": self.allow_mutating,
+            "ok": self.ok,
+            "mutating_ok": self.mutating_ok,
+            "checks": [
+                {
+                    "name": c.name,
+                    "ok": c.ok,
+                    "detail": c.detail,
+                    "blocking": c.blocking,
+                    "mutating_only": c.mutating_only,
+                }
+                for c in self.checks
+            ],
+        }
+
+
+async def check_staging(*, timeout: float = 10.0) -> HealthReport:
+    """Probe the live target and return a verdict per check. Never raises."""
+    staging = staging_config()
+    mode = bench_mode()
+    report = HealthReport(
+        mode=mode,
+        api_url=None,
+        server_name=str(staging["server_name"]),
+        allow_mutating=bool(staging["allow_mutating"]),
+    )
+
+    if mode != "live":
+        report.checks.append(
+            Check("mode", True, "mock mode — mock_mcp/ servers, no staging needed")
+        )
+        return report
+
+    # 1. condor checkout — live wiring comes from its _shared.py
+    repo = condor_path()
+    report.checks.append(
+        Check(
+            "condor_checkout",
+            repo is not None,
+            f"condor at {repo}" if repo else "no condor checkout — set CONDOR_PATH",
+        )
+    )
+    if repo is None:
+        return report
+
+    # 2. HUMMINGBOT_API_URL declared, and the two spellings agree
+    declared = str(staging["api_url"])
+    expected = str(staging["expected_api_url"])
+    report.checks.append(
+        Check(
+            "api_url_declared",
+            bool(declared),
+            declared or "HUMMINGBOT_API_URL is unset — nothing to verify the MCP "
+            "server's target against, so a localhost fallback would go unnoticed",
+        )
+    )
+    report.checks.append(
+        Check(
+            "api_url_aliases_agree",
+            declared == expected,
+            "HUMMINGBOT_API_URL matches BENCH_EXPECTED_API_URL"
+            if declared == expected
+            else f"HUMMINGBOT_API_URL={declared!r} != BENCH_EXPECTED_API_URL={expected!r} "
+            "— resolve the ambiguity before running",
+        )
+    )
+
+    # 3. BENCH_SERVER_NAME registered in condor's servers config
+    server_name = str(staging["server_name"])
+    try:
+        entry = condor_server_entry(server_name)
+    except LiveWiringError as exc:
+        report.checks.append(Check("server_registered", False, str(exc)))
+        return report
+    report.checks.append(
+        Check(
+            "server_registered",
+            entry is not None,
+            f"'{server_name}' → {entry['host']}:{entry['port']}"
+            if entry
+            else f"'{server_name}' is not in {repo / 'config.yml'}. condor would start "
+            "without mcp-hummingbot and every tool case would fail for the wrong "
+            "reason. Run: uv run python scripts/register_bench_server.py",
+        )
+    )
+    if entry is None:
+        return report
+
+    # 4. THE fail-closed check: the URL the subprocess is actually launched with
+    #    must be the staging URL, exactly. No prefix matching, no localhost hop.
+    try:
+        configs = build_mcp_configs("live", agent_slug=None, server_name=server_name)
+        resolved = effective_api_url(configs)
+    except LiveWiringError as exc:
+        report.checks.append(Check("mcp_url_matches", False, str(exc)))
+        return report
+
+    report.api_url = resolved
+    matches = bool(resolved) and bool(declared) and resolved == declared
+    report.checks.append(
+        Check(
+            "mcp_url_matches",
+            matches,
+            f"MCP --url resolves to {resolved} (matches HUMMINGBOT_API_URL)"
+            if matches
+            else f"MCP --url resolves to {resolved!r} but HUMMINGBOT_API_URL is "
+            f"{declared!r}. Refusing to run: this is how a benchmark ends up "
+            f"trading on the wrong hummingbot-api. Fix the '{server_name}' entry "
+            f"in {repo / 'config.yml'} (host/port) so it points at staging.",
+        )
+    )
+    if not matches:
+        return report
+
+    # 5. Staging API reachable and authenticating
+    reachable, detail, accounts = await _probe_api(
+        resolved, str(staging["username"]), str(staging["password"]), timeout
+    )
+    report.checks.append(Check("api_reachable", reachable, detail))
+
+    # 6. Bench account exists — a wrong account name makes portfolio and
+    #    executor cases return empty rather than error, which scores as a model
+    #    failure. Advisory when the account list can't be read at all.
+    account = str(staging["account"])
+    if accounts is None:
+        report.checks.append(
+            Check(
+                "bench_account",
+                False,
+                f"could not list accounts — cannot confirm '{account}' exists",
+                blocking=False,
+            )
+        )
+    else:
+        report.checks.append(
+            Check(
+                "bench_account",
+                account in accounts,
+                f"'{account}' present"
+                if account in accounts
+                else f"'{account}' not found on staging (has: {', '.join(sorted(accounts)[:6]) or 'none'})",
+                blocking=True,
+                mutating_only=True,
+            )
+        )
+
+    # 7. Orphaned executors from a prior run. Blocking for mutating runs only:
+    #    read-only cases tolerate leftovers, mutating cleanup does not — a
+    #    teardown that stops "everything running" would kill unrelated positions.
+    orphans = await _probe_active_executors(
+        resolved, str(staging["username"]), str(staging["password"]), timeout
+    )
+    if orphans is None:
+        report.checks.append(
+            Check(
+                "no_orphaned_executors",
+                False,
+                "could not read active executors",
+                blocking=False,
+            )
+        )
+    else:
+        report.checks.append(
+            Check(
+                "no_orphaned_executors",
+                not orphans,
+                "no active executors"
+                if not orphans
+                else f"{len(orphans)} active executor(s) predate this run "
+                f"({', '.join(orphans[:5])}) — clean up before a mutating run so "
+                "teardown can't stop something it didn't create",
+                blocking=True,
+                mutating_only=True,
+            )
+        )
+
+    # 8. Mutating gate: only meaningful once everything above passes
+    if bool(staging["allow_mutating"]):
+        report.checks.append(
+            Check(
+                "mutating_gate",
+                report.mutating_ok,
+                "BENCH_ALLOW_MUTATING=true and all staging checks passed"
+                if report.mutating_ok
+                else "BENCH_ALLOW_MUTATING=true but staging checks failed — "
+                "mutating cases stay blocked",
+                blocking=False,
+            )
+        )
+
+    return report
+
+
+async def _probe_api(
+    url: str, username: str, password: str, timeout: float
+) -> tuple[bool, str, set[str] | None]:
+    """Return (reachable, detail, account names or None)."""
+    auth = httpx.BasicAuth(username, password) if username else None
+    try:
+        async with httpx.AsyncClient(timeout=timeout, auth=auth) as client:
+            r = await client.get(f"{url}/accounts")
+            if r.status_code == 401:
+                return False, f"{url} rejected the bench credentials (401)", None
+            r.raise_for_status()
+            data = r.json()
+            names = _account_names(data)
+            return True, f"{url} reachable ({len(names)} account(s))", names
+    except Exception as exc:
+        return False, f"{url} unreachable: {type(exc).__name__}: {exc}", None
+
+
+def _account_names(payload: Any) -> set[str]:
+    if isinstance(payload, list):
+        return {
+            str(item.get("account_name") or item.get("name"))
+            if isinstance(item, dict)
+            else str(item)
+            for item in payload
+        }
+    if isinstance(payload, dict):
+        for key in ("accounts", "data", "items"):
+            if key in payload:
+                return _account_names(payload[key])
+    return set()
+
+
+async def _probe_active_executors(
+    url: str, username: str, password: str, timeout: float
+) -> list[str] | None:
+    auth = httpx.BasicAuth(username, password) if username else None
+    try:
+        async with httpx.AsyncClient(timeout=timeout, auth=auth) as client:
+            r = await client.get(f"{url}/executors/active")
+            if r.status_code == 404:
+                # Endpoint absent on this API version — treat as unknown, not clean.
+                return None
+            r.raise_for_status()
+            payload = r.json()
+    except Exception:
+        return None
+
+    items = payload if isinstance(payload, list) else payload.get("data", [])
+    ids: list[str] = []
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict):
+            ids.append(str(item.get("id") or item.get("executor_id") or "?"))
+    return ids
+
+
+def assert_ready(*, mutating: bool = False, timeout: float = 10.0) -> HealthReport:
+    """Run the pre-flight and raise ``StagingUnhealthy`` unless it passes.
+
+    ``mutating=True`` additionally requires ``BENCH_ALLOW_MUTATING`` and the
+    mutating-only checks. Call this before the first case of a live run, and
+    again per mutating case (cheap: only the sync checks re-resolve).
+    """
+    report = asyncio.run(check_staging(timeout=timeout))
+    _raise_unless_ready(report, mutating=mutating)
+    return report
+
+
+async def a_assert_ready(*, mutating: bool = False, timeout: float = 10.0) -> HealthReport:
+    """Async form of :func:`assert_ready`, for use inside a running loop."""
+    report = await check_staging(timeout=timeout)
+    _raise_unless_ready(report, mutating=mutating)
+    return report
+
+
+def _raise_unless_ready(report: HealthReport, *, mutating: bool) -> None:
+    if report.mode != "live":
+        return
+
+    if mutating and not report.allow_mutating:
+        raise StagingUnhealthy(
+            "This case mutates staging state but BENCH_ALLOW_MUTATING is not true. "
+            "Set it only after the pre-flight URL check passes against staging."
+        )
+
+    failures = report.failures(mutating=mutating)
+    if failures:
+        lines = "\n".join(f"  ✗ {c.name}: {c.detail}" for c in failures)
+        raise StagingUnhealthy(
+            f"Staging pre-flight failed ({len(failures)} blocking check(s)) — "
+            f"refusing to run:\n{lines}"
+        )
+
+
+def format_report(report: HealthReport) -> str:
+    """Human-readable pre-flight summary for the CLI."""
+    head = f"staging pre-flight — mode={report.mode}"
+    if report.api_url:
+        head += f" url={report.api_url}"
+    lines = [head]
+    for c in report.checks:
+        mark = "✓" if c.ok else ("✗" if c.blocking else "•")
+        scope = " (mutating only)" if c.mutating_only else ""
+        lines.append(f"  {mark} {c.name}{scope}: {c.detail}")
+    return "\n".join(lines)
