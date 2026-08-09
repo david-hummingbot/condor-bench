@@ -11,6 +11,15 @@ results/
 # baseline/
 # !baseline/*.json
 
+# Suite definitions are tracked so teams share the same cases, but
+# environments are not: each one holds a condor_path pointing into a
+# local checkout, which is meaningless on anyone else's machine.
+# Ignore the contents rather than the directory itself, so the .gitkeep
+# negation below actually applies — git does not descend into an
+# excluded directory to reconsider files inside it.
+suites/environments/*
+!suites/environments/.gitkeep
+
 # Python
 __pycache__/
 *.py[cod]
