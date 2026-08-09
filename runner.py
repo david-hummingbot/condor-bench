@@ -124,7 +124,7 @@ def test(
     from bench.dataset import case_prompt_map, filter_cases, load_all_cases
     from bench.mcp_provider import mode_banner
     from bench.reporter import save_run
-    from config import PASS_THRESHOLD, bench_mode
+    from config import PASS_THRESHOLD, bench_mode, build_run_pin
 
     resolved_mode = bench_mode()
     if resolved_mode == "live":
@@ -166,13 +166,21 @@ def test(
 
     scorecards, responses = asyncio.run(_run_cases(cases, model, store, resolved_mode))
 
+    pin = build_run_pin(
+        run_type="adhoc",
+        case_ids=[c.id for c in cases],
+        models=[model],
+        mode=resolved_mode,
+        risk_ceiling=max_risk,
+        shared_loaded=resolved_mode == "live",
+    )
     run_dir = save_run(
         model,
         scorecards,
         responses,
         run_id,
         prompts=prompts,
-        extra_summary={"mode": resolved_mode},
+        extra_summary=pin,
     )
     console.print(f"\n[bold]Run saved:[/bold] {run_dir}")
     _print_summary(scorecards, model, PASS_THRESHOLD)
@@ -256,7 +264,7 @@ def sweep(
     from bench.matrix import load_models
     from bench.mcp_provider import mode_banner
     from bench.reporter import save_run
-    from config import PASS_THRESHOLD, bench_mode
+    from config import PASS_THRESHOLD, bench_mode, build_run_pin
 
     resolved_mode = bench_mode()
     if resolved_mode == "live":
@@ -315,13 +323,22 @@ def sweep(
         if not scorecards:
             console.print("  [yellow]no cases scored — skipping save[/yellow]")
             continue
+        pin = build_run_pin(
+            run_type="adhoc",
+            case_ids=[c.id for c in cases],
+            models=[entry.key],
+            mode=resolved_mode,
+            risk_ceiling=max_risk,
+            shared_loaded=resolved_mode == "live",
+        )
+        pin["sweep"] = True
         run_dir = save_run(
             entry.key,
             scorecards,
             responses,
             uuid.uuid4().hex[:8],
             prompts=prompts,
-            extra_summary={"mode": resolved_mode, "sweep": True},
+            extra_summary=pin,
         )
         completed.append((entry.key, run_dir))
         _print_summary(scorecards, entry.key, PASS_THRESHOLD)
@@ -619,6 +636,59 @@ def _print_summary(scorecards, model: str, pass_threshold: float) -> None:
             f"  [yellow]Harness artifacts: {len(artifacts)} case(s) excluded from "
             "routing[/yellow]"
         )
+
+
+suite_app = typer.Typer(help="Suite / Environment commands (dashboard is primary)")
+app.add_typer(suite_app, name="suite")
+
+
+@suite_app.command("list")
+def suite_list() -> None:
+    """List suites and environments."""
+    from bench.suites import list_environments, list_suites
+
+    envs = {e["id"]: e for e in list_environments()}
+    suites = list_suites()
+    if not suites:
+        console.print("[dim]No suites yet — create them in the dashboard Suites tab.[/dim]")
+    for s in suites:
+        env_names = ", ".join(
+            envs.get(eid, {}).get("name", eid) for eid in (s.get("environment_ids") or [])
+        )
+        console.print(
+            f"[bold]{s['id']}[/bold]  {s.get('name')}  envs=[{env_names}]  "
+            f"models={s.get('models')}"
+        )
+
+
+@suite_app.command("run")
+def suite_run_cmd(
+    suite_id: str = typer.Argument(..., help="Suite id"),
+    case_ids: Optional[str] = typer.Option(None, help="Comma-separated case ids"),
+) -> None:
+    """Run a suite across its environments via subprocess workers."""
+    import uuid
+
+    from bench.suite_runner import run_suite
+
+    run_id = uuid.uuid4().hex[:8]
+    ids = [c.strip() for c in case_ids.split(",")] if case_ids else None
+
+    async def emit(event: dict) -> None:
+        console.print(f"  [dim]{event.get('type')}[/dim] { {k:v for k,v in event.items() if k != 'type'} }")
+
+    async def _go():
+        return await run_suite(
+            suite_id,
+            parent_run_id=run_id,
+            emit=emit,
+            case_ids=ids,
+        )
+
+    result = asyncio.run(_go())
+    console.print(f"[bold]run_group_id[/bold] {result['run_group_id']}")
+    for m in result["members"]:
+        console.print(f"  {m}")
 
 
 if __name__ == "__main__":

@@ -189,13 +189,21 @@ class Run:
 
 
 def load_runs(results_dir: Path | None = None) -> list[Run]:
-    """Every persisted run, newest first."""
+    """Every persisted run eligible for the matrix, newest first.
+
+    Suite and custom-prompt runs are excluded unless ``include_in_matrix`` is set
+    — see :func:`config.summary_counts_for_matrix`.
+    """
+    from config import summary_counts_for_matrix
+
     results_dir = results_dir or RESULTS_DIR
     runs: list[Run] = []
     for summary_path in results_dir.glob("*/summary.json"):
         try:
             summary = json.loads(summary_path.read_text())
         except Exception:
+            continue
+        if not summary_counts_for_matrix(summary):
             continue
         run_dir = summary_path.parent
         cases = []

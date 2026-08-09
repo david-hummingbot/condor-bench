@@ -1,0 +1,15 @@
+{
+  "id": "condor",
+  "name": "Condor",
+  "version": 2,
+  "environment_ids": [],
+  "models": [
+    {
+      "model_key": "openrouter:anthropic/claude-haiku-4-5"
+    }
+  ],
+  "include_in_matrix": false,
+  "notes": "",
+  "updated_at": "2026-08-09T16:49:47.671304Z",
+  "cases_version": 2
+}

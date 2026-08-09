@@ -10,6 +10,8 @@ ROOT = Path(__file__).parent
 DATASETS_DIR = ROOT / "datasets"
 BASELINE_DIR = ROOT / "baseline"
 RESULTS_DIR = ROOT / "results"
+SUITES_DIR = ROOT / "suites"
+ENVIRONMENTS_DIR = SUITES_DIR / "environments"
 
 # Mock MCP server script — path relative to this file, works in both
 # editable installs (pip install -e .) and regular installs.
@@ -74,13 +76,16 @@ def condor_checkout_state() -> dict[str, object]:
     Branch and dirtiness matter as much as the commit: the drift checks read
     condor's *working tree*, so a feature branch — or uncommitted edits — makes
     them measure a condor that exists on no one else's machine.
+
+    ``path`` is always a string (or None) so the dict can be written straight into
+    ``summary.json`` without ``json.dumps`` raising on ``Path``.
     """
     repo = condor_path()
     if repo is None:
         return {"path": None}
     dirty = _git(repo, "status", "--porcelain")
     return {
-        "path": repo,
+        "path": str(repo),
         "branch": _git(repo, "rev-parse", "--abbrev-ref", "HEAD") or "unknown",
         "commit": _git(repo, "rev-parse", "--short", "HEAD") or "unknown",
         "dirty_files": len([ln for ln in (dirty or "").splitlines() if ln.strip()]),
@@ -94,6 +99,120 @@ def condor_checkout_state() -> dict[str, object]:
             )
         ),
     }
+
+
+def condor_loaded_paths(*, shared_loaded: bool = False) -> dict[str, str | None]:
+    """Paths the live wiring would / did resolve against the current checkout.
+
+    When ``shared_loaded`` is True, also report the module file that
+    ``load_condor_shared`` actually imported (proves subprocess isolation).
+    Callers that have not imported condor yet get the expected paths from disk.
+    """
+    repo = condor_path()
+    if repo is None:
+        return {
+            "shared_py": None,
+            "config_yml": None,
+            "acp_working_dir": None,
+            "sys_path_head": None,
+        }
+    shared_py = repo / "handlers" / "agents" / "_shared.py"
+    loaded_shared: str | None = str(shared_py) if shared_py.is_file() else None
+    if shared_loaded:
+        import sys
+
+        mod = sys.modules.get("condor_agents_shared")
+        if mod is not None and getattr(mod, "__file__", None):
+            loaded_shared = str(Path(mod.__file__).resolve())
+    return {
+        "shared_py": loaded_shared,
+        "config_yml": str(repo / "config.yml"),
+        "acp_working_dir": str(repo),
+        "sys_path_head": str(repo),
+    }
+
+
+def tool_surface_source_commit() -> str | None:
+    """Short commit recorded in datasets/tool_surface.json, if any."""
+    try:
+        import json
+
+        data = json.loads((DATASETS_DIR / "tool_surface.json").read_text())
+        raw = str(data.get("source_commit") or "").split()[0]
+        return raw or None
+    except Exception:
+        return None
+
+
+def build_run_pin(
+    *,
+    run_type: str = "adhoc",
+    suite_id: str | None = None,
+    environment_id: str | None = None,
+    run_group_id: str | None = None,
+    case_ids: list[str] | None = None,
+    models: list[str] | None = None,
+    mode: str | None = None,
+    risk_ceiling: str | None = None,
+    include_in_matrix: bool = False,
+    shared_loaded: bool = False,
+) -> dict[str, object]:
+    """Metadata stamped onto every ``summary.json`` for attribution and Compare.
+
+    All paths are strings. ``loaded`` records what the process resolved so a
+    mismatch with git ``path`` is visible rather than inferred.
+    """
+    state = condor_checkout_state()
+    loaded = condor_loaded_paths(shared_loaded=shared_loaded)
+    surface_commit = tool_surface_source_commit()
+    commit = state.get("commit")
+    surface_stale = bool(
+        surface_commit
+        and commit
+        and commit != "unknown"
+        and surface_commit != commit
+    )
+    staging = staging_config()
+    pin: dict[str, object] = {
+        "run_type": run_type,
+        "suite_id": suite_id,
+        "environment_id": environment_id,
+        "run_group_id": run_group_id,
+        "include_in_matrix": include_in_matrix,
+        "condor": {
+            "path": state.get("path"),
+            "branch": state.get("branch"),
+            "commit": commit,
+            "dirty_files": state.get("dirty_files", 0),
+            "source": state.get("source"),
+            "loaded": loaded,
+            "tool_surface_source_commit": surface_commit,
+            "tool_surface_stale": surface_stale,
+        },
+        "case_ids": list(case_ids or []),
+        "models": list(models or []),
+        "mode": mode or bench_mode(),
+        "risk_ceiling": risk_ceiling,
+        "allow_mutating": bool(staging["allow_mutating"]),
+    }
+    return pin
+
+
+def summary_counts_for_matrix(summary: dict) -> bool:
+    """Whether a persisted run should feed the matrix / router.
+
+    Suite runs and custom-prompt runs are excluded unless they explicitly opt in
+    via ``include_in_matrix: true``. Hand-edited suite cases must not silently
+    reshape routing recommendations.
+    """
+    if summary.get("include_in_matrix") is True:
+        return True
+    run_type = summary.get("run_type")
+    if run_type in ("suite", "custom_prompt", "custom", "custom-prompt"):
+        return False
+    if summary.get("suite_id"):
+        return False
+    return True
 
 
 def condor_checkout_label() -> str:

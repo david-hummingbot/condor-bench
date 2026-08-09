@@ -258,6 +258,55 @@ and Router tabs are that work; the section is kept as the rationale.
 
 ---
 
+## Suites (Condor branch A/B)
+
+The **Suites** tab is the primary UI for durable, comparable benchmarks. Create
+**Environments** (each binds a Condor checkout path, expected branch, mode) and
+**Suites** (editable case list + models + attached environments). **Run all**
+fans out one **subprocess worker per Environment** so Condor's `_shared` /
+`ConfigManager` cannot leak across checkouts in the FastAPI process.
+
+### Comparing two Condor branches
+
+1. Clone Condor twice (e.g. `condor-main` on `main`, `condor-feature` on your branch).
+2. In **Suites → Environments**, create one Environment per checkout (`condor_path`,
+   `expected_branch`, usually `mode=live`).
+3. Create a Suite, attach both Environments, import or author cases, pick a fixed model.
+4. **Run all** → Live tab shows `member_started` / `member_done` events.
+5. **Compare runs** — only comparable when model, mode, case set, and risk ceiling
+   match. Latency deltas include `n`. Mock multi-env compare is labeled
+   **prompt-only** (not a Condor wiring A/B).
+
+Suite runs are **excluded from the Matrix / Router** unless the suite sets
+`include_in_matrix: true`. Every `summary.json` pins git state **and** the paths
+actually loaded (`shared_py`, `config.yml`, `acp_working_dir`).
+
+`datasets/tool_surface.json` remains a single global snapshot — tool counts for
+non-default Environments may be stale relative to that checkout.
+
+### Security
+
+The dashboard is **trusted-local**. Environment `condor_path` is user-supplied
+filesystem input the backend executes modules from (arbitrary local code by
+design). Bind to localhost; do not expose the dashboard. CORS is open and there
+is no auth.
+
+### HTTP API (MCP-ready)
+
+All suite/environment/case/run operations are HTTP CRUD — the same surface a
+future bench MCP server (Openclaw, Hermes, Claude Code, Codex) should wrap.
+There is no UI-only write path. See `/api/environments`, `/api/suites`,
+`/api/suites/{id}/run`, `/api/compare`.
+
+CLI (thin; dashboard remains the authoring surface):
+
+```bash
+uv run python runner.py suite list
+uv run python runner.py suite run <suite-id>
+```
+
+---
+
 ## Staying in sync with condor
 
 Three drift checks, all runnable with `make check-drift`:
@@ -384,11 +433,15 @@ condor-bench/
 │   ├── acp/              #   pydantic-ai client, ACP client, JSON-RPC peer
 │   └── agents/           #   tick prompt builder + condor/AGENT.md (body only)
 ├── datasets/             # 4 case files + tool_surface.json + models.json
+├── suites/               # Environments + suite cases (file-backed, dashboard-edited)
+│   └── environments/
 ├── scripts/
-│   ├── snapshot_tool_surface.py  # re-capture the production tool surface
-│   ├── register_bench_server.py  # add bench_staging to condor's config.yml
-│   └── sync_case_prompts.py      # regenerate the dashboard's case prompt map
-├── dashboard/            # FastAPI + React (Run/Live/Prompt/Leaderboard/Matrix/Router/Results)
+│   ├── snapshot_tool_surface.py
+│   ├── register_bench_server.py
+│   ├── sync_case_prompts.py
+│   ├── suite_worker.py           # subprocess member runner (one Condor checkout)
+│   └── validate_environment.py   # isolated checkout probe
+├── dashboard/            # FastAPI + React (Suites/Run/Live/Prompt/Leaderboard/Matrix/Router/Results)
 ├── docs/STAGING.md       # live mode setup and guard rails
 ├── baseline/             # baseline latency records (tracked — shared reference)
 ├── results/              # benchmark run outputs (git-ignored)

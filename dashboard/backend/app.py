@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -159,7 +159,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.mcp_provider import mode_banner
     from bench.reporter import save_run
     from bench.scorer import score_case
-    from config import bench_mode, staging_config
+    from config import bench_mode, build_run_pin, staging_config
 
     state = _active_runs[run_id]
     state["status"] = "running"
@@ -298,13 +298,21 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
 
                 if scorecards:
                     run_id_short = uuid.uuid4().hex[:8]
+                    pin = build_run_pin(
+                        run_type="adhoc",
+                        case_ids=[c.id for c in cases],
+                        models=[norm_key],
+                        mode=mode,
+                        risk_ceiling=max_risk,
+                        shared_loaded=mode == "live",
+                    )
                     run_dir = save_run(
                         norm_key,
                         scorecards,
                         responses,
                         run_id_short,
                         prompts=prompts,
-                        extra_summary={"mode": mode},
+                        extra_summary=pin,
                     )
                     await _emit(run_id, {"type": "model_done", "model": model_key, "run_dir": run_dir.name})
 
@@ -414,18 +422,24 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
                 sc.case_id = cp_case_id
 
                 # Persist to disk so this run appears on the Runs page
+                from config import build_run_pin
+
+                pin = build_run_pin(
+                    run_type="custom_prompt",
+                    case_ids=[cp_case_id],
+                    models=[norm_key],
+                    mode=mode,
+                    shared_loaded=mode == "live",
+                )
+                pin["prompt_question"] = req.question[:300]
                 run_dir = save_run(
                     norm_key,
                     [sc],
                     {cp_case_id: result.response},
                     run_id,
+                    prompts={cp_case_id: req.question},
+                    extra_summary=pin,
                 )
-                # Annotate summary with run type and the prompt question
-                summary_path = run_dir / "summary.json"
-                summary = json.loads(summary_path.read_text())
-                summary["run_type"] = "custom-prompt"
-                summary["prompt_question"] = req.question[:300]
-                summary_path.write_text(json.dumps(summary, indent=2))
 
                 await _emit_custom(run_id, {
                     "type": "model_done",
@@ -476,6 +490,9 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    from bench.suites import ensure_store_dirs
+
+    ensure_store_dirs()
     yield
     for state in _active_runs.values():
         task = state.get("task")
@@ -622,6 +639,24 @@ async def get_model_registry():
     return {"models": [m.as_dict() for m in load_models()]}
 
 
+@app.get("/api/settings")
+async def api_get_settings():
+    from bench.settings_store import get_settings
+
+    return get_settings()
+
+
+class SettingsUpdate(BaseModel):
+    updates: dict[str, str | None] = {}
+
+
+@app.put("/api/settings")
+async def api_put_settings(body: SettingsUpdate):
+    from bench.settings_store import update_settings
+
+    return update_settings(body.updates)
+
+
 @app.get("/api/providers")
 async def get_providers():
     return {"providers": PROVIDERS}
@@ -706,6 +741,9 @@ async def cancel_run(run_id: str):
     state = _active_runs.get(run_id)
     if not state:
         raise HTTPException(404, "Run not found")
+    cancel_event = state.get("cancel_event")
+    if cancel_event is not None:
+        cancel_event.set()
     task = state.get("task")
     if task and not task.done():
         task.cancel()
@@ -803,8 +841,15 @@ async def get_run(run_dir_or_id: str):
     summary = json.loads(summary_file.read_text())
     prompts: dict[str, str] = {}
     try:
-        from bench.dataset import case_prompt_map
-        prompts = case_prompt_map()
+        suite_id = summary.get("suite_id")
+        if suite_id:
+            from bench.suites import suite_prompt_map
+
+            prompts = suite_prompt_map(suite_id)
+        else:
+            from bench.dataset import case_prompt_map
+
+            prompts = case_prompt_map()
     except Exception:
         pass
     cases = []
@@ -879,6 +924,312 @@ async def stream_custom_prompt(run_id: str, request: Request):
 
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ── Suites / Environments API ──────────────────────────────────────────────────
+
+def _suite_http_error(exc: Exception) -> HTTPException:
+    from bench.suites import SuiteStoreError, VersionConflict
+
+    if isinstance(exc, VersionConflict):
+        return HTTPException(409, str(exc))
+    if isinstance(exc, SuiteStoreError):
+        return HTTPException(400, str(exc))
+    return HTTPException(500, str(exc))
+
+
+@app.get("/api/environments")
+async def api_list_environments():
+    from bench.suites import list_environments
+
+    return {"environments": list_environments()}
+
+
+@app.post("/api/environments")
+async def api_create_environment(body: dict):
+    from bench.suites import SuiteStoreError, create_environment
+
+    try:
+        return create_environment(body)
+    except SuiteStoreError as exc:
+        raise _suite_http_error(exc) from exc
+
+
+@app.get("/api/environments/{env_id}")
+async def api_get_environment(env_id: str):
+    from bench.suites import SuiteStoreError, get_environment
+
+    try:
+        return get_environment(env_id)
+    except SuiteStoreError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.patch("/api/environments/{env_id}")
+async def api_patch_environment(env_id: str, body: dict, request: Request):
+    from bench.suites import SuiteStoreError, update_environment
+
+    expected = body.pop("version", None)
+    if expected is None and request.headers.get("if-match"):
+        try:
+            expected = int(request.headers["if-match"])
+        except ValueError:
+            expected = None
+    try:
+        return update_environment(env_id, body, expected_version=expected)
+    except SuiteStoreError as exc:
+        raise _suite_http_error(exc) from exc
+
+
+@app.delete("/api/environments/{env_id}")
+async def api_delete_environment(env_id: str):
+    from bench.suites import SuiteStoreError, delete_environment
+
+    try:
+        delete_environment(env_id)
+        return {"ok": True}
+    except SuiteStoreError as exc:
+        raise _suite_http_error(exc) from exc
+
+
+@app.get("/api/environments/{env_id}/validate")
+async def api_validate_environment(env_id: str):
+    from bench.suites import SuiteStoreError, validate_environment
+
+    try:
+        return validate_environment(env_id)
+    except SuiteStoreError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/suites")
+async def api_list_suites():
+    from bench.suites import list_suites
+
+    return {"suites": list_suites()}
+
+
+@app.post("/api/suites")
+async def api_create_suite(body: dict):
+    from bench.suites import SuiteStoreError, create_suite
+
+    try:
+        return create_suite(body)
+    except SuiteStoreError as exc:
+        raise _suite_http_error(exc) from exc
+
+
+@app.get("/api/suites/{suite_id}")
+async def api_get_suite(suite_id: str):
+    from bench.suites import SuiteStoreError, get_suite, list_suite_cases
+
+    try:
+        suite = get_suite(suite_id)
+        suite["cases"] = list_suite_cases(suite_id)
+        return suite
+    except SuiteStoreError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.patch("/api/suites/{suite_id}")
+async def api_patch_suite(suite_id: str, body: dict, request: Request):
+    from bench.suites import SuiteStoreError, update_suite
+
+    expected = body.pop("version", None)
+    if expected is None and request.headers.get("if-match"):
+        try:
+            expected = int(request.headers["if-match"])
+        except ValueError:
+            expected = None
+    try:
+        return update_suite(suite_id, body, expected_version=expected)
+    except SuiteStoreError as exc:
+        raise _suite_http_error(exc) from exc
+
+
+@app.delete("/api/suites/{suite_id}")
+async def api_delete_suite(suite_id: str):
+    from bench.suites import SuiteStoreError, delete_suite
+
+    try:
+        delete_suite(suite_id)
+        return {"ok": True}
+    except SuiteStoreError as exc:
+        raise _suite_http_error(exc) from exc
+
+
+@app.get("/api/suites/{suite_id}/cases")
+async def api_list_suite_cases(suite_id: str):
+    from bench.suites import SuiteStoreError, list_suite_cases
+
+    try:
+        return {"cases": list_suite_cases(suite_id)}
+    except SuiteStoreError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/suites/{suite_id}/cases")
+async def api_create_suite_case(suite_id: str, body: dict):
+    from bench.suites import SuiteStoreError, create_suite_case
+
+    expected = body.pop("version", None)
+    if expected is None:
+        raise HTTPException(400, "version is required for case writes")
+    try:
+        return create_suite_case(suite_id, body, expected_version=int(expected))
+    except SuiteStoreError as exc:
+        raise _suite_http_error(exc) from exc
+
+
+@app.patch("/api/suites/{suite_id}/cases/{case_id}")
+async def api_patch_suite_case(suite_id: str, case_id: str, body: dict):
+    from bench.suites import SuiteStoreError, update_suite_case
+
+    expected = body.pop("version", None)
+    if expected is None:
+        raise HTTPException(400, "version is required for case writes")
+    try:
+        return update_suite_case(
+            suite_id, case_id, body, expected_version=int(expected)
+        )
+    except SuiteStoreError as exc:
+        raise _suite_http_error(exc) from exc
+
+
+@app.delete("/api/suites/{suite_id}/cases/{case_id}")
+async def api_delete_suite_case(suite_id: str, case_id: str, version: int = Query(...)):
+    from bench.suites import SuiteStoreError, delete_suite_case
+
+    try:
+        delete_suite_case(suite_id, case_id, expected_version=version)
+        return {"ok": True}
+    except SuiteStoreError as exc:
+        raise _suite_http_error(exc) from exc
+
+
+@app.post("/api/suites/{suite_id}/cases/import")
+async def api_import_suite_cases(suite_id: str, body: dict):
+    from bench.suites import SuiteStoreError, import_library_cases
+
+    expected = body.get("version")
+    if expected is None:
+        raise HTTPException(400, "version is required")
+    try:
+        imported = import_library_cases(
+            suite_id,
+            case_ids=body.get("case_ids"),
+            layers=body.get("layers"),
+            expected_version=int(expected),
+        )
+        return {"imported": imported, "count": len(imported)}
+    except SuiteStoreError as exc:
+        raise _suite_http_error(exc) from exc
+
+
+@app.get("/api/suites/{suite_id}/runs")
+async def api_suite_runs(suite_id: str):
+    runs = []
+    for summary_file in sorted(RESULTS_DIR.glob("*/summary.json"), reverse=True):
+        try:
+            data = json.loads(summary_file.read_text())
+        except Exception:
+            continue
+        if data.get("suite_id") != suite_id:
+            continue
+        data["run_dir"] = summary_file.parent.name
+        runs.append(data)
+    return {"runs": runs}
+
+
+class SuiteRunRequest(BaseModel):
+    case_ids: list[str] | None = None
+    environment_ids: list[str] | None = None
+    models: list[ModelConfig] | None = None
+
+
+@app.post("/api/suites/{suite_id}/run")
+async def api_run_suite(suite_id: str, req: SuiteRunRequest):
+    from bench.suites import SuiteStoreError, get_suite
+
+    for state in _active_runs.values():
+        if state["status"] in ("starting", "running"):
+            raise HTTPException(409, "A benchmark is already running. Cancel it first.")
+
+    try:
+        get_suite(suite_id)
+    except SuiteStoreError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    run_id = uuid.uuid4().hex[:8]
+    cancel_event = asyncio.Event()
+    _active_runs[run_id] = {
+        "run_id": run_id,
+        "status": "starting",
+        "events": [],
+        "listeners": [],
+        "task": None,
+        "total": 0,
+        "current_case": None,
+        "started_at": time.time(),
+        "suite_id": suite_id,
+        "cancel_event": cancel_event,
+    }
+
+    async def _go():
+        from bench.suite_runner import run_suite
+
+        state = _active_runs[run_id]
+        state["status"] = "running"
+
+        async def emit(event: dict) -> None:
+            await _emit(run_id, event)
+
+        try:
+            model_dicts = None
+            if req.models is not None:
+                model_dicts = [m.model_dump() for m in req.models]
+            await run_suite(
+                suite_id,
+                parent_run_id=run_id,
+                emit=emit,
+                case_ids=req.case_ids,
+                environment_ids=req.environment_ids,
+                models=model_dicts,
+                cancel_event=cancel_event,
+            )
+            state["status"] = "completed"
+        except asyncio.CancelledError:
+            cancel_event.set()
+            state["status"] = "cancelled"
+            await _emit(run_id, {"type": "run_done", "status": "cancelled"})
+        except Exception as exc:
+            state["status"] = "failed"
+            await _emit(run_id, {"type": "run_done", "status": "failed", "error": str(exc)})
+        finally:
+            for q in list(state.get("listeners", [])):
+                await q.put(None)
+
+    task = asyncio.create_task(_go())
+    _active_runs[run_id]["task"] = task
+    return {"run_id": run_id, "suite_id": suite_id}
+
+
+@app.get("/api/run-groups/{run_group_id}")
+async def api_run_group(run_group_id: str):
+    from bench.compare import load_run_group
+
+    return {"run_group_id": run_group_id, "members": load_run_group(run_group_id)}
+
+
+@app.get("/api/compare")
+async def api_compare(
+    run_group: str | None = None,
+    runs: str | None = None,
+):
+    from bench.compare import compare_runs
+
+    run_dirs = [r for r in (runs or "").split(",") if r.strip()] or None
+    return compare_runs(run_group_id=run_group, run_dirs=run_dirs)
 
 
 # ── Static files (must come last) ─────────────────────────────────────────────
