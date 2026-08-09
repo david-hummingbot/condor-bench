@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { getProviders, getProviderModels, createRun, getDatasets } from '../api.js'
 import StagingStatus from './StagingStatus.jsx'
+import PageHeader from './PageHeader.jsx'
 
 const LAYER_OPTS = [
   { id: 'consult', label: 'Consult', hint: 'Layer 1 — end-to-end advisory + strategy creation' },
@@ -155,14 +156,11 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
 
   return (
     <div>
-      <div className="section-header" style={{ marginBottom: 20 }}>
-        <span className="section-title">Configure Benchmark</span>
-        {datasets && (
-          <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-            {datasets.total} cases · {datasets.agent_scoped} agent-scoped
-          </span>
-        )}
-      </div>
+      <PageHeader
+        title="Benchmark"
+        description="A throwaway run against the shared case library — pick models, narrow the dataset, and go. For a saved, repeatable definition that A/Bs two Condor checkouts, use Suites instead."
+        meta={datasets ? `${datasets.total} cases · ${datasets.agent_scoped} agent-scoped` : null}
+      />
 
       {/* Shown above the model picker on purpose: which API the run will hit
           matters more than which model runs against it. */}

@@ -4,6 +4,7 @@ import {
   fmtCost, fmtPct, fmtTokens, fmtSize, heatColor, inverseHeatColor,
   isToolDomain, orderedModels, stripToolPrefix,
 } from '../utils.js'
+import PageHeader from './PageHeader.jsx'
 
 const COLOR_BY = [
   { id: 'pass_rate', label: 'Pass rate', fmt: fmtPct, higherIsBetter: true },
@@ -58,13 +59,13 @@ export default function Matrix() {
 
   return (
     <div>
-      <div className="section-header" style={{ marginBottom: 20 }}>
-        <span className="section-title">Matrix</span>
-        <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-          {models.length} model{models.length !== 1 ? 's' : ''}
-          {matrix?.generated_at ? ` · built ${new Date(matrix.generated_at).toLocaleString()}` : ''}
-        </span>
-      </div>
+      <PageHeader
+        title="Matrix"
+        description="Where each model is actually strong: one cell per model × routing domain, from that model’s most recent run. This is the evidence the Router turns into a config."
+        meta={`${models.length} model${models.length !== 1 ? 's' : ''}${
+          matrix?.generated_at ? ` · built ${new Date(matrix.generated_at).toLocaleString()}` : ''
+        }`}
+      />
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="matrix-controls">

@@ -2,8 +2,10 @@ import { useState } from 'react'
 import { getRun } from '../api.js'
 import { fmtLatency, fmtScore, fmtTime, scoreColor, shortModel } from '../utils.js'
 import CaseTable from './CaseTable.jsx'
+import PageHeader from './PageHeader.jsx'
+import EmptyState from './EmptyState.jsx'
 
-export default function Runs({ runs, onRefresh }) {
+export default function Runs({ runs, onRefresh, onNavigate }) {
   const [selected, setSelected] = useState(null)
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -26,16 +28,24 @@ export default function Runs({ runs, onRefresh }) {
 
   return (
     <div>
-      <div className="section-header" style={{ marginBottom: 20 }}>
-        <span className="section-title">Results</span>
+      <PageHeader
+        title="Runs"
+        description="Every scored run, newest first. Open one to see its per-case verdicts, judge reasoning, and raw responses."
+        meta={`${runs.length} run${runs.length !== 1 ? 's' : ''}`}
+      >
         <button className="btn sm" onClick={onRefresh}>↻ Refresh</button>
-      </div>
+      </PageHeader>
 
       {runs.length === 0 ? (
         <div className="card">
-          <div className="empty">
-            No results yet. Go to <strong>Run</strong> to start your first benchmark.
-          </div>
+          <EmptyState
+            title="No runs yet"
+            description="Start a benchmark and its results land here as soon as the judge has scored them."
+            actions={[
+              { label: '▶ New benchmark', primary: true, onClick: () => onNavigate?.('#/run/benchmark') },
+              { label: 'Browse suites', onClick: () => onNavigate?.('#/suites') },
+            ]}
+          />
         </div>
       ) : (
         <div className="runs-layout">
@@ -73,9 +83,14 @@ export default function Runs({ runs, onRefresh }) {
           <div>
             {!selected && (
               <div className="card">
-                <div className="empty" style={{ padding: '32px 24px' }}>
-                  Select a run to view results.
-                </div>
+                <EmptyState
+                  title="Select a run"
+                  description="Pick a run on the left to see its scores case by case. To compare models against each other instead, use the Leaderboard or Matrix."
+                  actions={[
+                    { label: 'Leaderboard →', onClick: () => onNavigate?.('#/results/leaderboard') },
+                    { label: 'Matrix →', onClick: () => onNavigate?.('#/results/matrix') },
+                  ]}
+                />
               </div>
             )}
             {selected && loading && (

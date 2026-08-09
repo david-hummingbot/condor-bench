@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { getRouting } from '../api.js'
 import { fmtCost, fmtPct, fmtSize, fmtTokens } from '../utils.js'
+import PageHeader from './PageHeader.jsx'
 
 const MODE_OPTS = [
   { id: '', label: 'Any mode' },
@@ -50,12 +51,11 @@ export default function ModelRouter() {
 
   return (
     <div>
-      <div className="section-header" style={{ marginBottom: 20 }}>
-        <span className="section-title">Model Router</span>
-        <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-          {Object.keys(recs).length} domain{Object.keys(recs).length !== 1 ? 's' : ''} decided
-        </span>
-      </div>
+      <PageHeader
+        title="Router"
+        description="The payoff: which model Condor should route each domain to, derived from the Matrix under the evidence thresholds below. Copy the snippet straight into Condor’s config."
+        meta={`${Object.keys(recs).length} domain${Object.keys(recs).length !== 1 ? 's' : ''} decided`}
+      />
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="matrix-controls">

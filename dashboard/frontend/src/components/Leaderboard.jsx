@@ -3,18 +3,26 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { buildLeaderboard, fmtLatency, fmtScore, scoreColor, shortModel } from '../utils.js'
+import PageHeader from './PageHeader.jsx'
+import EmptyState from './EmptyState.jsx'
 
-export default function Leaderboard({ runs }) {
+const DESCRIPTION =
+  'Overall model ranking by composite score, using each model’s most recent run. ' +
+  'For per-domain strengths rather than one number per model, use the Matrix.'
+
+export default function Leaderboard({ runs, onNavigate }) {
   if (!runs || runs.length === 0) {
     return (
       <div>
-        <div className="section-header" style={{ marginBottom: 20 }}>
-          <span className="section-title">Leaderboard</span>
-        </div>
+        <PageHeader title="Leaderboard" description={DESCRIPTION} />
         <div className="card">
-          <div className="empty">
-            No benchmark runs yet. Go to <strong>Run</strong> to start your first benchmark.
-          </div>
+          <EmptyState
+            title="Nothing to rank yet"
+            description="The leaderboard needs at least one scored run before it can order models."
+            actions={[
+              { label: '▶ New benchmark', primary: true, onClick: () => onNavigate?.('#/run/benchmark') },
+            ]}
+          />
         </div>
       </div>
     )
@@ -29,10 +37,15 @@ export default function Leaderboard({ runs }) {
 
   return (
     <div>
-      <div className="section-header" style={{ marginBottom: 20 }}>
-        <span className="section-title">Leaderboard</span>
-        <span style={{ color: 'var(--muted)', fontSize: 13 }}>{rows.length} model{rows.length !== 1 ? 's' : ''}</span>
-      </div>
+      <PageHeader
+        title="Leaderboard"
+        description={DESCRIPTION}
+        meta={`${rows.length} model${rows.length !== 1 ? 's' : ''}`}
+      >
+        <button className="btn sm" onClick={() => onNavigate?.('#/results/matrix')}>
+          Matrix →
+        </button>
+      </PageHeader>
 
       <div className="card">
         <div className="card-title">Model ranking</div>

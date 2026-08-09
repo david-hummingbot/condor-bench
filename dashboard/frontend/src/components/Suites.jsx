@@ -20,6 +20,15 @@ import {
   runSuite,
   validateEnvironment,
 } from '../api.js'
+import PageHeader from './PageHeader.jsx'
+import EmptyState from './EmptyState.jsx'
+
+const SUITE_TABS = [
+  { id: 'cases', label: 'Cases' },
+  { id: 'runs', label: 'Runs' },
+  { id: 'compare', label: 'Compare' },
+  { id: 'envs', label: 'Environments' },
+]
 
 function buildModelOptions(registry, providers) {
   const seen = new Set()
@@ -291,12 +300,18 @@ export default function Suites({ onRunStarted }) {
 
   return (
     <div className="suites-page">
+      <PageHeader
+        title="Suites"
+        description="A suite is a saved set of cases plus the environments to run them against. Pin one model across several Condor checkouts and the deltas you see come from the checkout, not from switching models."
+        meta={`${suites.length} suite${suites.length !== 1 ? 's' : ''} · ${envs.length} environment${envs.length !== 1 ? 's' : ''}`}
+      />
+
       {error && (
-        <div className="card" style={{ borderColor: 'var(--red)', marginBottom: 12 }}>
-          <div style={{ color: 'var(--red)' }}>{error}</div>
-          <button className="btn btn-ghost" style={{ marginTop: 8 }} onClick={() => setError(null)}>
-            Dismiss
-          </button>
+        <div className="banner error">
+          <span>{error}</span>
+          <span className="banner-actions">
+            <button className="btn sm ghost" onClick={() => setError(null)}>Dismiss</button>
+          </span>
         </div>
       )}
 
@@ -370,9 +385,17 @@ export default function Suites({ onRunStarted }) {
         <main className="suites-main">
           {!detail ? (
             <div className="card">
-              <p className="muted">Select or create a suite. Attach Environments that point at different Condor checkouts, then Run all to compare.</p>
-              <p className="muted" style={{ marginTop: 8 }}>
-                Trusted-local only: Environment <code>condor_path</code> is executed by the backend. Bind the dashboard to localhost; do not expose it.
+              <EmptyState
+                title={suites.length ? 'Select a suite' : 'No suites yet'}
+                description={
+                  suites.length
+                    ? 'Pick a suite on the left to edit its cases, attach environments, and run it.'
+                    : 'Create a suite on the left, attach environments pointing at different Condor checkouts, then Run all to compare them.'
+                }
+              />
+              <p className="muted" style={{ textAlign: 'center', marginTop: 4 }}>
+                Trusted-local only: environment <code>condor_path</code> is executed by the backend.
+                Bind the dashboard to localhost; do not expose it.
               </p>
             </div>
           ) : (
@@ -386,8 +409,8 @@ export default function Suites({ onRunStarted }) {
                   </div>
                 </div>
                 <div className="suite-actions">
-                  <button className="btn btn-primary" onClick={handleRunAll} disabled={busy}>
-                    Run all
+                  <button className="btn primary" onClick={handleRunAll} disabled={busy}>
+                    ▶ Run all
                   </button>
                   <button className="btn" onClick={handleCompare} disabled={busy}>
                     Compare runs
@@ -395,14 +418,16 @@ export default function Suites({ onRunStarted }) {
                 </div>
               </div>
 
-              <div className="suite-subtabs">
-                {['cases', 'runs', 'compare', 'envs'].map((t) => (
+              {/* Segmented, not tabs — this is the third nav level and must not
+                  read as a peer of the topbar pills or the section underline. */}
+              <div className="segmented">
+                {SUITE_TABS.map((t) => (
                   <button
-                    key={t}
-                    className={`tab ${tab === t ? 'active' : ''}`}
-                    onClick={() => setTab(t)}
+                    key={t.id}
+                    className={`segmented-item ${tab === t.id ? 'active' : ''}`}
+                    onClick={() => setTab(t.id)}
                   >
-                    {t === 'envs' ? 'Environments' : t[0].toUpperCase() + t.slice(1)}
+                    {t.label}
                   </button>
                 ))}
               </div>

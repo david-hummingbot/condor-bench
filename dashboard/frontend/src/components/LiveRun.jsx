@@ -2,12 +2,14 @@ import { useState, useEffect, useRef } from 'react'
 import { cancelRun, streamUrl } from '../api.js'
 import { scoreColor, fmtScore, fmtLatency, PASS_THRESHOLD } from '../utils.js'
 import casePrompts from '../casePrompts.json'
+import PageHeader from './PageHeader.jsx'
+import EmptyState from './EmptyState.jsx'
 
 function caseQuestion(c) {
   return c.question || casePrompts[c.case_id] || ''
 }
 
-export default function LiveRun({ runId, onDone, onViewRuns }) {
+export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
   const [status, setStatus] = useState('idle')
   const [total, setTotal] = useState(0)
   const [completed, setCompleted] = useState(0)
@@ -18,12 +20,15 @@ export default function LiveRun({ runId, onDone, onViewRuns }) {
   const [expanded, setExpanded] = useState(null)
   const esRef = useRef(null)
 
+  const [memberInfo, setMemberInfo] = useState(null)
+
   useEffect(() => {
     if (!runId) return
     setStatus('connecting')
     setCases([])
     setCompleted(0)
     setError('')
+    setMemberInfo(null)
 
     const es = new EventSource(streamUrl(runId))
     esRef.current = es
@@ -35,7 +40,45 @@ export default function LiveRun({ runId, onDone, onViewRuns }) {
 
       if (t === 'run_started') {
         setStatus('running')
-        setTotal(evt.total || 0)
+        // Suite Run-all reports total_members; ad-hoc reports total cases.
+        setTotal(evt.total_members || evt.total || 0)
+        if (evt.total_members) {
+          setMemberInfo({ index: 0, total: evt.total_members, label: 'suite' })
+        }
+      } else if (t === 'member_started') {
+        setCurrentModel(evt.model)
+        setMemberInfo({
+          index: evt.member_index,
+          total: evt.total_members,
+          environment_id: evt.environment_id,
+          mode: evt.mode,
+        })
+        setCompleted(Math.max(0, (evt.member_index || 1) - 1))
+        setTotal(evt.total_members || 0)
+      } else if (t === 'member_done') {
+        setCompleted(evt.member_index || completed + 1)
+        setCases(prev => [
+          {
+            case_id: `member:${evt.environment_id}`,
+            model: evt.model,
+            domain: evt.environment_id,
+            composite: null,
+            response: `run_dir=${evt.run_dir} cases=${evt.cases}`,
+            question: `Environment ${evt.environment_id}`,
+          },
+          ...prev,
+        ])
+      } else if (t === 'member_failed') {
+        setCases(prev => [
+          {
+            case_id: `member:${evt.environment_id}`,
+            model: evt.model,
+            error: evt.error || 'failed',
+            question: `Environment ${evt.environment_id}`,
+          },
+          ...prev,
+        ])
+        setCompleted((c) => c + 1)
       } else if (t === 'model_started') {
         setCurrentModel(evt.model)
       } else if (t === 'case_started') {
@@ -90,13 +133,20 @@ export default function LiveRun({ runId, onDone, onViewRuns }) {
   if (!runId) {
     return (
       <div>
-        <div className="section-header" style={{ marginBottom: 20 }}>
-          <span className="section-title">Live Run</span>
-        </div>
+        <PageHeader
+          title="Live run"
+          description="Case-by-case progress for a benchmark in flight. Nothing is running right now."
+        />
         <div className="card">
-          <div className="empty">
-            No active run. Go to the <strong>Run</strong> tab to start a benchmark.
-          </div>
+          <EmptyState
+            title="No active run"
+            description="Start a run and this page streams each case as it is executed and scored."
+            actions={[
+              { label: '▶ New benchmark', primary: true, onClick: () => onNavigate?.('#/run/benchmark') },
+              { label: 'Run a suite', onClick: () => onNavigate?.('#/suites') },
+              { label: 'Past runs', onClick: () => onNavigate?.('#/results/runs') },
+            ]}
+          />
         </div>
       </div>
     )
@@ -104,20 +154,27 @@ export default function LiveRun({ runId, onDone, onViewRuns }) {
 
   return (
     <div>
-      <div className="section-header" style={{ marginBottom: 20 }}>
-        <span className="section-title">Live Run</span>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <span className={`status-badge ${status}`}>{status}</span>
-          {(status === 'running' || status === 'connecting') && (
-            <button className="btn sm danger" onClick={handleCancel}>Cancel</button>
-          )}
-          {(status === 'completed' || status === 'cancelled' || status === 'failed') && (
-            <button className="btn sm" onClick={onViewRuns}>View Runs →</button>
-          )}
-        </div>
-      </div>
+      <PageHeader
+        title="Live run"
+        description="Case-by-case progress, streamed as the run executes. Results are saved even if you navigate away."
+      >
+        <span className={`status-badge ${status}`}>{status}</span>
+        {(status === 'running' || status === 'connecting') && (
+          <button className="btn sm danger" onClick={handleCancel}>Cancel</button>
+        )}
+        {(status === 'completed' || status === 'cancelled' || status === 'failed') && (
+          <button className="btn sm primary" onClick={onViewRuns}>View in Results →</button>
+        )}
+      </PageHeader>
 
       <div className="card">
+        {memberInfo && (
+          <div className="muted" style={{ marginBottom: 8 }}>
+            Suite member {memberInfo.index}/{memberInfo.total}
+            {memberInfo.environment_id ? ` · ${memberInfo.environment_id}` : ''}
+            {memberInfo.mode ? ` · ${memberInfo.mode}` : ''}
+          </div>
+        )}
         {currentModel && (
           <div style={{ marginBottom: 10, fontSize: 13, color: 'var(--muted)' }}>
             Model: <strong style={{ color: 'var(--text)' }}>{currentModel}</strong>

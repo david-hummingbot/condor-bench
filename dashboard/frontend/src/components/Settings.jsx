@@ -3,6 +3,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { getSettings, updateSettings } from '../api.js'
+import PageHeader from './PageHeader.jsx'
 
 export default function Settings({ onSaved }) {
   const [fields, setFields] = useState([])
@@ -79,26 +80,15 @@ export default function Settings({ onSaved }) {
 
   return (
     <div>
-      <div className="section-header">
-        <span className="section-title">Settings</span>
-      </div>
+      <PageHeader
+        title="Settings"
+        description={note}
+        meta={<>Writing to <code>{envPath || '.env'}</code></>}
+      />
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <p className="muted">{note}</p>
-        <p className="muted" style={{ marginTop: 6 }}>
-          Writing to <code>{envPath || '.env'}</code>
-        </p>
-      </div>
-
-      {error && (
-        <div className="card" style={{ borderColor: 'var(--red)', marginBottom: 12, color: 'var(--red)' }}>
-          {error}
-        </div>
-      )}
+      {error && <div className="banner error">{error}</div>}
       {saved && !error && (
-        <div className="card" style={{ borderColor: 'var(--green)', marginBottom: 12, color: 'var(--green)' }}>
-          Saved. Process env updated for this server session.
-        </div>
+        <div className="banner success">Saved. Process env updated for this server session.</div>
       )}
 
       <form onSubmit={handleSave}>

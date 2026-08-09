@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { getProviders, getProviderModels, createCustomPrompt, streamCustomPromptUrl } from '../api.js'
+import PageHeader from './PageHeader.jsx'
 
 const SCORE_COLOR = (v) => v >= 0.8 ? 'var(--green)' : v >= 0.5 ? 'var(--yellow)' : 'var(--red)'
 
@@ -280,12 +281,10 @@ export default function CustomPrompt() {
 
   return (
     <div>
-      <div className="section-header" style={{ marginBottom: 20 }}>
-        <span className="section-title">Custom Prompt</span>
-        <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 12 }}>
-          Run a free-form question against any model — compare results across providers or against live Condor
-        </span>
-      </div>
+      <PageHeader
+        title="Prompt"
+        description="Run one free-form question against any set of models side by side. Useful for sanity-checking a change or a new model before committing it to a full benchmark — results are scored but do not enter the leaderboard as a dataset run."
+      />
 
       {/* Question */}
       <div className="card" style={{ marginBottom: 16 }}>
