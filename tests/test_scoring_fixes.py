@@ -69,6 +69,8 @@ def test_asks_confirmation():
 
 
 def test_transcript_for_judge_includes_tools():
+    # Kept here so scoring-fix imports still cover the transcript seam;
+    # richer digest cases live in test_tool_digest.py.
     result = BenchmarkResult(
         case_id="x",
         model="m",

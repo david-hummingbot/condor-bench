@@ -37,6 +37,7 @@ from condor_compat.acp.client import (
 )
 
 from bench.mcp_provider import build_mcp_configs, wiring_metadata
+from bench.tool_digest import DEFAULT_DIGEST_CHARS, digest_tool_output
 from config import condor_path
 
 # ── Agent instructions ─────────────────────────────────────────────────────────
@@ -186,7 +187,7 @@ class BenchmarkResult:
     def tool_names(self) -> list[str]:
         return [c["tool"] for c in self.tool_calls]
 
-    def transcript_for_judge(self, *, output_chars: int = 700) -> str:
+    def transcript_for_judge(self, *, output_chars: int = DEFAULT_DIGEST_CHARS) -> str:
         """Full transcript with the tool log, for the quality judge.
 
         Tool *outputs* are included, not just names. The judge is instructed to
@@ -196,9 +197,10 @@ class BenchmarkResult:
         answer whose content came from a tool. That penalty lands hardest on the
         Layer 2 tool cases, where the answer *is* the tool's data.
 
-        Outputs are truncated: a full candle series would crowd out the answer
-        itself in the judge's context, and the judge only needs enough to check
-        that the figures quoted actually appear.
+        Outputs are passed through :func:`digest_tool_output` rather than a raw
+        head-truncate. Live portfolios (and similar long payloads) bury totals and
+        valued holdings under dust rows; a digest keeps the citeable facts so the
+        judge can verify grounding without stuffing the full dump into context.
         """
         if not self.turns:
             return ""
@@ -232,11 +234,19 @@ class BenchmarkResult:
                         queue = outputs_by_name.get(name)
                         output = queue.pop(0) if queue else None
                     lines.append(f"  {name}({_compact(args, 300)})")
-                    lines.append(
-                        f"    → {_compact(output, output_chars)}"
-                        if output is not None
-                        else "    → (no output captured)"
-                    )
+                    if output is None:
+                        lines.append("    → (no output captured)")
+                    else:
+                        digest = digest_tool_output(
+                            name, output, max_chars=output_chars
+                        )
+                        # Indent multi-line digests so they stay under the tool entry.
+                        digest_lines = digest.splitlines() or [digest]
+                        indented = "\n".join(
+                            f"    → {ln}" if idx == 0 else f"      {ln}"
+                            for idx, ln in enumerate(digest_lines)
+                        )
+                        lines.append(indented)
             lines.append(f"Response:\n{turn.response}")
             parts.append("\n".join(lines))
 
