@@ -272,13 +272,28 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
 async def _probe_api(
     url: str, username: str, password: str, timeout: float
 ) -> tuple[bool, str, set[str] | None]:
-    """Return (reachable, detail, account names or None)."""
+    """Return (reachable, detail, account names or None).
+
+    The path carries a trailing slash deliberately: hummingbot-api mounts the
+    router as ``/accounts/`` and runs with slash-redirects off, so ``/accounts``
+    is a hard 404 rather than a 307 to the real route.
+    """
     auth = httpx.BasicAuth(username, password) if username else None
     try:
         async with httpx.AsyncClient(timeout=timeout, auth=auth) as client:
-            r = await client.get(f"{url}/accounts")
+            r = await client.get(f"{url}/accounts/")
             if r.status_code == 401:
                 return False, f"{url} rejected the bench credentials (401)", None
+            if r.status_code == 404:
+                # Reachable, but not the API we expect. Distinguished from a
+                # transport failure because "unreachable" sends you debugging the
+                # network when the process is up and answering.
+                return (
+                    False,
+                    f"{url} answered 404 for /accounts/ — something is listening "
+                    f"but it does not look like a hummingbot-api",
+                    None,
+                )
             r.raise_for_status()
             data = r.json()
             names = _account_names(data)
@@ -302,26 +317,93 @@ def _account_names(payload: Any) -> set[str]:
     return set()
 
 
+# Status hummingbot-api reports for an executor that is still working. The search
+# filter takes one value, so anything active under a different status is caught by
+# the count cross-check in _probe_active_executors rather than by this filter.
+_RUNNING_STATUS = "RUNNING"
+# Schema maximum for ExecutorFilterRequest.limit. A staging box with more than
+# this many *running* executors is not a scenario worth paginating for: the check
+# fails on the first non-empty page either way.
+_SEARCH_LIMIT = 1000
+_UNNAMED_ACTIVE = "<active, id unavailable>"
+
+
 async def _probe_active_executors(
     url: str, username: str, password: str, timeout: float
 ) -> list[str] | None:
+    """Ids of executors active on the target, or ``None`` when unknowable.
+
+    Reads two endpoints, because neither is fail-closed on its own.
+    ``/executors/summary`` counts active executors authoritatively but carries no
+    ids; ``POST /executors/search`` returns ids, but only for the one status it is
+    filtered on, so an executor active under some other status would read as a
+    clean target. Taking the count from the first and the ids from the second
+    makes that gap surface as an unnamed entry instead of passing the check.
+
+    Returning ``None`` (unknown) rather than ``[]`` matters: the caller reports
+    unknown as a non-blocking failure, where a wrongly-empty list would let a
+    mutating run start against a target holding someone else's positions.
+    """
     auth = httpx.BasicAuth(username, password) if username else None
     try:
         async with httpx.AsyncClient(timeout=timeout, auth=auth) as client:
-            r = await client.get(f"{url}/executors/active")
-            if r.status_code == 404:
-                # Endpoint absent on this API version — treat as unknown, not clean.
-                return None
-            r.raise_for_status()
-            payload = r.json()
+            total = await _active_executor_count(client, url)
+            ids = await _running_executor_ids(client, url)
+    except Exception:
+        return None
+
+    if total is None and ids is None:
+        # Neither endpoint answered — an older API version, or not one at all.
+        return None
+
+    found = list(ids or [])
+    if total is not None and total > len(found):
+        # Active, but not under the status we filtered on. Counted without an id
+        # so the check still fails rather than calling the target clean.
+        found += [_UNNAMED_ACTIVE] * (total - len(found))
+    return found
+
+
+async def _active_executor_count(client: httpx.AsyncClient, url: str) -> int | None:
+    """``total_active`` from the executors summary, or None if unavailable."""
+    try:
+        r = await client.get(f"{url}/executors/summary")
+        if r.status_code >= 400:
+            return None
+        payload = r.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("total_active")
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+async def _running_executor_ids(client: httpx.AsyncClient, url: str) -> list[str] | None:
+    """Executor ids in the running status, or None if the search is unavailable."""
+    try:
+        r = await client.post(
+            f"{url}/executors/search",
+            json={"status": _RUNNING_STATUS, "limit": _SEARCH_LIMIT},
+        )
+        if r.status_code >= 400:
+            return None
+        payload = r.json()
     except Exception:
         return None
 
     items = payload if isinstance(payload, list) else payload.get("data", [])
+    if not isinstance(items, list):
+        return None
     ids: list[str] = []
-    for item in items if isinstance(items, list) else []:
-        if isinstance(item, dict):
-            ids.append(str(item.get("id") or item.get("executor_id") or "?"))
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        # Only an explicit False rules an item out; the filter already asked for
+        # running, and a version that omits the field should not silently drop it.
+        if item.get("is_active") is False:
+            continue
+        ids.append(str(item.get("executor_id") or item.get("id") or "?"))
     return ids
 
 
