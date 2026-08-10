@@ -72,14 +72,14 @@ SETTINGS_FIELDS: list[dict[str, Any]] = [
         "label": "Staging API URL",
         "group": "Staging",
         "secret": False,
-        "hint": "Must match the URL MCP actually launches with.",
+        "hint": "Hummingbot API base URL. Saving auto-registers it in Condor as bench_staging.",
     },
     {
         "key": "BENCH_EXPECTED_API_URL",
         "label": "Expected API URL",
         "group": "Staging",
         "secret": False,
-        "hint": "Fail-closed check; defaults to HUMMINGBOT_API_URL if empty.",
+        "hint": "Fail-closed check; auto-filled from Staging API URL when empty.",
     },
     {
         "key": "HUMMINGBOT_USERNAME",
@@ -92,31 +92,6 @@ SETTINGS_FIELDS: list[dict[str, Any]] = [
         "label": "Staging password",
         "group": "Staging",
         "secret": True,
-    },
-    {
-        "key": "BENCH_SERVER_NAME",
-        "label": "Bench server name",
-        "group": "Staging",
-        "secret": False,
-        "hint": "Entry in condor config.yml (--server-name on both MCP servers).",
-    },
-    {
-        "key": "BENCH_CHAT_ID",
-        "label": "Bench chat id",
-        "group": "Staging",
-        "secret": False,
-    },
-    {
-        "key": "BENCH_USER_ID",
-        "label": "Bench user id",
-        "group": "Staging",
-        "secret": False,
-    },
-    {
-        "key": "BENCH_STAGING_ACCOUNT",
-        "label": "Staging account",
-        "group": "Staging",
-        "secret": False,
     },
     {
         "key": "BENCH_ALLOW_MUTATING",
@@ -135,9 +110,17 @@ SETTINGS_FIELDS: list[dict[str, Any]] = [
     },
 ]
 
-_KNOWN = {f["key"] for f in SETTINGS_FIELDS}
+# Keys owned by bench (or retired) — cleared from .env on save so old values
+# cannot stick. Server/chat/user are fixed constants; staging account was removed
+# in favor of "whatever accounts the configured Hummingbot API has".
+_INTERNAL_STAGING_KEYS = (
+    "BENCH_SERVER_NAME",
+    "BENCH_CHAT_ID",
+    "BENCH_USER_ID",
+    "BENCH_STAGING_ACCOUNT",
+)
+_KNOWN = {f["key"] for f in SETTINGS_FIELDS} | set(_INTERNAL_STAGING_KEYS)
 _LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-
 
 def _mask(value: str) -> str:
     if not value:
@@ -187,12 +170,20 @@ def get_settings() -> dict[str, Any]:
                 "has_value": configured,
             }
         )
+    from config import BENCH_CHAT_ID, BENCH_SERVER_NAME, BENCH_USER_ID
+
     return {
         "env_path": str(ENV_PATH),
         "fields": fields,
+        "bench_identity": {
+            "server_name": BENCH_SERVER_NAME,
+            "chat_id": BENCH_CHAT_ID,
+            "user_id": BENCH_USER_ID,
+        },
         "note": (
-            "Trusted-local only. Saving writes .env and updates the running "
-            "process environment. Do not expose this dashboard."
+            "Trusted-local only. Saving writes .env, updates the running process "
+            "environment, and auto-registers the staging Hummingbot API in Condor's "
+            "config.yml. Do not expose this dashboard."
         ),
     }
 
@@ -202,6 +193,9 @@ def update_settings(updates: dict[str, str | None]) -> dict[str, Any]:
 
     For secrets: if the client sends the masked display value (starts with ••••),
     treat as unchanged.
+
+    When staging URL/credentials are present after the save, upserts the fixed
+    ``bench_staging`` server entry + ACL in Condor's config.yml.
     """
     file_vals = _parse_env_file(ENV_PATH)
     # Seed from current process so we don't drop keys only set in the shell.
@@ -211,13 +205,23 @@ def update_settings(updates: dict[str, str | None]) -> dict[str, Any]:
             current[key] = os.environ[key]
 
     for key, value in updates.items():
-        if key not in _KNOWN:
+        if key not in _KNOWN or key in _INTERNAL_STAGING_KEYS:
             continue
         if value is None:
             continue
         if isinstance(value, str) and value.startswith("••••"):
             continue  # masked placeholder — leave alone
         current[key] = str(value)
+
+    # Drop operator-facing identity overrides — bench owns these.
+    for key in _INTERNAL_STAGING_KEYS:
+        current.pop(key, None)
+
+    # Keep the fail-closed expected URL aligned unless the operator set it apart.
+    api_url = (current.get("HUMMINGBOT_API_URL") or "").rstrip("/")
+    expected = (current.get("BENCH_EXPECTED_API_URL") or "").rstrip("/")
+    if api_url and not expected:
+        current["BENCH_EXPECTED_API_URL"] = api_url
 
     # Drop empty known keys from the written file (clear).
     to_write = {k: v for k, v in current.items() if v != "" or k not in _KNOWN}
@@ -232,7 +236,18 @@ def update_settings(updates: dict[str, str | None]) -> dict[str, Any]:
         else:
             os.environ.pop(key, None)
 
-    return get_settings()
+    staging_sync = None
+    if to_write.get("HUMMINGBOT_API_URL") and to_write.get("HUMMINGBOT_USERNAME") and to_write.get(
+        "HUMMINGBOT_PASSWORD"
+    ):
+        from bench.staging_setup import ensure_bench_server
+
+        staging_sync = ensure_bench_server().as_dict()
+
+    result = get_settings()
+    if staging_sync is not None:
+        result["staging_sync"] = staging_sync
+    return result
 
 
 def _write_env_file(

@@ -219,6 +219,15 @@ def condor_checkout_label() -> str:
 
 
 # ── Staging environment ────────────────────────────────────────────────────────
+# Fixed internal identity for live runs. Operators only configure the Hummingbot
+# API URL + credentials (Settings); server name / chat / user are owned by bench
+# so manage_servers ACL and MCP --server-name stay consistent without per-machine
+# hand-editing. See bench/staging_setup.ensure_bench_server().
+BENCH_SERVER_NAME = "bench_staging"
+BENCH_CHAT_ID = 999001
+BENCH_USER_ID = 999001
+
+
 def staging_config() -> dict[str, object]:
     """Staging identifiers for benchmark runs, read fresh from the environment."""
     return {
@@ -233,10 +242,9 @@ def staging_config() -> dict[str, object]:
         ).rstrip("/"),
         "username": os.environ.get("HUMMINGBOT_USERNAME", ""),
         "password": os.environ.get("HUMMINGBOT_PASSWORD", ""),
-        "server_name": os.environ.get("BENCH_SERVER_NAME", "bench_staging"),
-        "chat_id": int(os.environ.get("BENCH_CHAT_ID", "999001")),
-        "user_id": int(os.environ.get("BENCH_USER_ID", "999001")),
-        "account": os.environ.get("BENCH_STAGING_ACCOUNT", "bench_paper"),
+        "server_name": os.environ.get("BENCH_SERVER_NAME") or BENCH_SERVER_NAME,
+        "chat_id": int(os.environ.get("BENCH_CHAT_ID") or BENCH_CHAT_ID),
+        "user_id": int(os.environ.get("BENCH_USER_ID") or BENCH_USER_ID),
         "allow_mutating": _env_flag("BENCH_ALLOW_MUTATING", False),
     }
 

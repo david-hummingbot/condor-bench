@@ -37,3 +37,7 @@ build/
 
 # Node
 node_modules/
+
+# Runtime artefact: condor's ConfigManager appends here when bench registers its
+# staging server entry, so it grows on every staging-check / test run.
+audit_log.yml

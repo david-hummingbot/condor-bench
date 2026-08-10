@@ -48,11 +48,9 @@ Three things prevent that:
 
 | Component | Why |
 |---|---|
-| A staging `hummingbot-api` | Isolated from production. Paper or testnet accounts only. |
-| A pre-seeded account | Named in `BENCH_STAGING_ACCOUNT`; the tool cases reference it by name. A wrong name makes portfolio and executor cases return empty rather than error, which scores as a *model* failure. |
+| A staging `hummingbot-api` | Isolated from production. Point Settings at an instance that only has paper/dummy credentials when you want isolation — there is no separate "bench account" setting. |
 | A condor checkout | bench loads the production MCP wiring from it. |
-| A server entry in condor's `config.yml` | condor resolves the API URL and credentials by server name. Without the entry it starts *without* `mcp-hummingbot` — a log warning, not an error — and every hummingbot tool case fails for a reason unrelated to the model. |
-| Fixed `BENCH_CHAT_ID` / `BENCH_USER_ID` | Keeps condor MCP state (memory, notes, journals) out of any real chat's stores. |
+| Staging URL + credentials | Entered in dashboard Settings (or `.env`). Saving auto-registers a fixed `bench_staging` Condor server entry, bench user `999001`, and chat default — you do not set server name / chat id / user id by hand. |
 | Named bots for bot cases | `tool_manage_bots_002` asks for logs from a bot called `eth-maker`. Either create it or expect that case to fail. |
 
 ---
@@ -65,30 +63,30 @@ Three things prevent that:
 cp .env.example .env
 ```
 
-Then set, at minimum:
+Then set, at minimum (or use **Settings** in the dashboard):
 
 ```env
 CONDOR_PATH=/path/to/condor
 HUMMINGBOT_API_URL=http://staging:8000
 HUMMINGBOT_USERNAME=bench
 HUMMINGBOT_PASSWORD=...
-BENCH_SERVER_NAME=bench_staging
-BENCH_STAGING_ACCOUNT=bench_paper
 ```
 
 Leave `BENCH_ALLOW_MUTATING` unset for now.
 
-### 2. Register the server in condor
+### 2. Register the server in Condor (automatic)
+
+Saving Staging URL/credentials in Settings — or running `staging-check` —
+upserts `bench_staging` in condor's `config.yml`, grants the isolated bench
+user access, and sets the chat default. You can still force it from the CLI:
 
 ```bash
 uv run python scripts/register_bench_server.py --dry-run   # inspect
 uv run python scripts/register_bench_server.py             # write
 ```
 
-This adds (or updates) a `bench_staging` entry in condor's `config.yml` derived
-from the env vars above. Keeping URL resolution in condor's config — rather than
-passing a URL from bench — is what lets bench reuse the production helpers
-unchanged.
+Keeping URL resolution in Condor's config — rather than passing a URL only from
+bench — is what lets bench reuse the production MCP helpers unchanged.
 
 ### 3. Verify
 
@@ -102,12 +100,13 @@ failure, so it works as a CI or Makefile gate.
 ```
 staging pre-flight url=http://staging:8000
   ✓ condor_checkout: condor at /path/to/condor
+  ✓ bench_server_sync: Registered 'bench_staging' → staging:8000 …
   ✓ api_url_declared: http://staging:8000
   ✓ api_url_aliases_agree: HUMMINGBOT_API_URL matches BENCH_EXPECTED_API_URL
   ✓ server_registered: 'bench_staging' → staging:8000
   ✓ mcp_url_matches: MCP --url resolves to http://staging:8000 (matches HUMMINGBOT_API_URL)
   ✓ api_reachable: http://staging:8000 reachable (2 account(s))
-  ✓ bench_account (mutating only): 'bench_paper' present
+  ✓ accounts_listed (mutating only): 2 account(s) on API
   ✓ no_orphaned_executors (mutating only): no active executors
 ```
 
@@ -230,10 +229,10 @@ condor's config is the source of truth for URL resolution, deliberately.
 
 **`A benchmark run needs a condor checkout`** — set `CONDOR_PATH`.
 
-**Tool cases fail with empty payloads rather than errors** — usually
-`BENCH_STAGING_ACCOUNT` naming an account that doesn't exist. The pre-flight
-checks this, but only as a mutating-only check, so a read-only run won't block on
-it.
+**Tool cases fail with empty payloads rather than errors** — usually the
+configured Hummingbot API has no accounts (or the wrong instance). Point
+`HUMMINGBOT_API_URL` at an API that has the accounts you intend to exercise;
+mutating pre-flight checks that at least one account is listed.
 
 **`condor's _shared.py no longer exports build_mcp_servers_for_agent()`** — condor
 moved the helper. Update `bench/mcp_provider.py` to match. Do not vendor a copy;

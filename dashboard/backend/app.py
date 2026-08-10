@@ -492,7 +492,6 @@ async def get_config():
         "staging": {
             "api_url": staging["api_url"],
             "server_name": staging["server_name"],
-            "account": staging["account"],
             "allow_mutating": staging["allow_mutating"],
         },
     }

@@ -9,6 +9,8 @@ export default function Settings({ onSaved }) {
   const [fields, setFields] = useState([])
   const [envPath, setEnvPath] = useState('')
   const [note, setNote] = useState('')
+  const [benchIdentity, setBenchIdentity] = useState(null)
+  const [stagingSync, setStagingSync] = useState(null)
   const [draft, setDraft] = useState({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -20,6 +22,7 @@ export default function Settings({ onSaved }) {
         setFields(d.fields || [])
         setEnvPath(d.env_path || '')
         setNote(d.note || '')
+        setBenchIdentity(d.bench_identity || null)
         const init = {}
         for (const f of d.fields || []) {
           init[f.key] = f.value || ''
@@ -50,6 +53,7 @@ export default function Settings({ onSaved }) {
     setBusy(true)
     setError('')
     setSaved(false)
+    setStagingSync(null)
     try {
       const updates = {}
       for (const f of fields) {
@@ -66,6 +70,8 @@ export default function Settings({ onSaved }) {
       }
       const d = await updateSettings(updates)
       setFields(d.fields || [])
+      setBenchIdentity(d.bench_identity || null)
+      if (d.staging_sync) setStagingSync(d.staging_sync)
       const init = {}
       for (const f of d.fields || []) init[f.key] = f.value || ''
       setDraft(init)
@@ -89,6 +95,19 @@ export default function Settings({ onSaved }) {
       {error && <div className="banner error">{error}</div>}
       {saved && !error && (
         <div className="banner success">Saved. Process env updated for this server session.</div>
+      )}
+      {stagingSync && (
+        <div className={`banner ${stagingSync.ok ? 'success' : 'error'}`}>
+          {stagingSync.ok ? 'Staging synced: ' : 'Staging sync failed: '}
+          {stagingSync.detail}
+        </div>
+      )}
+      {benchIdentity && (
+        <div className="muted" style={{ marginBottom: 12, fontSize: 12 }}>
+          Bench identity (automatic): server <code>{benchIdentity.server_name}</code>
+          {' · '}user <code>{benchIdentity.user_id}</code>
+          {' · '}chat <code>{benchIdentity.chat_id}</code>
+        </div>
       )}
 
       <form onSubmit={handleSave}>

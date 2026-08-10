@@ -111,6 +111,18 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
     if repo is None:
         return report
 
+    # 1b. Auto-register the fixed bench_staging entry from HUMMINGBOT_* env so
+    #     Settings (URL + creds) is enough — no manual server name / ACL step.
+    if staging.get("api_url"):
+        from bench.staging_setup import ensure_bench_server
+
+        sync = ensure_bench_server()
+        report.checks.append(
+            Check("bench_server_sync", sync.ok, sync.detail, blocking=True)
+        )
+        if not sync.ok:
+            return report
+
     # 2. HUMMINGBOT_API_URL declared, and the two spellings agree
     declared = str(staging["api_url"])
     expected = str(staging["expected_api_url"])
@@ -148,7 +160,8 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
             if entry
             else f"'{server_name}' is not in {repo / 'config.yml'}. condor would start "
             "without mcp-hummingbot and every tool case would fail for the wrong "
-            "reason. Run: uv run python scripts/register_bench_server.py",
+            "reason. Save Staging URL/credentials in Settings, or run: "
+            "uv run python scripts/register_bench_server.py",
         )
     )
     if entry is None:
@@ -186,27 +199,26 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
     )
     report.checks.append(Check("api_reachable", reachable, detail))
 
-    # 6. Bench account exists — a wrong account name makes portfolio and
-    #    executor cases return empty rather than error, which scores as a model
-    #    failure. Advisory when the account list can't be read at all.
-    account = str(staging["account"])
+    # 6. Mutating runs need at least one account on the API. We do not pin a
+    #    specific account name — point HUMMINGBOT_API_URL at an instance that
+    #    only has dummy/paper credentials when you want isolation.
     if accounts is None:
         report.checks.append(
             Check(
-                "bench_account",
+                "accounts_listed",
                 False,
-                f"could not list accounts — cannot confirm '{account}' exists",
+                "could not list accounts on the API",
                 blocking=False,
             )
         )
     else:
         report.checks.append(
             Check(
-                "bench_account",
-                account in accounts,
-                f"'{account}' present"
-                if account in accounts
-                else f"'{account}' not found on staging (has: {', '.join(sorted(accounts)[:6]) or 'none'})",
+                "accounts_listed",
+                len(accounts) > 0,
+                f"{len(accounts)} account(s) on API"
+                if accounts
+                else "API reachable but has no accounts — mutating cases will fail",
                 blocking=True,
                 mutating_only=True,
             )

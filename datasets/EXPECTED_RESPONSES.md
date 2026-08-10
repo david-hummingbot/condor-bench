@@ -60,11 +60,11 @@ The dataset was refactored (2026-08-09) to a single "everyday usage" category: 1
 - Tools: `manage_bots`.
 
 #### c006 — Server online check
-**Question:** Is my Hummingbot API server online?
+**Question:** Is my active Hummingbot API server online right now?
 
 **Favorable outcome**
-- Call `manage_servers` (status check on the active server) and report online/offline plainly.
-- Tools: `manage_servers`.
+- Call `manage_servers` with `action="status"` (active server; do not hardcode a server name) and report online/offline plainly.
+- Tools: `manage_servers`. Params: `action=status`.
 
 #### c007 — Total P&L
 **Question:** What's my total P&L across my active positions?
@@ -202,7 +202,7 @@ does.
 | c003 | `get_market_data` | — | read_only | — |
 | c004 | `get_portfolio_overview` | — | read_only | — |
 | c005 | `manage_bots` | — | read_only | — |
-| c006 | `manage_servers` | — | read_only | — |
+| c006 | `manage_servers` | `action=status` | read_only | — |
 | c007 | `manage_executors` | — | read_only | — |
 | c008 | `search_history` | — | read_only | — |
 | c009 | `manage_executors` | — | read_only | — |

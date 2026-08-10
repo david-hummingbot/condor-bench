@@ -154,7 +154,8 @@ def build_mcp_configs(
             "condor resolves the API URL and credentials from that entry, so an "
             "unregistered name makes it start WITHOUT mcp-hummingbot (a warning, "
             "not an error) and every tool case fails for the wrong reason. "
-            "Register it with: uv run python scripts/register_bench_server.py"
+            "Register it via Settings (Staging API URL + credentials) or: "
+            "uv run python scripts/register_bench_server.py"
         )
 
     # One builder covers both scopes: server_name pins the hummingbot instance and
