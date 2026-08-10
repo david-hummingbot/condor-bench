@@ -19,11 +19,17 @@ test-suite:
 tool-surface:
 	uv run python scripts/snapshot_tool_surface.py
 
-# Fail if the MCP wiring or the vendored system prompt have drifted from condor.
-# Run this after every condor pull.
+# Fail if the MCP wiring, the vendored system prompt, or condor's agent roster
+# have drifted from condor. Run this after every condor pull.
+#
+# The roster check is here because it is condor drift, not a routing bug: three
+# agents (xrpl_market_maker, smart_money_flow, meteora_launch_lp) shipped
+# upstream unnoticed because nothing failed when bench had no domain for them.
 check-drift:
 	uv run python -m pytest tests/test_mcp_wiring_drift.py \
-	              tests/test_vendored_drift.py -q
+	              tests/test_vendored_drift.py \
+	              tests/test_matrix_routing.py::test_config_keys_name_agents_condor_actually_ships \
+	              tests/test_matrix_routing.py::test_every_shipped_agent_has_a_routing_domain -q
 
 # Regenerate the dashboard's case_id → question map after editing a dataset.
 case-prompts:

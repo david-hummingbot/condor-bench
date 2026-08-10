@@ -470,6 +470,44 @@ def test_config_keys_name_agents_condor_actually_ships():
     )
 
 
+def test_every_shipped_agent_has_a_routing_domain():
+    """The reverse direction: an agent condor ships that bench cannot route.
+
+    Checking only for stale keys let three agents (xrpl_market_maker,
+    smart_money_flow, meteora_launch_lp) ship upstream unnoticed. A shipped agent
+    with no domain is invisible to the Router — not reported as a gap, just
+    absent — so the dataset never gets cases for it and nobody notices the
+    recommendation is missing.
+
+    An ``AGENT.md`` is the discriminator: ``_defaults`` and ``_shared`` are
+    condor's fallback config and shared includes, not routable agents, and
+    legitimately have none.
+    """
+    from bench.routing import CONDOR_CONFIG_KEYS
+    from config import condor_path
+
+    repo = condor_path()
+    if repo is None or not (repo / "agents").is_dir():
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+
+    routed = {
+        key.split("/")[1]
+        for key in CONDOR_CONFIG_KEYS.values()
+        if key.startswith("agents/")
+    }
+    unrouted = sorted(
+        p.name
+        for p in (repo / "agents").iterdir()
+        if p.is_dir() and (p / "AGENT.md").is_file() and p.name not in routed
+    )
+
+    assert not unrouted, (
+        f"condor ships agents with no routing domain: {unrouted}. The Router can "
+        "never recommend a model for them. Add them to CONDOR_CONFIG_KEYS in "
+        "bench/routing.py and author dataset cases with the matching agent_slug."
+    )
+
+
 def test_domain_deleted_from_the_datasets_is_stale_not_unmet(tmp_path, registry):
     """A domain only older results carry can't be routed — and isn't a gap to close.
 

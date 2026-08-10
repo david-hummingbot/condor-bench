@@ -49,6 +49,9 @@ CONDOR_CONFIG_KEYS = {
     "directional_trader": "agents/directional_trader/agent_key",
     "solana_dex_lp_expert": "agents/solana_dex_lp_expert/agent_key",
     "delta_neutral_funding_agent": "agents/delta_neutral_funding_agent/agent_key",
+    "xrpl_market_maker": "agents/xrpl_market_maker/agent_key",
+    "smart_money_flow": "agents/smart_money_flow/agent_key",
+    "meteora_launch_lp": "agents/meteora_launch_lp/agent_key",
     "tick_execution": "agents/_defaults/agent_key",
 }
 
