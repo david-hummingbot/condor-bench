@@ -21,10 +21,6 @@ failed because staging was unreachable, or because it ran chat-scoped when it
 needed ``--agent-slug``, says nothing about the model. Excluded counts are
 reported per cell — a cell resting on two of eight cases is not the same evidence
 as one resting on all eight, and the heatmap needs to be able to say so.
-
-**Mock and live runs are kept apart.** Their composites come from different weight
-profiles, so mixing them into one cell would compare numbers that aren't on the
-same scale.
 """
 
 from __future__ import annotations
@@ -183,7 +179,6 @@ def _p95(values: list[float]) -> float | None:
 class Run:
     run_dir: str
     model: str
-    mode: str
     timestamp: str
     cases: list[dict]
 
@@ -216,7 +211,6 @@ def load_runs(results_dir: Path | None = None) -> list[Run]:
             Run(
                 run_dir=run_dir.name,
                 model=str(summary.get("model", "")),
-                mode=str(summary.get("mode", "mock")),
                 timestamp=str(summary.get("timestamp", "")),
                 cases=cases,
             )
@@ -226,16 +220,14 @@ def load_runs(results_dir: Path | None = None) -> list[Run]:
     return sorted(runs, key=lambda r: (r.timestamp, r.run_dir), reverse=True)
 
 
-def latest_run_per_model(runs: list[Run], *, mode: str | None = None) -> dict[str, Run]:
-    """Newest run per model, optionally restricted to one execution mode.
+def latest_run_per_model(runs: list[Run]) -> dict[str, Run]:
+    """Newest run per model.
 
-    Used for the per-model metadata row (which run/mode/timestamp to show). Cell
-    values resolve per (model, cell) instead — see :func:`build_matrix`.
+    Used for the per-model metadata row (which run/timestamp to show). Cell values
+    resolve per (model, cell) instead — see :func:`build_matrix`.
     """
     latest: dict[str, Run] = {}
     for run in runs:  # already newest-first
-        if mode and run.mode != mode:
-            continue
         if run.model and run.model not in latest:
             latest[run.model] = run
     return latest
@@ -244,16 +236,13 @@ def latest_run_per_model(runs: list[Run], *, mode: str | None = None) -> dict[st
 # ── Matrix ─────────────────────────────────────────────────────────────────────
 def build_matrix(
     *,
-    mode: str | None = None,
     results_dir: Path | None = None,
     models_path: Path | None = None,
 ) -> dict[str, Any]:
     """Build the model × (domain, tool) matrix from persisted runs."""
     registry = model_index(load_models(models_path))
-    all_runs = [
-        r for r in load_runs(results_dir) if r.model and (not mode or r.mode == mode)
-    ]
-    latest = latest_run_per_model(all_runs, mode=mode)
+    all_runs = [r for r in load_runs(results_dir) if r.model]
+    latest = latest_run_per_model(all_runs)
 
     domains: dict[str, dict[str, Cell]] = {}
     tools: dict[str, dict[str, Cell]] = {}
@@ -303,7 +292,6 @@ def build_matrix(
                 }
             ),
             "run_dir": run.run_dir,
-            "mode": run.mode,
             "timestamp": run.timestamp,
             "in_registry": entry is not None,
         }
@@ -314,8 +302,8 @@ def build_matrix(
     for run in all_runs:
         model = run.model
         if model not in models_out:
-            # Can only happen if a run's mode was filtered out of `latest`; skip
-            # rather than inventing a metadata row for it.
+            # latest_run_per_model() covers every model with a run, so this is
+            # unreachable — skip rather than inventing a metadata row for it.
             continue
         for case in run.cases:
             overall_cell = _cell_for(overall, "overall", "all", model, run)
@@ -333,7 +321,6 @@ def build_matrix(
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "mode": mode or "any",
         "pass_threshold": PASS_THRESHOLD,
         "models": models_out,
         "overall": {m: c.as_dict() for m, c in overall.get("all", {}).items()},

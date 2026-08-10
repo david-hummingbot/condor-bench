@@ -51,7 +51,6 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
           index: evt.member_index,
           total: evt.total_members,
           environment_id: evt.environment_id,
-          mode: evt.mode,
         })
         setCompleted(Math.max(0, (evt.member_index || 1) - 1))
         setTotal(evt.total_members || 0)
@@ -172,7 +171,6 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
           <div className="muted" style={{ marginBottom: 8 }}>
             Suite member {memberInfo.index}/{memberInfo.total}
             {memberInfo.environment_id ? ` · ${memberInfo.environment_id}` : ''}
-            {memberInfo.mode ? ` · ${memberInfo.mode}` : ''}
           </div>
         )}
         {currentModel && (

@@ -70,11 +70,9 @@ class ConsultCase:
     expected_tools: list[str] = field(default_factory=list)
     # Additional user messages after the first question (multi-turn)
     turns: list[str] = field(default_factory=list)
-    # Canned MCP responses available during this case (same schema as tick mock_tools)
-    mock_tools: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     type: str = "consult"
-    # Live-mode fields
+    # Ground truth for the real-API metrics
     expected_tool_params: dict[str, dict] = field(default_factory=dict)
     live_expected: dict[str, Any] = field(default_factory=dict)
     risk_level: str = "read_only"
@@ -98,7 +96,6 @@ class TickCase:
     summary: str
     recent_decisions: str
     tick_number: int
-    mock_tools: dict[str, Any]
     expected_tool_calls: list[str]
     expected_no_calls: list[str] = field(default_factory=list)
     category: str = ""
@@ -134,7 +131,6 @@ class ToolCase:
     expected_tool_params: dict[str, dict] = field(default_factory=dict)
     expected_no_calls: list[str] = field(default_factory=list)
     live_expected: dict[str, Any] = field(default_factory=dict)
-    mock_tools: dict[str, Any] = field(default_factory=dict)
     risk_level: str = "read_only"
     agent_slug: str | None = None
     tags: list[str] = field(default_factory=list)
@@ -168,7 +164,6 @@ class AgentCase:
     expected_no_calls: list[str] = field(default_factory=list)
     turns: list[str] = field(default_factory=list)
     live_expected: dict[str, Any] = field(default_factory=dict)
-    mock_tools: dict[str, Any] = field(default_factory=dict)
     risk_level: str = "read_only"
     tags: list[str] = field(default_factory=list)
     category: str = "agent"
@@ -216,7 +211,6 @@ def load_consult_cases(path: Path | None = None) -> list[ConsultCase]:
             category=data.get("category", ""),
             expected_tools=data.get("expected_tools", []),
             turns=data.get("turns", []),
-            mock_tools=data.get("mock_tools", {}),
             tags=data.get("tags", []),
             type=data.get("type", "consult"),
             expected_tool_params=data.get("expected_tool_params", {}),
@@ -245,7 +239,6 @@ def load_tick_cases(path: Path | None = None) -> list[TickCase]:
                 summary=data.get("summary", ""),
                 recent_decisions=data.get("recent_decisions", ""),
                 tick_number=data.get("tick_number", 1),
-                mock_tools=data.get("mock_tools", {}),
                 expected_tool_calls=data.get("expected_tool_calls", []),
                 expected_no_calls=data.get("expected_no_calls", []),
                 category=data.get("category", ""),
@@ -276,7 +269,6 @@ def load_tool_cases(path: Path | None = None) -> list[ToolCase]:
             expected_tool_params=data.get("expected_tool_params", {}),
             expected_no_calls=data.get("expected_no_calls", []),
             live_expected=data.get("live_expected", {}),
-            mock_tools=data.get("mock_tools", {}),
             risk_level=_normalize_risk(data.get("risk_level")),
             agent_slug=data.get("agent_slug"),
             tags=data.get("tags", []),
@@ -300,7 +292,6 @@ def load_agent_cases(path: Path | None = None) -> list[AgentCase]:
             expected_no_calls=data.get("expected_no_calls", []),
             turns=data.get("turns", []),
             live_expected=data.get("live_expected", {}),
-            mock_tools=data.get("mock_tools", {}),
             risk_level=_normalize_risk(data.get("risk_level")),
             tags=data.get("tags", []),
         )

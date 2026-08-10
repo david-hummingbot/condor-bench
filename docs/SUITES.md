@@ -9,7 +9,6 @@ Each Environment member runs in `scripts/suite_worker.py` with:
 | Env / arg | Meaning |
 |-----------|---------|
 | `CONDOR_PATH` | Absolute Condor checkout (required; no silent `../condor` fallback in the worker) |
-| `BENCH_MODE` | `live` \| `mock` |
 | `BENCH_SERVER_NAME` | Staging server name in that checkout's `config.yml` |
 | `--job path.json` | Suite id, environment id, run_group_id, model, case_ids, branch pins |
 

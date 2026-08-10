@@ -48,10 +48,6 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
 
     differences: list[str] = []
 
-    modes = {m.get("mode") for m in members}
-    if len(modes) > 1:
-        differences.append("mode")
-
     models = {tuple(m.get("models") or [m.get("model")]) for m in members}
     if len(models) > 1:
         differences.append("model")
@@ -75,18 +71,8 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
     if "skipped" in statuses or "failed" in statuses:
         differences.append("partial_group")
 
-    # Mock multi-env is prompt-only, not a Condor wiring A/B.
-    envs = {m.get("environment_id") for m in members}
-    if "mock" in modes and len(envs) > 1:
-        differences.append("prompt_only_mock")
-
     comparable = not differences
-    deltas = None
-    if comparable or differences == ["prompt_only_mock"]:
-        # Still compute deltas for prompt_only_mock but mark comparable false.
-        deltas = _build_deltas(members)
-        if differences == ["prompt_only_mock"]:
-            comparable = False
+    deltas = _build_deltas(members) if comparable else None
 
     return {
         "comparable": comparable,
@@ -97,7 +83,6 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
                 "environment_id": m.get("environment_id"),
                 "suite_id": m.get("suite_id"),
                 "model": m.get("model"),
-                "mode": m.get("mode"),
                 "pass_rate": m.get("pass_rate"),
                 "composite_avg": m.get("composite_avg"),
                 "latency_s_avg": m.get("latency_s_avg"),

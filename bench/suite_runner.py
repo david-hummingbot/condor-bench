@@ -96,7 +96,6 @@ async def run_suite(
                 "member_index": index + 1,
                 "total_members": len(members_plan),
                 "member_run_id": member_run_id,
-                "mode": env.get("mode"),
             }
         )
 
@@ -117,7 +116,6 @@ async def run_suite(
 
         env_vars = os.environ.copy()
         env_vars["CONDOR_PATH"] = str(env["condor_path"])
-        env_vars["BENCH_MODE"] = str(env.get("mode") or "mock")
         if env.get("server_name"):
             env_vars["BENCH_SERVER_NAME"] = str(env["server_name"])
         # Forward optional model credentials from the request config.

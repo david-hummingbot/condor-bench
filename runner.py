@@ -38,22 +38,20 @@ def _resolve_layers(
     return None
 
 
-def _max_risk_for_mode() -> tuple[str | None, str | None]:
+def _max_risk() -> tuple[str | None, str | None]:
     """Risk ceiling for this run, plus a note when cases are being dropped.
 
-    Live mode without ``BENCH_ALLOW_MUTATING`` is limited to read-only cases. That
-    is not a silent filter: it changes which domains have enough evidence to earn a
+    Without ``BENCH_ALLOW_MUTATING`` a run is limited to read-only cases. That is
+    not a silent filter: it changes which domains have enough evidence to earn a
     routing recommendation, so the caller is told.
     """
-    from config import bench_mode, staging_config
+    from config import staging_config
 
-    if bench_mode() != "live":
-        return None, None
     if staging_config()["allow_mutating"]:
         return None, None
     return (
         "read_only",
-        "live mode with BENCH_ALLOW_MUTATING unset — running read-only cases only",
+        "BENCH_ALLOW_MUTATING unset — running read-only cases only",
     )
 
 
@@ -79,17 +77,15 @@ def baseline(
 
 @app.command("staging-check")
 def staging_check() -> None:
-    """Run the live-mode pre-flight and print every check.
+    """Run the pre-flight and print every check.
 
     Exits non-zero when a blocking check fails, so CI and the Makefile can gate a
-    live run on it.
+    run on it.
     """
     from bench.staging_health import check_staging, format_report
 
     report = asyncio.run(check_staging())
     console.print(format_report(report))
-    if report.mode != "live":
-        return
     if not report.ok:
         console.print("\n[red]Blocking checks failed — live runs are refused.[/red]")
         raise typer.Exit(1)
@@ -111,32 +107,24 @@ def test(
     ),
     consult_only: bool = typer.Option(False, help="Only consult cases"),
     tick_only: bool = typer.Option(False, help="Only tick cases"),
-    mode: Optional[str] = typer.Option(None, help="Override BENCH_MODE (live | mock)"),
 ) -> None:
     """Run benchmarks against a model and score vs baseline latency."""
-    import os
     import uuid
-
-    if mode:
-        os.environ["BENCH_MODE"] = mode
 
     from bench.baseline import BaselineStore
     from bench.dataset import case_prompt_map, filter_cases, load_all_cases
-    from bench.mcp_provider import mode_banner
+    from bench.mcp_provider import target_banner
     from bench.reporter import save_run
-    from config import PASS_THRESHOLD, bench_mode, build_run_pin
+    from bench.staging_health import StagingUnhealthy, assert_ready
+    from config import PASS_THRESHOLD, build_run_pin
 
-    resolved_mode = bench_mode()
-    if resolved_mode == "live":
-        from bench.staging_health import StagingUnhealthy, assert_ready
+    try:
+        assert_ready(mutating=False)
+    except StagingUnhealthy as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
 
-        try:
-            assert_ready(mutating=False)
-        except StagingUnhealthy as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
-
-    max_risk, risk_note = _max_risk_for_mode()
+    max_risk, risk_note = _max_risk()
     cases = filter_cases(
         load_all_cases(),
         domain=domain,
@@ -162,17 +150,16 @@ def test(
 
     run_id = uuid.uuid4().hex[:8]
     console.print(f"\nBenchmarking [bold]{model}[/bold] on {len(cases)} cases (run {run_id})")
-    console.print(f"  mode: {mode_banner()}\n")
+    console.print(f"  target: {target_banner()}\n")
 
-    scorecards, responses = asyncio.run(_run_cases(cases, model, store, resolved_mode))
+    scorecards, responses = asyncio.run(_run_cases(cases, model, store))
 
     pin = build_run_pin(
         run_type="adhoc",
         case_ids=[c.id for c in cases],
         models=[model],
-        mode=resolved_mode,
         risk_ceiling=max_risk,
-        shared_loaded=resolved_mode == "live",
+        shared_loaded=True,
     )
     run_dir = save_run(
         model,
@@ -186,7 +173,7 @@ def test(
     _print_summary(scorecards, model, PASS_THRESHOLD)
 
 
-async def _run_cases(cases, model: str, store, mode: str):
+async def _run_cases(cases, model: str, store):
     """Run and score every case, returning (scorecards, responses)."""
     from bench.cleanup import teardown
     from bench.client import run_case
@@ -198,10 +185,10 @@ async def _run_cases(cases, model: str, store, mode: str):
     for case in cases:
         console.print(f"  [dim]{case.id}[/dim] ({case.type})", end=" ")
         try:
-            result = await run_case(case, model, mode=mode)
+            result = await run_case(case, model)
             baseline = store.load(case.id)
             baseline_latency = baseline.latency_s if baseline else result.latency_s
-            card = await score_case(case, result, baseline_latency, mode=mode)
+            card = await score_case(case, result, baseline_latency)
             scorecards.append(card)
             responses[case.id] = result.response
 
@@ -217,11 +204,11 @@ async def _run_cases(cases, model: str, store, mode: str):
             if card.harness_artifact:
                 console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
 
-            # Undo what a mutating live case created, whatever its score — an
-            # aborted half-created resource still needs removing.
-            if mode == "live" and is_mutating(case):
+            # Undo what a mutating case created, whatever its score — an aborted
+            # half-created resource still needs removing.
+            if is_mutating(case):
                 report = await teardown(
-                    result, model, agent_slug=getattr(case, "agent_slug", None), mode=mode
+                    result, model, agent_slug=getattr(case, "agent_slug", None)
                 )
                 if report.removed:
                     console.print(f"      [dim]cleaned up {len(report.removed)} resource(s)[/dim]")
@@ -247,34 +234,26 @@ def sweep(
     only: Optional[str] = typer.Option(
         None, help="Comma-separated model keys — sweep just these from the registry"
     ),
-    mode: Optional[str] = typer.Option(None, help="Override BENCH_MODE (live | mock)"),
     max_params_b: Optional[float] = typer.Option(
         None, help="Skip models larger than this (cloud models are never skipped)"
     ),
 ) -> None:
     """Benchmark every model in the registry, smallest first."""
-    import os
     import uuid
-
-    if mode:
-        os.environ["BENCH_MODE"] = mode
 
     from bench.baseline import BaselineStore
     from bench.dataset import case_prompt_map, filter_cases, load_all_cases
     from bench.matrix import load_models
-    from bench.mcp_provider import mode_banner
+    from bench.mcp_provider import target_banner
     from bench.reporter import save_run
-    from config import PASS_THRESHOLD, bench_mode, build_run_pin
+    from bench.staging_health import StagingUnhealthy, assert_ready
+    from config import PASS_THRESHOLD, build_run_pin
 
-    resolved_mode = bench_mode()
-    if resolved_mode == "live":
-        from bench.staging_health import StagingUnhealthy, assert_ready
-
-        try:
-            assert_ready(mutating=False)
-        except StagingUnhealthy as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
+    try:
+        assert_ready(mutating=False)
+    except StagingUnhealthy as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
 
     registry = load_models(models)
     if not registry:
@@ -293,7 +272,7 @@ def sweep(
             m for m in registry if m.params_b is None or m.params_b <= max_params_b
         ]
 
-    max_risk, risk_note = _max_risk_for_mode()
+    max_risk, risk_note = _max_risk()
     cases = filter_cases(
         load_all_cases(),
         domain=domain,
@@ -311,15 +290,13 @@ def sweep(
     console.print(
         f"\nSweeping [bold]{len(registry)}[/bold] model(s) × {len(cases)} case(s)"
     )
-    console.print(f"  mode: {mode_banner()}\n")
+    console.print(f"  target: {target_banner()}\n")
 
     completed: list[tuple[str, Path]] = []
     for entry in registry:
         size = f"{entry.params_b}B" if entry.params_b else entry.provider
         console.print(f"[bold]{entry.key}[/bold] ({size})")
-        scorecards, responses = asyncio.run(
-            _run_cases(cases, entry.key, store, resolved_mode)
-        )
+        scorecards, responses = asyncio.run(_run_cases(cases, entry.key, store))
         if not scorecards:
             console.print("  [yellow]no cases scored — skipping save[/yellow]")
             continue
@@ -327,9 +304,8 @@ def sweep(
             run_type="adhoc",
             case_ids=[c.id for c in cases],
             models=[entry.key],
-            mode=resolved_mode,
             risk_ceiling=max_risk,
-            shared_loaded=resolved_mode == "live",
+            shared_loaded=True,
         )
         pin["sweep"] = True
         run_dir = save_run(
@@ -351,9 +327,6 @@ def sweep(
 
 @app.command()
 def matrix(
-    mode: Optional[str] = typer.Option(
-        None, help="Only aggregate runs from this mode (live | mock)"
-    ),
     models: Path = typer.Option(Path("datasets/models.json"), help="Model registry"),
     axis: str = typer.Option("domains", help="Rows: domains | tools"),
     all_models: bool = typer.Option(
@@ -369,7 +342,7 @@ def matrix(
         console.print("[red]--axis must be 'domains' or 'tools'.[/red]")
         raise typer.Exit(2)
 
-    data = build_matrix(mode=mode, models_path=models)
+    data = build_matrix(models_path=models)
     if not data["models"]:
         console.print("[yellow]No runs found. Run 'sweep' or 'test' first.[/yellow]")
         raise typer.Exit(1)
@@ -391,7 +364,7 @@ def matrix(
         )
         ordered = _ordered_models(data)
 
-    table = Table(title=f"Pass rate by {axis[:-1]} ({data['mode']} runs)")
+    table = Table(title=f"Pass rate by {axis[:-1]}")
     table.add_column("Domain" if axis == "domains" else "Tool", no_wrap=True)
     for key in ordered:
         info = data["models"][key]
@@ -464,7 +437,6 @@ def route(
         help="Break ties between equally-small models by average token use "
         "(never rejects a passing model)",
     ),
-    mode: Optional[str] = typer.Option(None, help="Only use runs from this mode"),
     models: Path = typer.Option(Path("datasets/models.json"), help="Model registry"),
 ) -> None:
     """Generate routing recommendations: the smallest model that passes each domain."""
@@ -472,7 +444,6 @@ def route(
     from bench.routing import generate, save_routing
 
     matrix_data, routing = generate(
-        mode=mode,
         min_pass_rate=min_pass_rate,
         min_cases=min_cases,
         prefer_lower_tokens=prefer_lower_tokens,
@@ -559,7 +530,6 @@ def report() -> None:
     table = Table(title="Benchmark runs")
     table.add_column("Run dir")
     table.add_column("Model")
-    table.add_column("Mode")
     table.add_column("Composite", justify="right")
     table.add_column("Quality", justify="right")
     table.add_column("Tools", justify="right")
@@ -573,7 +543,6 @@ def report() -> None:
         table.add_row(
             r.get("run_dir", ""),
             r.get("model", ""),
-            r.get("mode", "mock"),
             f"{r.get('composite_avg', 0):.2f}",
             f"{r.get('answer_quality_avg', 0):.2f}",
             f"{r.get('tool_accuracy_avg', 0):.2f}" if r.get("tool_accuracy_avg") is not None else "—",

@@ -3,15 +3,8 @@ import { getRouting } from '../api.js'
 import { fmtCost, fmtPct, fmtSize, fmtTokens } from '../utils.js'
 import PageHeader from './PageHeader.jsx'
 
-const MODE_OPTS = [
-  { id: '', label: 'Any mode' },
-  { id: 'live', label: 'Live' },
-  { id: 'mock', label: 'Mock' },
-]
-
 export default function ModelRouter() {
   const [routing, setRouting] = useState(null)
-  const [mode, setMode] = useState('')
   const [minPassRate, setMinPassRate] = useState(0.8)
   const [minCases, setMinCases] = useState(3)
   const [preferLowerTokens, setPreferLowerTokens] = useState(false)
@@ -24,7 +17,7 @@ export default function ModelRouter() {
     setError('')
     try {
       setRouting(await getRouting({
-        mode: mode || undefined, minPassRate, minCases, preferLowerTokens,
+        minPassRate, minCases, preferLowerTokens,
       }))
     } catch (e) {
       setError(e.message)
@@ -32,7 +25,7 @@ export default function ModelRouter() {
     } finally {
       setLoading(false)
     }
-  }, [mode, minPassRate, minCases, preferLowerTokens])
+  }, [minPassRate, minCases, preferLowerTokens])
 
   useEffect(() => { load() }, [load])
 
@@ -59,15 +52,6 @@ export default function ModelRouter() {
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="matrix-controls">
-          <div className="field">
-            <label>Mode</label>
-            <div className="radio-group">
-              {MODE_OPTS.map(o => (
-                <button key={o.id} className={`radio-btn ${mode === o.id ? 'active' : ''}`}
-                  onClick={() => setMode(o.id)}>{o.label}</button>
-              ))}
-            </div>
-          </div>
           <div className="field" style={{ maxWidth: 150 }}>
             <label>Min pass rate</label>
             <input type="number" className="input" min="0" max="1" step="0.05"

@@ -1,12 +1,10 @@
-"""Live MCP spawn args must stay identical to what condor launches in production.
+"""MCP spawn args must stay identical to what condor launches in production.
 
-Same philosophy as ``test_tool_surface_drift.py``, one layer down: that file keeps
-the *mocks* honest about which tools exist, this one keeps *live mode* honest
-about how the real servers are started.
+Keeps the MCP wiring honest about how the real servers are started.
 
 Three things are checked, and all three matter:
 
-1. **bench == condor.** ``bench/mcp_provider.build_mcp_configs("live", …)`` must
+1. **bench == condor.** ``bench/mcp_provider.build_mcp_configs(…)`` must
    produce the same ``name``/``command``/``args`` as condor's own
    ``build_mcp_servers_for_session()``. bench loads that function rather than
    copying it, so this mostly guards the *call site* — a new required parameter on
@@ -210,14 +208,11 @@ def wiring(condor_repo: Path, tmp_path_factory):
 
 
 def _bench_configs(mcp_provider, monkeypatch, agent_slug: str | None) -> list[dict]:
-    monkeypatch.setenv("BENCH_MODE", "live")
     monkeypatch.setenv("BENCH_SERVER_NAME", SERVER)
     monkeypatch.setenv("BENCH_CHAT_ID", str(CHAT_ID))
     monkeypatch.setenv("BENCH_USER_ID", str(USER_ID))
     monkeypatch.setenv("HUMMINGBOT_API_URL", f"http://{HOST}:{PORT}")
-    return mcp_provider.build_mcp_configs(
-        "live", agent_slug=agent_slug, server_name=SERVER
-    )
+    return mcp_provider.build_mcp_configs(agent_slug=agent_slug, server_name=SERVER)
 
 
 def _by_name(configs: list[dict]) -> dict[str, dict]:
@@ -441,10 +436,9 @@ def test_unregistered_server_fails_closed(wiring, monkeypatch):
     that would score every hummingbot tool case as a model failure.
     """
     _, mcp_provider = wiring
-    monkeypatch.setenv("BENCH_MODE", "live")
     monkeypatch.setenv("HUMMINGBOT_API_URL", f"http://{HOST}:{PORT}")
 
     with pytest.raises(mcp_provider.LiveWiringError, match="not registered"):
         mcp_provider.build_mcp_configs(
-            "live", agent_slug=None, server_name="no_such_bench_server"
+            agent_slug=None, server_name="no_such_bench_server"
         )

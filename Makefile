@@ -11,7 +11,7 @@ install:
 test-suite:
 	uv run python -m pytest -q
 
-# ── Keeping the mocks honest ───────────────────────────────────────────────────
+# ── Keeping bench honest against condor ────────────────────────────────────────
 
 # Re-capture the production MCP tool surface from the real condor servers.
 # Run after pulling condor; commit the resulting datasets/tool_surface.json.
@@ -19,20 +19,20 @@ test-suite:
 tool-surface:
 	uv run python scripts/snapshot_tool_surface.py
 
-# Fail if the mocks, the live MCP wiring, or the vendored system prompt have
-# drifted from condor. Run this after every condor pull.
+# Fail if the MCP wiring or the vendored system prompt have drifted from condor.
+# Run this after every condor pull.
 check-drift:
-	uv run python -m pytest tests/test_tool_surface_drift.py tests/test_mcp_wiring_drift.py \
+	uv run python -m pytest tests/test_mcp_wiring_drift.py \
 	              tests/test_vendored_drift.py -q
 
 # Regenerate the dashboard's case_id → question map after editing a dataset.
 case-prompts:
 	uv run python scripts/sync_case_prompts.py
 
-# ── Live mode ──────────────────────────────────────────────────────────────────
+# ── Staging ────────────────────────────────────────────────────────────────────
 
 # Fail-closed pre-flight. Exits non-zero on a blocking failure, so it works as a
-# gate before any live run. See docs/STAGING.md.
+# gate before any run. See docs/STAGING.md.
 staging-check:
 	uv run python runner.py staging-check
 
@@ -59,9 +59,8 @@ sweep:
 		$(if $(MAX_PARAMS_B),--max-params-b $(MAX_PARAMS_B),)
 
 # Step 4: aggregate saved runs into a model × domain/tool matrix
-# Usage: make matrix [MODE=live]
 matrix:
-	uv run python runner.py matrix $(if $(MODE),--mode $(MODE),)
+	uv run python runner.py matrix
 
 # Step 5: recommend the smallest passing model per domain
 # Usage: make route [MIN_PASS_RATE=0.85] [PREFER_LOWER_TOKENS=1]

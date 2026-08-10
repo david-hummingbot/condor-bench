@@ -30,7 +30,6 @@ def test_matrix_skips_suite_runs(tmp_path: Path, registry: Path):
         json.dumps(
             {
                 "model": "ollama:small:3b",
-                "mode": "live",
                 "timestamp": "2026-08-09T00:00:00Z",
                 "run_type": "adhoc",
             }
@@ -53,7 +52,6 @@ def test_matrix_skips_suite_runs(tmp_path: Path, registry: Path):
         json.dumps(
             {
                 "model": "ollama:small:3b",
-                "mode": "live",
                 "timestamp": "2026-08-09T01:00:00Z",
                 "run_type": "suite",
                 "suite_id": "canary",
@@ -75,7 +73,7 @@ def test_matrix_skips_suite_runs(tmp_path: Path, registry: Path):
     assert len(runs) == 1
     assert runs[0].run_dir == "aaa_model"
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     cell = matrix["domains"]["general_consult"]["ollama:small:3b"]
     assert cell["pass_rate"] == 1.0
 
@@ -106,7 +104,6 @@ def test_suite_store_crud_and_namespaced_import(tmp_path: Path, monkeypatch: pyt
             "id": "condor-main",
             "name": "main",
             "condor_path": "/tmp/fake-condor",
-            "mode": "mock",
             "require_clean": False,
         }
     )
@@ -148,43 +145,11 @@ def test_suite_store_crud_and_namespaced_import(tmp_path: Path, monkeypatch: pyt
     assert any(c["question"] == "hello world" for c in cases)
 
 
-def test_compare_refuses_mode_mismatch():
+def test_compare_multi_env_is_comparable_and_yields_deltas():
+    """Two members differing only by Condor checkout is the A/B compare exists for."""
     members = [
         {
             "run_dir": "a",
-            "mode": "live",
-            "models": ["m"],
-            "model": "m",
-            "case_ids": ["x"],
-            "pass_rate": 0.8,
-            "composite_avg": 0.8,
-            "latency_s_avg": 1.0,
-            "cases_scored": 2,
-            "environment_id": "e1",
-        },
-        {
-            "run_dir": "b",
-            "mode": "mock",
-            "models": ["m"],
-            "model": "m",
-            "case_ids": ["x"],
-            "pass_rate": 0.9,
-            "composite_avg": 0.9,
-            "latency_s_avg": 0.8,
-            "cases_scored": 2,
-            "environment_id": "e2",
-        },
-    ]
-    result = compare_summaries(members)
-    assert result["comparable"] is False
-    assert "mode" in result["differences"]
-
-
-def test_compare_prompt_only_mock():
-    members = [
-        {
-            "run_dir": "a",
-            "mode": "mock",
             "models": ["m"],
             "model": "m",
             "case_ids": ["x"],
@@ -197,7 +162,6 @@ def test_compare_prompt_only_mock():
         },
         {
             "run_dir": "b",
-            "mode": "mock",
             "models": ["m"],
             "model": "m",
             "case_ids": ["x"],
@@ -210,8 +174,8 @@ def test_compare_prompt_only_mock():
         },
     ]
     result = compare_summaries(members)
-    assert result["comparable"] is False
-    assert "prompt_only_mock" in result["differences"]
+    assert result["comparable"] is True
+    assert result["differences"] == []
     assert result["deltas"] is not None
     assert result["deltas"]["pairs"][0]["latency_n"]["baseline"] == 1
 

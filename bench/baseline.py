@@ -85,8 +85,8 @@ async def generate_baselines(
     for case in track(to_run, description="Baseline"):
         try:
             # Baselines are latency references, so they must be produced by the
-            # same code path a test run uses — a mock-mode baseline compared
-            # against a live run would make every live case look slow.
+            # same code path a test run uses — otherwise the reference is measured
+            # against different wiring than the runs it scores.
             result = await run_case(case, model)
         except Exception as exc:
             console.print(f"[red]Error on {case.id}: {exc}[/red]")

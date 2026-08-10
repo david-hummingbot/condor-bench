@@ -296,7 +296,6 @@ function WiringDetail({ wiring }) {
     <div style={{ marginTop: 12 }}>
       <div className="case-detail-label">MCP wiring</div>
       <div className="score-chips" style={{ marginTop: 6 }}>
-        <Chip label="Mode" value={wiring.mode || '—'} />
         <Chip label="agent_slug" value={wiring.agent_slug ?? 'chat-scoped'} />
         {wiring.api_url && <Chip label="API" value={wiring.api_url} />}
         {wiring.server_name && <Chip label="Server" value={wiring.server_name} />}

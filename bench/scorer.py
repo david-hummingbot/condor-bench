@@ -1,10 +1,6 @@
 """Score a benchmark result.
 
-Mock composite (unchanged from before live mode):
-
-    0.50 × answer quality + 0.30 × tool accuracy + 0.20 × latency
-
-Live composite adds two metrics that only mean something against a real API:
+The composite:
 
     0.45 × quality + 0.20 × tool names + 0.15 × tool params
                    + 0.10 × live validity + 0.10 × latency
@@ -23,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from config import bench_mode, score_weights
+from config import SCORE_WEIGHTS
 from bench.client import BenchmarkResult
 from metrics.answer_quality import AnswerQualityMetric, is_infra_failure
 from metrics.judge import JUDGE_USAGE
@@ -66,11 +62,10 @@ class ScoreCard:
     # be rebuilt from results alone, without re-reading (a possibly since-edited)
     # dataset.
     expected_tools: list[str] = field(default_factory=list)
-    # Live-mode components; None when the case pins nothing to score them against.
+    # None when the case pins nothing to score them against.
     tool_params: float | None = None
     live_validity: float | None = None
     # Context for the matrix and the router
-    mode: str = "mock"
     domain: str = ""
     risk_level: str = "read_only"
     usage: dict[str, Any] = field(default_factory=dict)
@@ -96,7 +91,6 @@ class ScoreCard:
             "model": self.model,
             "category": self.category,
             "domain": self.domain,
-            "mode": self.mode,
             "risk_level": self.risk_level,
             "answer_quality": round(self.answer_quality, 4),
             "answer_reason": self.answer_reason,
@@ -120,13 +114,15 @@ class ScoreCard:
         }
 
 
-def _composite(components: dict[str, float | None], weights: dict[str, float]) -> float:
+def _composite(
+    components: dict[str, float | None], weights: dict[str, float] = SCORE_WEIGHTS
+) -> float:
     """Weighted mean over the scorable components, quality absorbing the rest.
 
     A component is unscorable when it is ``None`` (no ground truth) or carries
-    zero weight in this mode. Its weight moves to answer quality, so the sum of
-    applied weights is always 1.0 and composites stay comparable across cases
-    with different amounts of ground truth.
+    zero weight. Its weight moves to answer quality, so the sum of applied
+    weights is always 1.0 and composites stay comparable across cases with
+    different amounts of ground truth.
     """
     quality = components.get("answer_quality") or 0.0
     total = 0.0
@@ -151,7 +147,6 @@ async def score(
     expected_no_calls: list[str] | None = None,
     expected_tool_params: dict[str, dict] | None = None,
     live_expected: dict[str, Any] | None = None,
-    mode: str | None = None,
     domain: str = "",
     risk_level: str = "read_only",
 ) -> ScoreCard:
@@ -159,18 +154,15 @@ async def score(
 
     expected_no_calls: tools that must NOT appear; any hit → tool_accuracy 0.
     """
-    mode = mode or result.wiring.get("mode") or bench_mode()
-    weights = score_weights(mode)
     tool_names = result.tool_names()
     judge_before = JUDGE_USAGE.snapshot()
 
-    harness_artifact = _detect_harness_artifact(result, mode)
+    harness_artifact = _detect_harness_artifact(result)
 
     def _card(**overrides: Any) -> ScoreCard:
         base: dict[str, Any] = {
             "case_id": result.case_id,
             "model": result.model,
-            "mode": mode,
             "domain": domain,
             "risk_level": risk_level,
             "usage": dict(result.usage),
@@ -223,17 +215,10 @@ async def score(
     tool_params = _param_metric.score(result.tool_calls, params)
     param_detail = param_breakdown(result.tool_calls, params) if params else {}
 
-    # Live validity needs real responses. In mock mode the payloads are canned and
-    # valid by construction, so scoring them would only add noise — the weight
-    # profile gives it 0 there, and computing it anyway would still show in the
-    # detail pane as if it meant something.
-    live_validity: float | None = None
-    validity_detail: dict[str, Any] = {}
-    if weights.get("live_validity", 0) > 0:
-        live_validity = _validity_metric.score(
-            result.tool_responses, live_expected, expected_tools=required
-        )
-        validity_detail = validity_breakdown(result.tool_responses, live_expected)
+    live_validity = _validity_metric.score(
+        result.tool_responses, live_expected, expected_tools=required
+    )
+    validity_detail = validity_breakdown(result.tool_responses, live_expected)
 
     latency_score = _latency_metric.score(
         test_latency=result.latency_s,
@@ -247,8 +232,7 @@ async def score(
             "tool_params": tool_params,
             "live_validity": live_validity,
             "latency_score": latency_score,
-        },
-        weights,
+        }
     )
 
     return _card(
@@ -266,7 +250,7 @@ async def score(
     )
 
 
-def _detect_harness_artifact(result: BenchmarkResult, mode: str) -> str | None:
+def _detect_harness_artifact(result: BenchmarkResult) -> str | None:
     """Name the harness misconfiguration behind a bad row, if that's what it is.
 
     The failure this guards against: an agent-scoped case that ran chat-scoped
@@ -277,7 +261,7 @@ def _detect_harness_artifact(result: BenchmarkResult, mode: str) -> str | None:
     wiring = result.wiring or {}
 
     # A Layer 3 case measured against the generic Condor prompt instead of its
-    # own assistant's is not a test of that assistant. Applies in both modes.
+    # own assistant's is not a test of that assistant.
     prompt_source = wiring.get("assistant_prompt")
     if isinstance(prompt_source, str) and prompt_source.startswith("fallback:"):
         return (
@@ -285,10 +269,8 @@ def _detect_harness_artifact(result: BenchmarkResult, mode: str) -> str | None:
             "the generic Condor prompt, not this agent's instructions"
         )
 
-    if mode != "live":
-        return None
     if not wiring.get("api_url"):
-        return "live run resolved no API URL — MCP wiring did not report a target"
+        return "run resolved no API URL — MCP wiring did not report a target"
     if wiring.get("autodiscovery_extras"):
         extras = ", ".join(str(e) for e in wiring["autodiscovery_extras"])
         return (
@@ -302,8 +284,6 @@ async def score_case(
     case: Any,
     result: BenchmarkResult,
     baseline_latency_s: float,
-    *,
-    mode: str | None = None,
 ) -> ScoreCard:
     """Score a result using the case's own ground-truth fields.
 
@@ -321,7 +301,6 @@ async def score_case(
         expected_no_calls=list(getattr(case, "expected_no_calls", []) or []) or None,
         expected_tool_params=getattr(case, "expected_tool_params", {}) or None,
         live_expected=getattr(case, "live_expected", {}) or None,
-        mode=mode,
         domain=getattr(case, "domain", ""),
         risk_level=getattr(case, "risk_level", "read_only"),
     )

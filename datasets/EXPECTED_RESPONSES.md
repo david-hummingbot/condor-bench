@@ -9,17 +9,11 @@ self-describing.
 - **Quality** — Claude judge rates the transcript (accuracy, completeness, safety, actionability). It is shown the tool log *including outputs*, so a figure lifted from a tool call is credited as grounded and one the model invented is penalised as fabrication. There is no fixed gold text.
 - **Tool accuracy** — F1 on tool *names* vs non-empty `expected_tools` / `expected_tool_calls`. Empty `[]` means no required tools (metric skipped; weight goes to quality). `expected_no_calls` hard-fails (0.0) if a forbidden tool was used.
 - **Tool params** (live mode) — key-value subset match vs `expected_tool_params`. Tolerant about representation, strict about meaning.
-- **Live validity** (live mode) — did the calls actually return usable data. Errored or empty responses score 0.
-- **Composite** — mode-dependent; see the weight table in the README. Pass threshold: ≥ 0.70 in both modes.
+- **Live validity** — did the calls actually return usable data. Errored or empty responses score 0.
+- **Composite** — see the weight table in the README. Pass threshold: ≥ 0.70.
 - Provider infra errors (token/request limits) are marked `error: infra:…` and excluded from averages. Rows tagged `harness_artifact` are excluded from the routing matrix.
 
 This file describes the *favorable decision and content*, not a verbatim script the model must match.
-
-**A mock-mode caveat worth knowing before reading a low quality score.** The mocks
-return a fixed payload per tool regardless of arguments, so a request for
-`ETH-USDT` comes back with BTC-shaped prices. A model that faithfully reports what
-it was handed then looks wrong to the judge. Compare models against each other in
-mock mode rather than against 1.0; live mode has no such artifact.
 
 ---
 
@@ -181,7 +175,7 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 **Favorable outcome**
 - Methodical recovery: create (or retry) → on error fetch schema via `manage_executors` → fix required fields → retry once → journal error/fix as learning.
 - Tools: `manage_executors` (multiple actions OK) → `trading_agent_journal_write`.
-- End with a successful create when possible (mock retry: `sol-grid-002`).
+- End with a successful create when possible (retry: `sol-grid-002`).
 
 ### t006 — ETH dry run
 **Scenario:** `execution_mode: dry_run`; observe only.

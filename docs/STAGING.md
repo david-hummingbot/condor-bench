@@ -1,14 +1,14 @@
-# Live mode: staging setup
+# Staging setup
 
-Live mode benchmarks models against a real `hummingbot-api` through condor's own
-MCP servers. It exists because mock mode cannot answer the question the model
-sizing study is actually about: **can this model size call the right tool with the
-right arguments and do something useful with what comes back?** Mock payloads are
-correct by construction, so a model that fumbles every real response still scores
-well against them.
+Every benchmark run goes against a real `hummingbot-api` through condor's own MCP
+servers. There is no offline mode, because canned payloads cannot answer the
+question the model sizing study is actually about: **can this model size call the
+right tool with the right arguments and do something useful with what comes
+back?** Mock payloads are correct by construction, so a model that fumbles every
+real response would still score well against them.
 
-It also introduces a way to lose money, so most of this document is about the
-guard rails.
+Running against a real API also introduces a way to lose money, so most of this
+document is about the guard rails.
 
 ---
 
@@ -50,7 +50,7 @@ Three things prevent that:
 |---|---|
 | A staging `hummingbot-api` | Isolated from production. Paper or testnet accounts only. |
 | A pre-seeded account | Named in `BENCH_STAGING_ACCOUNT`; the tool cases reference it by name. A wrong name makes portfolio and executor cases return empty rather than error, which scores as a *model* failure. |
-| A condor checkout | Live mode loads the production MCP wiring from it. |
+| A condor checkout | bench loads the production MCP wiring from it. |
 | A server entry in condor's `config.yml` | condor resolves the API URL and credentials by server name. Without the entry it starts *without* `mcp-hummingbot` — a log warning, not an error — and every hummingbot tool case fails for a reason unrelated to the model. |
 | Fixed `BENCH_CHAT_ID` / `BENCH_USER_ID` | Keeps condor MCP state (memory, notes, journals) out of any real chat's stores. |
 | Named bots for bot cases | `tool_manage_bots_002` asks for logs from a bot called `eth-maker`. Either create it or expect that case to fail. |
@@ -68,7 +68,6 @@ cp .env.example .env
 Then set, at minimum:
 
 ```env
-BENCH_MODE=live
 CONDOR_PATH=/path/to/condor
 HUMMINGBOT_API_URL=http://staging:8000
 HUMMINGBOT_USERNAME=bench
@@ -88,7 +87,7 @@ uv run python scripts/register_bench_server.py             # write
 
 This adds (or updates) a `bench_staging` entry in condor's `config.yml` derived
 from the env vars above. Keeping URL resolution in condor's config — rather than
-passing a URL from bench — is what lets live mode reuse the production helpers
+passing a URL from bench — is what lets bench reuse the production helpers
 unchanged.
 
 ### 3. Verify
@@ -101,7 +100,7 @@ Every check is printed, passing or not. It exits non-zero on any blocking
 failure, so it works as a CI or Makefile gate.
 
 ```
-staging pre-flight — mode=live url=http://staging:8000
+staging pre-flight url=http://staging:8000
   ✓ condor_checkout: condor at /path/to/condor
   ✓ api_url_declared: http://staging:8000
   ✓ api_url_aliases_agree: HUMMINGBOT_API_URL matches BENCH_EXPECTED_API_URL
@@ -206,7 +205,7 @@ condor's `.mcp.json` also declares a `playwright` server. On the PydanticAI path
 this never matters — bench passes explicit configs and never reads `.mcp.json`.
 
 On the **ACP** path (`claude-code`, `gemini`) the agent auto-discovers stdio
-servers from its working directory, which in live mode has to be the condor repo.
+servers from its working directory, which has to be the condor repo.
 The by-name overrides replace `mcp-hummingbot` and `condor`, but nothing can
 *remove* playwright from that side.
 
@@ -229,7 +228,7 @@ because the fallback is condor starting without `mcp-hummingbot`.
 entry in condor's `config.yml` points somewhere else. Fix the host/port there;
 condor's config is the source of truth for URL resolution, deliberately.
 
-**`Live mode needs a condor checkout`** — set `CONDOR_PATH`.
+**`A benchmark run needs a condor checkout`** — set `CONDOR_PATH`.
 
 **Tool cases fail with empty payloads rather than errors** — usually
 `BENCH_STAGING_ACCOUNT` naming an account that doesn't exist. The pre-flight
@@ -238,4 +237,4 @@ it.
 
 **`condor's _shared.py no longer exports build_mcp_servers_for_agent()`** — condor
 moved the helper. Update `bench/mcp_provider.py` to match. Do not vendor a copy;
-the whole point is that live mode launches what production launches.
+the whole point is that bench launches what production launches.

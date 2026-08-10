@@ -13,12 +13,6 @@ const COLOR_BY = [
   { id: 'avg_cost_usd', label: 'Avg cost', fmt: fmtCost, higherIsBetter: false },
 ]
 
-const MODE_OPTS = [
-  { id: '', label: 'Any mode' },
-  { id: 'live', label: 'Live' },
-  { id: 'mock', label: 'Mock' },
-]
-
 const AXIS_OPTS = [
   { id: 'domains', label: 'Routing domains' },
   { id: 'tools', label: 'Per tool' },
@@ -26,7 +20,6 @@ const AXIS_OPTS = [
 
 export default function Matrix() {
   const [matrix, setMatrix] = useState(null)
-  const [mode, setMode] = useState('')
   const [axis, setAxis] = useState('domains')
   const [colorBy, setColorBy] = useState('pass_rate')
   const [loading, setLoading] = useState(true)
@@ -37,14 +30,14 @@ export default function Matrix() {
     setLoading(true)
     setError('')
     try {
-      setMatrix(await getMatrix({ mode: mode || undefined }))
+      setMatrix(await getMatrix())
     } catch (e) {
       setError(e.message)
       setMatrix(null)
     } finally {
       setLoading(false)
     }
-  }, [mode])
+  }, [])
 
   useEffect(() => { load() }, [load])
 
@@ -69,7 +62,6 @@ export default function Matrix() {
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="matrix-controls">
-          <Control label="Mode" opts={MODE_OPTS} value={mode} onChange={setMode} />
           <Control label="Rows" opts={AXIS_OPTS} value={axis} onChange={setAxis} />
           <Control label="Colour by" opts={COLOR_BY} value={colorBy} onChange={setColorBy} />
           <button className="btn sm" onClick={load} disabled={loading} style={{ marginLeft: 'auto' }}>

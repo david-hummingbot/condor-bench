@@ -270,7 +270,6 @@ def recommend(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "matrix_generated_at": matrix.get("generated_at"),
-        "mode": matrix.get("mode"),
         "criteria": {
             "min_pass_rate": min_pass_rate,
             "min_cases": min_cases,
@@ -390,7 +389,6 @@ def _tool_gaps(
 
 def generate(
     *,
-    mode: str | None = None,
     min_pass_rate: float = DOMAIN_PASS_RATE,
     min_cases: int = 3,
     prefer_lower_tokens: bool = False,
@@ -398,7 +396,7 @@ def generate(
     models_path: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build the matrix and the recommendations in one call. Returns (matrix, routing)."""
-    matrix = build_matrix(mode=mode, results_dir=results_dir, models_path=models_path)
+    matrix = build_matrix(results_dir=results_dir, models_path=models_path)
     routing = recommend(
         matrix,
         min_pass_rate=min_pass_rate,

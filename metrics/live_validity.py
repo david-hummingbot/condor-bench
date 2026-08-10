@@ -1,8 +1,5 @@
 """Live Validity metric: did the tool calls actually work against the real API?
 
-Only meaningful in live mode. Mock servers return canned payloads that are valid
-by construction, so this metric is weighted 0 there.
-
 What it catches that no other metric does: a model that picks the right tool with
 plausible-looking arguments and gets an error back every time. Tool-name F1 scores
 that 1.0, param match can score it 1.0 too (the pinned keys were right; an

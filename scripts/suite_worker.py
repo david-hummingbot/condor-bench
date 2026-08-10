@@ -5,7 +5,6 @@ live wiring of a different checkout).
 
 Env / argv contract:
   CONDOR_PATH          — absolute path to the Condor checkout
-  BENCH_MODE           — live | mock
   BENCH_SERVER_NAME    — optional override
   plus any model API keys the parent forwarded
 
@@ -36,15 +35,15 @@ async def _run(job: dict) -> dict:
     from bench.cleanup import teardown
     from bench.client import run_case
     from bench.dataset import is_mutating
-    from bench.mcp_provider import mode_banner
+    from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.scorer import score_case
     from bench.suites import (
         load_suite_cases_as_objects,
-        risk_ceiling_for_mode,
+        risk_ceiling,
         suite_prompt_map,
     )
-    from config import bench_mode, build_run_pin, staging_config
+    from config import build_run_pin, staging_config
 
     suite_id = job["suite_id"]
     environment_id = job["environment_id"]
@@ -54,16 +53,14 @@ async def _run(job: dict) -> dict:
     include_in_matrix = bool(job.get("include_in_matrix", False))
     member_run_id = job.get("member_run_id") or uuid.uuid4().hex[:8]
 
-    mode = bench_mode()
-    if mode == "live":
-        from bench.staging_health import StagingUnhealthy, assert_ready
+    from bench.staging_health import StagingUnhealthy, assert_ready
 
-        try:
-            assert_ready(mutating=False)
-        except StagingUnhealthy as exc:
-            return {"ok": False, "error": str(exc), "member_run_id": member_run_id}
+    try:
+        assert_ready(mutating=False)
+    except StagingUnhealthy as exc:
+        return {"ok": False, "error": str(exc), "member_run_id": member_run_id}
 
-    max_risk = risk_ceiling_for_mode(mode)
+    max_risk = risk_ceiling()
     cases = load_suite_cases_as_objects(
         suite_id, case_ids=case_ids, max_risk=max_risk
     )
@@ -100,18 +97,17 @@ async def _run(job: dict) -> dict:
     responses: dict[str, str] = {}
 
     for case in cases:
-        result = await run_case(case, model, mode=mode)
+        result = await run_case(case, model)
         baseline = store.load(case.id)
         baseline_latency = baseline.latency_s if baseline else result.latency_s
-        card = await score_case(case, result, baseline_latency, mode=mode)
+        card = await score_case(case, result, baseline_latency)
         scorecards.append(card)
         responses[case.id] = result.response
-        if mode == "live" and is_mutating(case):
+        if is_mutating(case):
             await teardown(
                 result,
                 model,
                 agent_slug=getattr(case, "agent_slug", None),
-                mode=mode,
             )
 
     pin = build_run_pin(
@@ -121,12 +117,11 @@ async def _run(job: dict) -> dict:
         run_group_id=run_group_id,
         case_ids=[c.id for c in cases],
         models=[model],
-        mode=mode,
         risk_ceiling=max_risk,
         include_in_matrix=include_in_matrix,
-        shared_loaded=mode == "live",
+        shared_loaded=True,
     )
-    pin["mode_banner"] = mode_banner()
+    pin["target_banner"] = target_banner()
     pin["parent_run_id"] = job.get("parent_run_id")
     pin["allow_mutating"] = bool(staging_config()["allow_mutating"])
 
@@ -144,7 +139,6 @@ async def _run(job: dict) -> dict:
         "run_dir": run_dir.name,
         "summary_path": str(run_dir / "summary.json"),
         "cases": len(cases),
-        "mode": mode,
     }
 
 

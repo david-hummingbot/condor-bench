@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { getStaging } from '../api.js'
 
 /**
- * Live-mode pre-flight panel.
+ * Staging pre-flight panel.
  *
  * It exists to make one specific failure visible before it happens: condor's
  * .mcp.json declares mcp-hummingbot with no CLI args, so the MCP server can fall
@@ -36,21 +36,6 @@ export default function StagingStatus({ compact = false, onReport }) {
   }
   if (!report) return null
 
-  if (report.mode !== 'live') {
-    return (
-      <div className="card">
-        <div className="staging-head">
-          <span className="staging-pill mock">mock mode</span>
-          <span className="run-meta">
-            Offline mock_mcp/ servers — no staging API involved. Set BENCH_MODE=live to
-            benchmark against a real hummingbot-api.
-          </span>
-          <button className="btn sm" onClick={load} style={{ marginLeft: 'auto' }}>↻</button>
-        </div>
-      </div>
-    )
-  }
-
   const blocking = (report.checks || []).filter(c => c.blocking)
   const failures = blocking.filter(c => !c.ok)
   const readOnlyFailures = failures.filter(c => !c.mutating_only)
@@ -58,7 +43,7 @@ export default function StagingStatus({ compact = false, onReport }) {
 
   const state = readOnlyFailures.length ? 'blocked' : (mutatingFailures.length ? 'partial' : 'ready')
   const headline = {
-    blocked: 'Live runs refused',
+    blocked: 'Runs refused',
     partial: 'Read-only runs allowed',
     ready: 'Staging ready',
   }[state]

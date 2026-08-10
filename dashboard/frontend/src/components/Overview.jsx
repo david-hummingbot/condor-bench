@@ -22,7 +22,7 @@ const FLOW = [
   {
     n: 2,
     title: 'Run it',
-    desc: 'Execute against mock servers or a live staging hummingbot-api. Progress streams case by case.',
+    desc: 'Execute against the staging hummingbot-api through Condor\'s MCP servers. Progress streams case by case.',
     route: '#/run/benchmark',
   },
   {
@@ -42,7 +42,6 @@ export default function Overview({ runs = [], config, onNavigate }) {
 
   const board = buildLeaderboard(runs)
   const recent = runs.slice(0, 5)
-  const isLive = config?.mode === 'live'
 
   const stats = [
     { label: 'Runs recorded', value: runs.length },
@@ -58,11 +57,10 @@ export default function Overview({ runs = [], config, onNavigate }) {
           <div className="hero-title">condor·bench</div>
           <p className="hero-sub">
             Benchmark models against Condor's MCP tooling, then decide which model
-            should serve which routing domain. Runs are currently executing in{' '}
-            <strong style={{ color: isLive ? 'var(--green)' : 'var(--text)' }}>
-              {config?.mode || 'mock'} mode
-            </strong>
-            {isLive && config?.staging?.api_url ? ` against ${config.staging.api_url}` : ''}.
+            should serve which routing domain. Runs execute against{' '}
+            <strong style={{ color: 'var(--green)' }}>
+              {config?.staging?.api_url || 'the configured hummingbot-api'}
+            </strong>.
           </p>
         </div>
         <div className="page-header-actions">

@@ -124,7 +124,6 @@ export default function App() {
   }
 
   const isRunning = runStatus === 'running'
-  const isLive = config?.mode === 'live'
   const section = SECTIONS.find((s) => s.id === route.section)
   const key = route.page ? `${route.section}/${route.page}` : route.section
   const onLivePage = route.section === 'live'
@@ -148,10 +147,10 @@ export default function App() {
         </nav>
         <div className="topbar-right">
           {config && (
-            <span className={`mode-badge ${isLive ? 'live' : 'mock'}`} title={config.mode_banner}>
-              {isLive ? '● live' : '○ mock'}
-              {isLive && config.staging?.api_url && (
-                <span className="mode-badge-url">{config.staging.api_url}</span>
+            <span className="target-badge" title={config.target_banner}>
+              ● live
+              {config.staging?.api_url && (
+                <span className="target-badge-url">{config.staging.api_url}</span>
               )}
             </span>
           )}

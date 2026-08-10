@@ -164,23 +164,16 @@ async def teardown(
     model: str,
     *,
     agent_slug: str | None = None,
-    mode: str | None = None,
 ) -> CleanupReport:
-    """Undo what a mutating live case created. Best-effort; never raises.
+    """Undo what a mutating case created. Best-effort; never raises.
 
     Runs the undo calls through a fresh MCP client with the same wiring the case
     used, so deletions land in the same stores and on the same API instance the
     creations did — a teardown pointed at a different ``agent_slug`` would delete
     nothing and report success.
     """
-    from config import bench_mode
-
     report = CleanupReport(resources=created_resources(result))
-    mode = mode or bench_mode()
 
-    if mode != "live":
-        report.skipped_reason = "mock mode — nothing persisted to clean up"
-        return report
     if not report.resources:
         return report
 
@@ -256,7 +249,7 @@ async def _call_tool(
 
     from bench.mcp_provider import build_mcp_configs
 
-    configs = build_mcp_configs("live", agent_slug=agent_slug)
+    configs = build_mcp_configs(agent_slug=agent_slug)
     target = _server_for_tool(tool)
     config = next((c for c in configs if c.get("name") == target), None)
     if config is None:

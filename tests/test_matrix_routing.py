@@ -55,14 +55,13 @@ def write_run(
     model: str,
     cases: list[dict],
     *,
-    mode: str = "live",
     timestamp: str = "2026-08-04T00:00:00Z",
 ) -> None:
     safe = model.replace(":", "_").replace("/", "_")
     run_dir = results / f"run_{safe}_{timestamp[:10]}"
     (run_dir / "cases").mkdir(parents=True, exist_ok=True)
     (run_dir / "summary.json").write_text(
-        json.dumps({"model": model, "mode": mode, "timestamp": timestamp})
+        json.dumps({"model": model, "timestamp": timestamp})
     )
     for case in cases:
         (run_dir / "cases" / f"{case['case_id']}.json").write_text(json.dumps(case))
@@ -106,7 +105,7 @@ def test_infra_failures_are_excluded_not_scored_zero(tmp_path, registry):
         + [case("broken", "general_consult", 0.0, error="infra: connection refused")],
     )
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     cell = matrix["domains"]["general_consult"]["ollama:mid:14b"]
 
     assert cell["cases"] == 5
@@ -135,7 +134,7 @@ def test_harness_artifacts_are_excluded(tmp_path, registry):
         ],
     )
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     cell = matrix["domains"][DOMAIN_B]["ollama:mid:14b"]
     assert cell["excluded"] == 1
     assert cell["pass_rate"] == 1.0
@@ -148,7 +147,7 @@ def test_smallest_passing_model_wins(tmp_path, registry):
     write_run(results, "ollama:mid:14b", _four("general_consult", 0.99, "m"))
 
     routing = recommend(
-        build_matrix(mode="live", results_dir=results, models_path=registry),
+        build_matrix(results_dir=results, models_path=registry),
         models_path=registry,
     )
     rec = routing["recommendations"]["general_consult"]
@@ -165,7 +164,7 @@ def test_local_model_beats_cloud_even_when_cloud_scores_higher(tmp_path, registr
     write_run(results, "cloud:big", _four("general_consult", 1.0, "c"))
 
     routing = recommend(
-        build_matrix(mode="live", results_dir=results, models_path=registry),
+        build_matrix(results_dir=results, models_path=registry),
         models_path=registry,
     )
     rec = routing["recommendations"]["general_consult"]
@@ -181,7 +180,7 @@ def test_cloud_fallback_is_flagged_when_no_local_passes(tmp_path, registry):
     write_run(results, "cloud:big", _four("tick_execution", 0.95, "c"))
 
     routing = recommend(
-        build_matrix(mode="live", results_dir=results, models_path=registry),
+        build_matrix(results_dir=results, models_path=registry),
         models_path=registry,
     )
     rec = routing["recommendations"]["tick_execution"]
@@ -204,7 +203,7 @@ def test_destructive_failure_blocks_a_recommendation(tmp_path, registry):
     write_run(results, "ollama:mid:14b", _four(DOMAIN_B, 0.9, "m")
               + [case("danger", DOMAIN_B, 0.9, risk_level="destructive")])
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     assert matrix["domains"][DOMAIN_B]["ollama:small:3b"]["destructive_failures"]
 
     routing = recommend(matrix, models_path=registry)
@@ -220,7 +219,7 @@ def test_thin_evidence_is_reported_as_thin(tmp_path, registry):
     write_run(results, "ollama:mid:14b", [case("only", DOMAIN_C, 1.0)])
 
     routing = recommend(
-        build_matrix(mode="live", results_dir=results, models_path=registry),
+        build_matrix(results_dir=results, models_path=registry),
         min_cases=3,
         models_path=registry,
     )
@@ -244,7 +243,7 @@ def test_token_cost_never_rejects_a_passing_model(tmp_path, registry):
         _four("general_consult", 0.9, "m", total_tokens=10_000),
     )
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     for prefer in (False, True):
         routing = recommend(
             matrix, prefer_lower_tokens=prefer, models_path=registry
@@ -259,29 +258,10 @@ def test_unmeasured_tokens_are_not_zero(tmp_path, registry):
     results = tmp_path / "results"
     write_run(results, "ollama:mid:14b", _four("general_consult", 0.9, "m"))
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     cell = matrix["domains"]["general_consult"]["ollama:mid:14b"]
     assert cell["avg_total_tokens"] is None
     assert cell["avg_cost_usd"] is None
-
-
-def test_mock_and_live_runs_are_not_mixed(tmp_path, registry):
-    """Their composites come from different weight profiles."""
-    results = tmp_path / "results"
-    write_run(results, "ollama:mid:14b", _four("general_consult", 0.4, "live"), mode="live")
-    write_run(
-        results,
-        "ollama:mid:14b",
-        _four("general_consult", 0.99, "mock"),
-        mode="mock",
-        timestamp="2026-08-05T00:00:00Z",
-    )
-
-    live = build_matrix(mode="live", results_dir=results, models_path=registry)
-    assert live["domains"]["general_consult"]["ollama:mid:14b"]["pass_rate"] == 0.0
-
-    mock = build_matrix(mode="mock", results_dir=results, models_path=registry)
-    assert mock["domains"]["general_consult"]["ollama:mid:14b"]["pass_rate"] == 1.0
 
 
 def test_newest_run_owns_a_cell(tmp_path, registry):
@@ -300,7 +280,7 @@ def test_newest_run_owns_a_cell(tmp_path, registry):
         timestamp="2026-08-04T00:00:00Z",
     )
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     cell = matrix["domains"]["general_consult"]["ollama:mid:14b"]
     assert cell["scored"] == 4, "runs were blended instead of taking the newest"
     assert cell["pass_rate"] == 1.0
@@ -326,7 +306,7 @@ def test_domain_by_domain_sweeps_accumulate(tmp_path, registry):
         timestamp="2026-08-04T00:00:00Z",
     )
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     assert matrix["domains"]["general_consult"]["ollama:mid:14b"]["scored"] == 4, (
         "the older general_consult run was dropped when a newer domain-only run landed"
     )
@@ -341,7 +321,7 @@ def test_unregistered_model_is_reported_not_silently_dropped(tmp_path, registry)
     results = tmp_path / "results"
     write_run(results, "ollama:mystery:99b", _four("general_consult", 0.99, "x"))
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     assert matrix["models"]["ollama:mystery:99b"]["in_registry"] is False
 
     routing = recommend(matrix, models_path=registry)
@@ -356,7 +336,7 @@ def test_tool_domains_are_not_routing_targets(tmp_path, registry):
     write_run(results, "ollama:mid:14b", _four("tool:market_data", 0.99, "t"))
 
     routing = recommend(
-        build_matrix(mode="live", results_dir=results, models_path=registry),
+        build_matrix(results_dir=results, models_path=registry),
         models_path=registry,
     )
     assert not any(d.startswith("tool:") for d in routing["recommendations"])
@@ -375,7 +355,7 @@ def test_per_tool_verdicts_use_expected_tools(tmp_path, registry):
         ],
     )
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     assert matrix["tools"]["get_market_data"]["ollama:mid:14b"]["pass_rate"] == 1.0
     assert matrix["tools"]["manage_routines"]["ollama:mid:14b"]["pass_rate"] == 0.0
 
@@ -394,7 +374,7 @@ def test_domain_is_backfilled_for_runs_saved_before_the_field_existed(tmp_path, 
     del record["domain"]
     write_run(results, "ollama:mid:14b", [record])
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     assert known.domain in matrix["domains"]
     assert "unclassified" not in matrix["domains"]
 
@@ -408,7 +388,7 @@ def test_unclassified_is_not_routed(tmp_path, registry):
         {**case(f"gone{i}", "", 0.99), "domain": None} for i in range(3)
     ])
 
-    matrix = build_matrix(mode="live", results_dir=results, models_path=registry)
+    matrix = build_matrix(results_dir=results, models_path=registry)
     assert "unclassified" in matrix["domains"], "the cases should still be visible"
 
     routing = recommend(matrix, models_path=registry)
@@ -446,7 +426,7 @@ def test_shared_config_key_conflict_is_surfaced(tmp_path, registry, monkeypatch)
     )
 
     routing = recommend(
-        build_matrix(mode="live", results_dir=results, models_path=registry),
+        build_matrix(results_dir=results, models_path=registry),
         models_path=registry,
     )
     assert routing["recommendations"][DOMAIN_A]["model"] == "ollama:small:3b"
@@ -501,7 +481,7 @@ def test_domain_deleted_from_the_datasets_is_stale_not_unmet(tmp_path, registry)
     write_run(results, "ollama:mid:14b", _four("a_domain_no_dataset_produces", 0.2, "old"))
 
     routing = recommend(
-        build_matrix(mode="live", results_dir=results, models_path=registry),
+        build_matrix(results_dir=results, models_path=registry),
         models_path=registry,
     )
     assert "a_domain_no_dataset_produces" not in routing["unmet_domains"]
@@ -520,7 +500,7 @@ def test_a_live_domain_is_still_reported_as_unmet(tmp_path, registry):
     write_run(results, "ollama:mid:14b", _four(live, 0.2, "bad"))
 
     routing = recommend(
-        build_matrix(mode="live", results_dir=results, models_path=registry),
+        build_matrix(results_dir=results, models_path=registry),
         models_path=registry,
     )
     assert live in routing["unmet_domains"]

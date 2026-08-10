@@ -74,7 +74,6 @@ export default function Suites({ onRunStarted }) {
     name: '',
     condor_path: '',
     expected_branch: 'main',
-    mode: 'live',
     server_name: 'bench_staging',
     require_clean: true,
   })
@@ -132,7 +131,6 @@ export default function Suites({ onRunStarted }) {
         name: '',
         condor_path: '',
         expected_branch: 'main',
-        mode: 'live',
         server_name: 'bench_staging',
         require_clean: true,
       })
@@ -522,9 +520,6 @@ export default function Suites({ onRunStarted }) {
                           <span className="muted"> — {compare.differences.join(', ')}</span>
                         )}
                       </p>
-                      {compare.differences?.includes('prompt_only_mock') && (
-                        <p className="muted">Mock multi-env compare is prompt-only, not a Condor wiring A/B.</p>
-                      )}
                       <pre className="code-block">{JSON.stringify(compare.deltas, null, 2)}</pre>
                       <div className="card-section-title">Members</div>
                       <pre className="code-block">{JSON.stringify(compare.members, null, 2)}</pre>
@@ -544,7 +539,7 @@ export default function Suites({ onRunStarted }) {
                           checked={(detail.environment_ids || []).includes(env.id)}
                           onChange={() => toggleSuiteEnv(env.id)}
                         />
-                        {env.name} <span className="muted">({env.mode} · {env.condor_path})</span>
+                        {env.name} <span className="muted">({env.condor_path})</span>
                       </label>
                     ))}
                   </div>
@@ -556,7 +551,7 @@ export default function Suites({ onRunStarted }) {
                         <strong>{env.name}</strong>
                         <span className="muted">
                           {' '}
-                          · {env.id} · v{env.version} · {env.mode} · {env.condor_path}
+                          · {env.id} · v{env.version} · {env.condor_path}
                         </span>
                         <button className="btn btn-ghost" onClick={() => handleValidate(env.id)}>
                           Validate
@@ -603,13 +598,6 @@ export default function Suites({ onRunStarted }) {
                       value={envForm.expected_branch}
                       onChange={(e) => setEnvForm({ ...envForm, expected_branch: e.target.value })}
                     />
-                    <select
-                      value={envForm.mode}
-                      onChange={(e) => setEnvForm({ ...envForm, mode: e.target.value })}
-                    >
-                      <option value="live">live</option>
-                      <option value="mock">mock</option>
-                    </select>
                     <input
                       placeholder="server_name"
                       value={envForm.server_name}

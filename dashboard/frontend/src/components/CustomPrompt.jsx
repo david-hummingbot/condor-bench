@@ -121,7 +121,6 @@ export default function CustomPrompt() {
   const [turns, setTurns] = useState([])
   const [expectedTools, setExpectedTools] = useState('')
   const [agentSlug, setAgentSlug] = useState('')
-  const [mode, setMode] = useState('')
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState([])  // [{model, response, tool_calls, scorecard, error}]
   const [status, setStatus] = useState('')
@@ -254,9 +253,7 @@ export default function CustomPrompt() {
         question: question.trim(),
         turns: turns.filter(t => t.trim()),
         expected_tools: parsedTools,
-        mock_tools: {},
         agent_slug: agentSlug.trim() || null,
-        mode: mode || null,
         models,
       })
 
@@ -367,33 +364,12 @@ export default function CustomPrompt() {
           />
         </div>
 
-        {/* Mode */}
         <div style={{ marginTop: 16 }}>
-          <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
-            Execution mode
-          </div>
-          <div className="radio-group">
-            {[
-              { id: '', label: 'Use configured' },
-              { id: 'mock', label: 'Mock' },
-              { id: 'live', label: 'Live' },
-            ].map(o => (
-              <button
-                key={o.id}
-                className={`radio-btn ${mode === o.id ? 'active' : ''}`}
-                onClick={() => setMode(o.id)}
-              >
-                {o.label}
-              </button>
-            ))}
-          </div>
-          {mode === 'live' && (
-            <span className="run-meta">
-              A live prompt is a real agent with real tools attached, and nothing
-              constrains what it decides to call. The staging pre-flight runs first
-              and will refuse the run if it fails.
-            </span>
-          )}
+          <span className="run-meta">
+            This prompt runs as a real agent with live tools attached, and nothing
+            constrains what it decides to call. The staging pre-flight runs first
+            and will refuse the run if it fails.
+          </span>
         </div>
       </div>
 

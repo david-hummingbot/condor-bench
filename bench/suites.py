@@ -95,13 +95,10 @@ def create_environment(payload: dict[str, Any]) -> dict[str, Any]:
         "condor_path": condor_path,
         "expected_branch": payload.get("expected_branch"),
         "require_clean": bool(payload.get("require_clean", True)),
-        "mode": (payload.get("mode") or "live").strip().lower(),
         "server_name": payload.get("server_name") or staging_config()["server_name"],
         "staging_overrides": payload.get("staging_overrides") or {},
         "updated_at": _utcnow(),
     }
-    if record["mode"] not in ("live", "mock"):
-        raise SuiteStoreError("mode must be live or mock")
     atomic_write_json(_env_path(env_id), record)
     return record
 
@@ -120,14 +117,11 @@ def update_environment(
         "condor_path",
         "expected_branch",
         "require_clean",
-        "mode",
         "server_name",
         "staging_overrides",
     ):
         if key in patch:
             current[key] = patch[key]
-    if current.get("mode") not in ("live", "mock"):
-        raise SuiteStoreError("mode must be live or mock")
     if not str(current.get("condor_path") or "").strip():
         raise SuiteStoreError("condor_path is required")
     current["version"] = int(current.get("version", 0)) + 1
@@ -492,7 +486,6 @@ def load_suite_cases_as_objects(
                     summary=data.get("summary", ""),
                     recent_decisions=data.get("recent_decisions", ""),
                     tick_number=data.get("tick_number", 1),
-                    mock_tools=data.get("mock_tools", {}),
                     expected_tool_calls=data.get("expected_tool_calls")
                     or data.get("expected_tools", []),
                     expected_no_calls=data.get("expected_no_calls", []),
@@ -516,7 +509,6 @@ def load_suite_cases_as_objects(
                     expected_tool_params=data.get("expected_tool_params", {}),
                     expected_no_calls=data.get("expected_no_calls", []),
                     live_expected=data.get("live_expected", {}),
-                    mock_tools=data.get("mock_tools", {}),
                     risk_level=_normalize_risk(data.get("risk_level")),
                     agent_slug=data.get("agent_slug"),
                     tags=data.get("tags", []),
@@ -534,7 +526,6 @@ def load_suite_cases_as_objects(
                     expected_no_calls=data.get("expected_no_calls", []),
                     turns=data.get("turns", []),
                     live_expected=data.get("live_expected", {}),
-                    mock_tools=data.get("mock_tools", {}),
                     risk_level=_normalize_risk(data.get("risk_level")),
                     tags=data.get("tags", []),
                 )
@@ -548,7 +539,6 @@ def load_suite_cases_as_objects(
                     category=data.get("category", ""),
                     expected_tools=data.get("expected_tools", []),
                     turns=data.get("turns", []),
-                    mock_tools=data.get("mock_tools", {}),
                     tags=data.get("tags", []),
                     type="consult",
                     expected_tool_params=data.get("expected_tool_params", {}),
@@ -563,9 +553,8 @@ def load_suite_cases_as_objects(
     return cases
 
 
-def risk_ceiling_for_mode(mode: str) -> str | None:
-    if mode != "live":
-        return None
+def risk_ceiling() -> str | None:
+    """Read-only unless BENCH_ALLOW_MUTATING is set."""
     if staging_config()["allow_mutating"]:
         return None
     return "read_only"

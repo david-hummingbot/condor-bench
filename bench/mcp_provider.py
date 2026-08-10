@@ -1,6 +1,6 @@
-"""MCP server configs for benchmark runs — live (production wiring) or mock.
+"""MCP server configs for benchmark runs, from condor's production wiring.
 
-Live mode does not reimplement condor's MCP spawn args. It loads condor's own
+bench does not reimplement condor's MCP spawn args. It loads condor's own
 ``handlers/agents/_shared.py`` and calls ``build_mcp_servers_for_session()``, so
 the benchmark launches the same subprocesses production does — including the two
 args condor-evals' harness drops (``--server-name`` on both servers,
@@ -36,10 +36,9 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
-from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-from config import ROOT, bench_mode, condor_path, staging_config
+from config import condor_path, staging_config
 
 log = logging.getLogger(__name__)
 
@@ -54,14 +53,11 @@ BENCH_ONLY_CONFIG_KEYS = ("cwd",)
 # ones. Excluded here; reported in run metadata when ACP could still find it.
 EXCLUDED_MCP_SERVERS = ("playwright",)
 
-_MOCK_HB_SCRIPT = ROOT / "mock_mcp" / "hummingbot_server.py"
-_MOCK_CONDOR_SCRIPT = ROOT / "mock_mcp" / "condor_server.py"
-
 _shared_module: Any = None
 
 
 class LiveWiringError(RuntimeError):
-    """Live MCP configs could not be built. Never degrade to mock silently."""
+    """MCP configs could not be built. Never degrade to a weaker wiring silently."""
 
 
 # ── Production wiring loader ───────────────────────────────────────────────────
@@ -81,7 +77,7 @@ def load_condor_shared() -> Any:
     repo = condor_path()
     if repo is None:
         raise LiveWiringError(
-            "Live mode needs a condor checkout for the production MCP wiring. "
+            "A benchmark run needs a condor checkout for the production MCP wiring. "
             "Set CONDOR_PATH=/path/to/condor (a directory containing mcp_servers/)."
         )
 
@@ -133,30 +129,18 @@ def condor_server_entry(server_name: str) -> dict[str, Any] | None:
     return get_config_manager().get_server(server_name)
 
 
-# ── Config builders ────────────────────────────────────────────────────────────
-def _mock_configs(scenario_path: str | None, tool_log_path: str | None) -> list[dict]:
-    """The offline mock servers, unchanged from the pre-live behaviour."""
-    env = []
-    if scenario_path:
-        env.append({"name": "BENCH_SCENARIO_FILE", "value": scenario_path})
-    if tool_log_path:
-        env.append({"name": "BENCH_TOOL_LOG", "value": tool_log_path})
-    py = sys.executable
+# ── Config builder ─────────────────────────────────────────────────────────────
+def build_mcp_configs(
+    *,
+    agent_slug: str | None = None,
+    server_name: str | None = None,
+) -> list[dict]:
+    """MCP server configs for one benchmark case.
 
-    def _cmd(script: Path) -> list[str]:
-        if script.exists():
-            return [str(py), str(script)]
-        return [str(py), "-m", f"mock_mcp.{script.stem}"]
-
-    hb, condor = _cmd(_MOCK_HB_SCRIPT), _cmd(_MOCK_CONDOR_SCRIPT)
-    return [
-        {"name": "mcp-hummingbot", "command": hb[0], "args": hb[1:], "env": list(env)},
-        {"name": "condor", "command": condor[0], "args": condor[1:], "env": list(env)},
-    ]
-
-
-def _live_configs(agent_slug: str | None, server_name: str | None) -> list[dict]:
-    """Production spawn args for the staging server, from condor's own helpers."""
+    Production spawn args for the staging server, from condor's own helpers.
+    ``agent_slug`` must be set for agent-scoped cases (Layer 3, ticks) and left
+    None for chat-scoped consults — see the module docstring for why.
+    """
     shared = load_condor_shared()
     staging = staging_config()
     server_name = server_name or str(staging["server_name"])
@@ -213,25 +197,6 @@ def _live_configs(agent_slug: str | None, server_name: str | None) -> list[dict]
     return configs
 
 
-def build_mcp_configs(
-    mode: Literal["live", "mock"] | None = None,
-    *,
-    agent_slug: str | None = None,
-    server_name: str | None = None,
-    scenario_path: str | None = None,  # mock only
-    tool_log_path: str | None = None,  # mock only
-) -> list[dict]:
-    """MCP server configs for one benchmark case.
-
-    ``agent_slug`` must be set for agent-scoped cases (Layer 3, ticks) and left
-    None for chat-scoped consults — see the module docstring for why.
-    """
-    mode = mode or bench_mode()
-    if mode == "live":
-        return _live_configs(agent_slug, server_name)
-    return _mock_configs(scenario_path, tool_log_path)
-
-
 # ── Run metadata ───────────────────────────────────────────────────────────────
 def effective_api_url(configs: list[dict]) -> str | None:
     """The ``--url`` the hummingbot MCP subprocess will actually be launched with."""
@@ -280,7 +245,6 @@ def _snapshot_tool_counts() -> dict[str, int]:
 def wiring_metadata(
     configs: list[dict],
     *,
-    mode: str,
     agent_slug: str | None,
     is_acp: bool = False,
 ) -> dict[str, Any]:
@@ -313,7 +277,6 @@ def wiring_metadata(
             )
 
     return {
-        "mode": mode,
         "agent_slug": agent_slug,
         "agent_scoped": agent_slug is not None,
         "mcp_servers": server_names,
@@ -347,15 +310,12 @@ def requires_agent_slug(case: Any) -> bool:
     return bool(getattr(case, "agent_slug", None))
 
 
-def mode_banner() -> str:
-    """One-line description of the resolved mode, for CLI/dashboard display."""
-    mode = bench_mode()
-    if mode != "live":
-        return "mock — offline mock_mcp/ servers"
+def target_banner() -> str:
+    """One-line description of the API a run will hit, for CLI/dashboard display."""
     staging = staging_config()
     url = staging["api_url"] or "(HUMMINGBOT_API_URL unset)"
     mutating = "mutating allowed" if staging["allow_mutating"] else "read-only"
-    return f"live — {url} via server '{staging['server_name']}' ({mutating})"
+    return f"{url} via server '{staging['server_name']}' ({mutating})"
 
 
 def env_overlay_keys(cfg: dict) -> set[str]:

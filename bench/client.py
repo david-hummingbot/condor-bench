@@ -1,26 +1,25 @@
 """Benchmark client.
 
 Routes each case to the correct agent stack (PydanticAIClient or ACPClient),
-attaches MCP servers — condor's real ones in live mode, ``mock_mcp/`` in mock
-mode — and captures events, tool traces, latency and token usage.
-Multi-turn cases loop prompt_stream() calls preserving message history.
+attaches condor's real MCP servers, and captures events, tool traces, latency and
+token usage. Multi-turn cases loop prompt_stream() calls preserving message
+history.
 
-Three things are captured here that the pre-live client did not:
+Three things are captured per case:
 
 * **Tool arguments and responses**, not just names. Param correctness and live
   response validity are what separate "picked the right tool" from "actually got
   the data", which is the distinction a model-sizing study lives on.
 * **Token usage**, via ``UsageEvent``. Session-cumulative, so a multi-turn case
   reports the whole case.
-* **Wiring metadata** — mode, ``agent_slug``, resolved API URL, effective tool
-  count — so a bad row can be identified as a harness artifact instead of being
-  averaged into a routing recommendation.
+* **Wiring metadata** — ``agent_slug``, resolved API URL, effective tool count —
+  so a bad row can be identified as a harness artifact instead of being averaged
+  into a routing recommendation.
 """
 from __future__ import annotations
 
 import json
 import re
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,7 +37,7 @@ from condor_compat.acp.client import (
 )
 
 from bench.mcp_provider import build_mcp_configs, wiring_metadata
-from config import bench_mode, condor_path
+from config import condor_path
 
 # ── Agent instructions ─────────────────────────────────────────────────────────
 _AGENT_MD = Path(__file__).parent.parent / "condor_compat" / "agents" / "condor" / "AGENT.md"
@@ -157,7 +156,7 @@ class BenchmarkResult:
     error: str | None = None
     # Session-cumulative token usage; {} when the provider reported none.
     usage: dict[str, Any] = field(default_factory=dict)
-    # Mode / agent_slug / resolved URL / effective tool count for this case.
+    # agent_slug / resolved URL / effective tool count for this case.
     wiring: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -211,8 +210,7 @@ class BenchmarkResult:
             for r in self.tool_responses
             if r.get("tool_call_id")
         }
-        # Fall back to name-based pairing: the mock tool log has no call ids, and
-        # some providers don't echo them either.
+        # Fall back to name-based pairing: some providers don't echo call ids.
         outputs_by_name: dict[str, list[Any]] = {}
         for record in self.tool_responses:
             outputs_by_name.setdefault(str(record.get("tool", "")), []).append(
@@ -300,64 +298,6 @@ async def _stream_turn(
     )
 
 
-def _read_tool_log(path: str | None) -> list[dict]:
-    if not path:
-        return []
-    try:
-        records = []
-        for line in Path(path).read_text().splitlines():
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-        return records
-    except Exception:
-        return []
-
-
-def _merge_mock_tool_log(all_turns: list[TurnResult], logged: list[dict]) -> None:
-    """Reconcile streamed tool calls with the mock servers' own log.
-
-    Mock mode only. The log is authoritative for *which* tools ran — some
-    providers announce a tool call they then fail to dispatch, and only the server
-    knows what it was actually asked. But each log record keeps a hand-picked
-    subset of the arguments, so taking it verbatim would blank out args the mock
-    doesn't record and make param scoring punish correct calls. So: log decides
-    the call list, streamed events fill in the full argument dict.
-
-    Everything lands on the last turn because the mock servers don't record turn
-    boundaries. Scoring aggregates across turns anyway, so this only affects the
-    per-turn view in the dashboard.
-    """
-    if not logged or not all_turns:
-        return
-
-    from metrics.tool_accuracy import normalize_tool_name
-
-    # Streamed calls by tool name, in order, so repeated calls to the same tool
-    # pair up with their own log records rather than all taking the first one.
-    streamed: dict[str, list[dict]] = {}
-    for turn in all_turns:
-        for call in turn.tool_calls:
-            streamed.setdefault(normalize_tool_name(str(call.get("tool", ""))), []).append(call)
-
-    merged_calls: list[dict] = []
-    merged_responses: list[dict] = []
-    for record in logged:
-        name = str(record.get("tool", ""))
-        queue = streamed.get(normalize_tool_name(name), [])
-        streamed_args = queue.pop(0).get("args", {}) if queue else {}
-        args = {**(streamed_args or {}), **(record.get("args") or {})}
-        merged_calls.append({"tool": name, "args": args})
-        if "result" in record:
-            merged_responses.append({"tool": name, "output": record["result"]})
-
-    for turn in all_turns:
-        turn.tool_calls = []
-        turn.tool_responses = []
-    all_turns[-1].tool_calls = merged_calls
-    all_turns[-1].tool_responses = merged_responses
-
-
 def _make_client(
     model: str,
     mcp_configs: list[dict],
@@ -368,14 +308,12 @@ def _make_client(
     if is_acp_model(model):
         command, extra_env = resolve_acp(model)
         # ACP agents auto-discover stdio MCP servers from .mcp.json in their cwd.
-        # In live mode that cwd must be the condor repo (that is where the real
-        # servers resolve from), which also means condor's playwright entry is
-        # visible to the agent — reported in wiring metadata, since the by-name
-        # overrides can replace servers but not remove one.
-        working_dir = None
-        if bench_mode() == "live":
-            repo = condor_path()
-            working_dir = str(repo) if repo else None
+        # That cwd must be the condor repo (that is where the real servers resolve
+        # from), which also means condor's playwright entry is visible to the
+        # agent — reported in wiring metadata, since the by-name overrides can
+        # replace servers but not remove one.
+        repo = condor_path()
+        working_dir = str(repo) if repo else None
         return (
             ACPClient(
                 command=command,
@@ -391,43 +329,17 @@ def _make_client(
     return PydanticAIClient(model=model, mcp_servers=mcp_configs, **kwargs), False
 
 
-class _MockScratch:
-    """Temp scenario + tool-log files for mock mode; no-ops in live mode."""
-
-    def __init__(self, mode: str, mock_tools: dict[str, Any] | None) -> None:
-        self.scenario_path: str | None = None
-        self.tool_log_path: str | None = None
-        if mode == "live":
-            return
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as sf:
-            json.dump({"mock_tools": mock_tools or {}}, sf)
-            self.scenario_path = sf.name
-        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as lf:
-            self.tool_log_path = lf.name
-
-    def cleanup(self) -> None:
-        for path in (self.scenario_path, self.tool_log_path):
-            if not path:
-                continue
-            try:
-                Path(path).unlink()
-            except Exception:
-                pass
-
-
 # ── Public API ─────────────────────────────────────────────────────────────────
 async def run_consult(
     case_id: str,
     question: str,
     model: str,
     extra_turns: list[str] | None = None,
-    mock_tools: dict[str, Any] | None = None,
     *,
     auto_confirm: bool = True,
     required_tools: list[str] | None = None,
     agent_slug: str | None = None,
     instructions: str | None = None,
-    mode: str | None = None,
     tool_filter_mode: str | None = None,
 ) -> BenchmarkResult:
     """Run a consult / tool / agent case with MCP tools available, as production does.
@@ -438,8 +350,6 @@ async def run_consult(
     agent_slug: None keeps the run chat-scoped (a production consult); a slug
       scopes condor's memory/skill tools to that agent's own stores.
     """
-    mode = mode or bench_mode()
-    scratch = _MockScratch(mode, mock_tools)
     all_turns: list[TurnResult] = []
     usage_acc: dict[str, Any] = {}
     outer_error: str | None = None
@@ -447,12 +357,7 @@ async def run_consult(
     is_acp = False
 
     try:
-        mcp_configs = build_mcp_configs(
-            mode,
-            agent_slug=agent_slug,
-            scenario_path=scratch.scenario_path,
-            tool_log_path=scratch.tool_log_path,
-        )
+        mcp_configs = build_mcp_configs(agent_slug=agent_slug)
         client, is_acp = _make_client(
             model, mcp_configs, tool_filter_mode=tool_filter_mode
         )
@@ -474,7 +379,7 @@ async def run_consult(
 
                 # Auto-confirm when the model gated a fully-specified action
                 if auto_confirm and not outer_error and required_tools and all_turns:
-                    called = _called_tool_names(all_turns, scratch.tool_log_path, mode)
+                    called = [c["tool"] for t in all_turns for c in t.tool_calls]
                     missing = _missing_required_tools(called, required_tools)
                     if missing and _asks_confirmation(all_turns[-1].response):
                         turn = await _stream_turn(client, _AUTO_CONFIRM_MSG, usage_acc)
@@ -488,19 +393,13 @@ async def run_consult(
         if not all_turns:
             all_turns.append(TurnResult(response="", tool_calls=[], latency_s=0.0, error=str(exc)))
 
-    if mode != "live":
-        _merge_mock_tool_log(all_turns, _read_tool_log(scratch.tool_log_path))
-    scratch.cleanup()
-
     return BenchmarkResult(
         case_id=case_id,
         model=model,
         turns=all_turns,
         error=outer_error,
         usage=usage_acc,
-        wiring=wiring_metadata(
-            mcp_configs, mode=mode, agent_slug=agent_slug, is_acp=is_acp
-        )
+        wiring=wiring_metadata(mcp_configs, agent_slug=agent_slug, is_acp=is_acp)
         | {"assistant_prompt": assistant_prompt_source(agent_slug) if agent_slug else None},
     )
 
@@ -509,20 +408,16 @@ async def run_tick(
     case_id: str,
     prompt: str,
     model: str,
-    mock_tools: dict[str, Any] | None = None,
     *,
     agent_slug: str | None = None,
-    mode: str | None = None,
 ) -> BenchmarkResult:
     """Run a tick case with both MCP servers attached.
 
     Ticks are agent-scoped by construction — they run *as* a trading agent — so
-    ``agent_slug`` should always be set in live mode. Without it condor's journal
-    and memory tools write to the chat's stores, and a case asserting
+    ``agent_slug`` should always be set. Without it condor's journal and memory
+    tools write to the chat's stores, and a case asserting
     ``trading_agent_journal_write`` measures the wrong thing.
     """
-    mode = mode or bench_mode()
-    scratch = _MockScratch(mode, mock_tools)
     all_turns: list[TurnResult] = []
     usage_acc: dict[str, Any] = {}
     outer_error: str | None = None
@@ -530,12 +425,7 @@ async def run_tick(
     is_acp = False
 
     try:
-        mcp_configs = build_mcp_configs(
-            mode,
-            agent_slug=agent_slug,
-            scenario_path=scratch.scenario_path,
-            tool_log_path=scratch.tool_log_path,
-        )
+        mcp_configs = build_mcp_configs(agent_slug=agent_slug)
         # Ticks get the full tool set: production does not filter an agent's tools
         # by model size on the tick path, and a truncated set would make a tick
         # failure indistinguishable from a tool that was never offered.
@@ -553,31 +443,14 @@ async def run_tick(
         outer_error = str(exc)
         all_turns.append(TurnResult(response="", tool_calls=[], latency_s=0.0, error=str(exc)))
 
-    if mode != "live":
-        _merge_mock_tool_log(all_turns, _read_tool_log(scratch.tool_log_path))
-    scratch.cleanup()
-
     return BenchmarkResult(
         case_id=case_id,
         model=model,
         turns=all_turns,
         error=outer_error,
         usage=usage_acc,
-        wiring=wiring_metadata(
-            mcp_configs, mode=mode, agent_slug=agent_slug, is_acp=is_acp
-        ),
+        wiring=wiring_metadata(mcp_configs, agent_slug=agent_slug, is_acp=is_acp),
     )
-
-
-def _called_tool_names(
-    all_turns: list[TurnResult], tool_log_path: str | None, mode: str
-) -> list[str]:
-    """Tool names called so far — from the mock log when it exists, else the stream."""
-    if mode != "live":
-        logged = _read_tool_log(tool_log_path)
-        if logged:
-            return [r["tool"] for r in logged]
-    return [c["tool"] for t in all_turns for c in t.tool_calls]
 
 
 def build_tick_prompt_for_case(case: Any, model: str) -> str:
@@ -599,22 +472,19 @@ def build_tick_prompt_for_case(case: Any, model: str) -> str:
     )
 
 
-async def run_case(case: Any, model: str, *, mode: str | None = None) -> BenchmarkResult:
+async def run_case(case: Any, model: str) -> BenchmarkResult:
     """Run any dataset case, dispatching on its type.
 
     One entry point so the CLI, the dashboard and the sweep runner cannot drift on
     which cases get an ``agent_slug`` or an assistant prompt.
     """
-    mode = mode or bench_mode()
     if case.type == "tick":
         prompt = build_tick_prompt_for_case(case, model)
         return await run_tick(
             case.id,
             prompt,
             model,
-            getattr(case, "mock_tools", {}),
             agent_slug=getattr(case, "agent_slug", None),
-            mode=mode,
         )
 
     slug = getattr(case, "agent_slug", None)
@@ -624,11 +494,9 @@ async def run_case(case: Any, model: str, *, mode: str | None = None) -> Benchma
         case.question,
         model,
         extra_turns=list(getattr(case, "turns", []) or []),
-        mock_tools=getattr(case, "mock_tools", {}),
         required_tools=expected or None,
         agent_slug=slug,
         instructions=load_assistant_prompt(slug) if slug else None,
-        mode=mode,
     )
 
 

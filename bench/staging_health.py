@@ -1,4 +1,4 @@
-"""Fail-closed pre-flight for live benchmark runs.
+"""Fail-closed pre-flight for benchmark runs.
 
 The failure this exists to prevent: condor's ``.mcp.json`` declares
 ``mcp-hummingbot`` with no CLI args, so the MCP server's own settings chain falls
@@ -23,7 +23,7 @@ from typing import Any
 
 import httpx
 
-from config import bench_mode, condor_path, staging_config
+from config import condor_path, staging_config
 from bench.mcp_provider import (
     LiveWiringError,
     build_mcp_configs,
@@ -48,7 +48,6 @@ class Check:
 
 @dataclass
 class HealthReport:
-    mode: str
     api_url: str | None
     server_name: str | None
     allow_mutating: bool
@@ -73,7 +72,6 @@ class HealthReport:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "mode": self.mode,
             "api_url": self.api_url,
             "server_name": self.server_name,
             "allow_mutating": self.allow_mutating,
@@ -95,21 +93,13 @@ class HealthReport:
 async def check_staging(*, timeout: float = 10.0) -> HealthReport:
     """Probe the live target and return a verdict per check. Never raises."""
     staging = staging_config()
-    mode = bench_mode()
     report = HealthReport(
-        mode=mode,
         api_url=None,
         server_name=str(staging["server_name"]),
         allow_mutating=bool(staging["allow_mutating"]),
     )
 
-    if mode != "live":
-        report.checks.append(
-            Check("mode", True, "mock mode — mock_mcp/ servers, no staging needed")
-        )
-        return report
-
-    # 1. condor checkout — live wiring comes from its _shared.py
+    # 1. condor checkout — the MCP wiring comes from its _shared.py
     repo = condor_path()
     report.checks.append(
         Check(
@@ -167,7 +157,7 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
     # 4. THE fail-closed check: the URL the subprocess is actually launched with
     #    must be the staging URL, exactly. No prefix matching, no localhost hop.
     try:
-        configs = build_mcp_configs("live", agent_slug=None, server_name=server_name)
+        configs = build_mcp_configs(agent_slug=None, server_name=server_name)
         resolved = effective_api_url(configs)
     except LiveWiringError as exc:
         report.checks.append(Check("mcp_url_matches", False, str(exc)))
@@ -411,8 +401,8 @@ def assert_ready(*, mutating: bool = False, timeout: float = 10.0) -> HealthRepo
     """Run the pre-flight and raise ``StagingUnhealthy`` unless it passes.
 
     ``mutating=True`` additionally requires ``BENCH_ALLOW_MUTATING`` and the
-    mutating-only checks. Call this before the first case of a live run, and
-    again per mutating case (cheap: only the sync checks re-resolve).
+    mutating-only checks. Call this before the first case of a run, and again per
+    mutating case (cheap: only the sync checks re-resolve).
     """
     report = asyncio.run(check_staging(timeout=timeout))
     _raise_unless_ready(report, mutating=mutating)
@@ -427,9 +417,6 @@ async def a_assert_ready(*, mutating: bool = False, timeout: float = 10.0) -> He
 
 
 def _raise_unless_ready(report: HealthReport, *, mutating: bool) -> None:
-    if report.mode != "live":
-        return
-
     if mutating and not report.allow_mutating:
         raise StagingUnhealthy(
             "This case mutates staging state but BENCH_ALLOW_MUTATING is not true. "
@@ -447,7 +434,7 @@ def _raise_unless_ready(report: HealthReport, *, mutating: bool) -> None:
 
 def format_report(report: HealthReport) -> str:
     """Human-readable pre-flight summary for the CLI."""
-    head = f"staging pre-flight — mode={report.mode}"
+    head = "staging pre-flight"
     if report.api_url:
         head += f" url={report.api_url}"
     lines = [head]

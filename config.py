@@ -13,21 +13,8 @@ RESULTS_DIR = ROOT / "results"
 SUITES_DIR = ROOT / "suites"
 ENVIRONMENTS_DIR = SUITES_DIR / "environments"
 
-# Mock MCP server script — path relative to this file, works in both
-# editable installs (pip install -e .) and regular installs.
-MOCK_MCP_SCRIPT = ROOT / "mock_mcp" / "server.py"
-
 BASELINE_MODEL = os.environ.get("BENCH_BASELINE_MODEL", "anthropic:claude-sonnet-5")
 JUDGE_MODEL = os.environ.get("BENCH_JUDGE_MODEL", "claude-sonnet-5")
-
-
-# ── Execution mode ─────────────────────────────────────────────────────────────
-# "live" runs against a staging hummingbot-api through condor's real MCP servers;
-# "mock" runs the offline mock_mcp/ servers (CI, drift checks, no staging).
-def bench_mode() -> str:
-    """Resolved execution mode. Read per call so tests/dashboard can override."""
-    mode = (os.environ.get("BENCH_MODE") or "mock").strip().lower()
-    return mode if mode in ("live", "mock") else "mock"
 
 
 def condor_path() -> Path | None:
@@ -35,7 +22,7 @@ def condor_path() -> Path | None:
 
     Falls back to a sibling ../condor checkout, which is how the repos are laid
     out in development. Returns None when neither resolves to a real checkout,
-    so live mode can fail with a clear message instead of an ImportError.
+    so the wiring can fail with a clear message instead of an ImportError.
 
     Set CONDOR_PATH explicitly if more than one condor clone exists on the
     machine. The fallback cannot tell them apart, and it is normal for one clone
@@ -102,7 +89,7 @@ def condor_checkout_state() -> dict[str, object]:
 
 
 def condor_loaded_paths(*, shared_loaded: bool = False) -> dict[str, str | None]:
-    """Paths the live wiring would / did resolve against the current checkout.
+    """Paths the MCP wiring would / did resolve against the current checkout.
 
     When ``shared_loaded`` is True, also report the module file that
     ``load_condor_shared`` actually imported (proves subprocess isolation).
@@ -152,7 +139,6 @@ def build_run_pin(
     run_group_id: str | None = None,
     case_ids: list[str] | None = None,
     models: list[str] | None = None,
-    mode: str | None = None,
     risk_ceiling: str | None = None,
     include_in_matrix: bool = False,
     shared_loaded: bool = False,
@@ -191,7 +177,6 @@ def build_run_pin(
         },
         "case_ids": list(case_ids or []),
         "models": list(models or []),
-        "mode": mode or bench_mode(),
         "risk_ceiling": risk_ceiling,
         "allow_mutating": bool(staging["allow_mutating"]),
     }
@@ -233,9 +218,9 @@ def condor_checkout_label() -> str:
     )
 
 
-# ── Staging environment (live mode) ────────────────────────────────────────────
+# ── Staging environment ────────────────────────────────────────────────────────
 def staging_config() -> dict[str, object]:
-    """Staging identifiers for live runs, read fresh from the environment."""
+    """Staging identifiers for benchmark runs, read fresh from the environment."""
     return {
         "api_url": (os.environ.get("HUMMINGBOT_API_URL") or "").rstrip("/"),
         # Alias used by the fail-closed check. Defaults to HUMMINGBOT_API_URL so a
@@ -264,35 +249,15 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 # ── Composite score weights ────────────────────────────────────────────────────
-# Mock mode: the historical weights. Tool params and live validity can't be
-# judged against canned responses, so they carry no weight here.
-SCORE_WEIGHTS_MOCK = {
-    "answer_quality": 0.50,
-    "tool_accuracy": 0.30,
-    "tool_params": 0.00,
-    "live_validity": 0.00,
-    "latency_score": 0.20,
-}
-
-# Live mode: real API responses make param correctness and response shape
-# meaningful, so tool-name F1 gives up weight to them.
-SCORE_WEIGHTS_LIVE = {
+# Real API responses make param correctness and response shape meaningful, so
+# tool-name F1 shares weight with them rather than carrying the tool signal alone.
+SCORE_WEIGHTS = {
     "answer_quality": 0.45,
     "tool_accuracy": 0.20,
     "tool_params": 0.15,
     "live_validity": 0.10,
     "latency_score": 0.10,
 }
-
-# Backwards-compatible alias: existing callers (and tests) that import
-# SCORE_WEIGHTS get the mock profile, which is what they were written against.
-SCORE_WEIGHTS = SCORE_WEIGHTS_MOCK
-
-
-def score_weights(mode: str | None = None) -> dict[str, float]:
-    """Weight profile for a mode. Unknown modes fall back to mock."""
-    return SCORE_WEIGHTS_LIVE if (mode or bench_mode()) == "live" else SCORE_WEIGHTS_MOCK
-
 
 # Latency floor: even the slowest model gets at least this score
 LATENCY_FLOOR = 0.1

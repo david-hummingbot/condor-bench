@@ -1,10 +1,10 @@
 """condor-bench dashboard backend.
 
 Endpoints:
-  GET  /api/config            judge key status + resolved execution mode
+  GET  /api/config            judge key status + resolved staging target
   GET  /api/providers         provider catalog
   GET  /api/provider-models   probe OpenAI-compat /v1/models
-  GET  /api/staging           live-mode pre-flight report (fail-closed checks)
+  GET  /api/staging           staging pre-flight report (fail-closed checks)
   GET  /api/datasets          case counts by layer / domain / risk level
   POST /api/runs              start benchmark run (returns run_id)
   GET  /api/runs              list completed + active runs
@@ -156,33 +156,25 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.cleanup import teardown
     from bench.client import case_input_text, run_case
     from bench.dataset import case_prompt_map, filter_cases, is_mutating, load_all_cases
-    from bench.mcp_provider import mode_banner
+    from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.scorer import score_case
-    from config import bench_mode, build_run_pin, staging_config
+    from config import build_run_pin, staging_config
 
     state = _active_runs[run_id]
     state["status"] = "running"
 
-    # Mode is process-wide state (BENCH_MODE), so a run that overrides it must put
-    # it back — otherwise the next run inherits a mode nobody selected.
-    mode_backup = os.environ.get("BENCH_MODE")
-    if req.mode:
-        os.environ["BENCH_MODE"] = req.mode
-    mode = bench_mode()
-
     try:
-        if mode == "live":
-            # Fail closed before the first case, not per case: a run that would
-            # trade on the wrong API must not start at all.
-            from bench.staging_health import a_assert_ready
+        # Fail closed before the first case, not per case: a run that would trade
+        # on the wrong API must not start at all.
+        from bench.staging_health import a_assert_ready
 
-            await a_assert_ready(mutating=False)
+        await a_assert_ready(mutating=False)
 
-        # Live mode without BENCH_ALLOW_MUTATING can only run read-only cases.
-        # Reported, because it changes which domains end up with enough evidence.
+        # Without BENCH_ALLOW_MUTATING only read-only cases run. Reported, because
+        # it changes which domains end up with enough evidence.
         max_risk = None
-        if mode == "live" and not staging_config()["allow_mutating"]:
+        if not staging_config()["allow_mutating"]:
             max_risk = "read_only"
 
         all_cases = load_all_cases()
@@ -213,8 +205,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             "total": total,
             "models": len(req.models),
             "cases_per_model": len(cases),
-            "mode": mode,
-            "mode_banner": mode_banner(),
+            "target_banner": target_banner(),
             "risk_ceiling": max_risk,
             "skipped_by_risk": len(all_cases) - len(cases) if max_risk else 0,
         })
@@ -254,22 +245,21 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     sc_dict: dict = {}
                     response = ""
                     try:
-                        result = await run_case(case, norm_key, mode=mode)
+                        result = await run_case(case, norm_key)
                         baseline = store.load(case.id)
                         baseline_latency = baseline.latency_s if baseline else result.latency_s
-                        sc = await score_case(case, result, baseline_latency, mode=mode)
+                        sc = await score_case(case, result, baseline_latency)
                         sc_dict = sc.as_dict()
                         sc_dict["question"] = question
                         response = result.response
                         scorecards.append(sc)
                         responses[case.id] = response
 
-                        if mode == "live" and is_mutating(case):
+                        if is_mutating(case):
                             report = await teardown(
                                 result,
                                 norm_key,
                                 agent_slug=getattr(case, "agent_slug", None),
-                                mode=mode,
                             )
                             if not report.clean:
                                 await _emit(run_id, {
@@ -302,9 +292,8 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                         run_type="adhoc",
                         case_ids=[c.id for c in cases],
                         models=[norm_key],
-                        mode=mode,
                         risk_ceiling=max_risk,
-                        shared_loaded=mode == "live",
+                        shared_loaded=True,
                     )
                     run_dir = save_run(
                         norm_key,
@@ -335,10 +324,6 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
         state["status"] = "failed"
         await _emit(run_id, {"type": "run_done", "status": "failed", "error": str(exc)})
     finally:
-        if mode_backup is None:
-            os.environ.pop("BENCH_MODE", None)
-        else:
-            os.environ["BENCH_MODE"] = mode_backup
         for q in list(state.get("listeners", [])):
             await q.put(None)
 
@@ -357,7 +342,6 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
     from bench.client import run_consult
     from bench.reporter import save_run
     from bench.scorer import score as do_score
-    from config import bench_mode
 
     state = _custom_runs[run_id]
     state["status"] = "running"
@@ -365,21 +349,16 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
     # Unique case id shared across all models in this prompt run so the Runs
     # page groups them together and the case file has a meaningful name.
     cp_case_id = f"cp_{run_id}"
-    mode_backup = os.environ.get("BENCH_MODE")
-    if req.mode:
-        os.environ["BENCH_MODE"] = req.mode
-    mode = bench_mode()
 
     try:
-        if mode == "live":
-            # An ad-hoc prompt is still a live agent with real tools attached, and
-            # nothing constrains what it decides to call. It gets the same
-            # fail-closed pre-flight a benchmark run does.
-            from bench.staging_health import a_assert_ready
+        # An ad-hoc prompt is still a real agent with live tools attached, and
+        # nothing constrains what it decides to call. It gets the same fail-closed
+        # pre-flight a benchmark run does.
+        from bench.staging_health import a_assert_ready
 
-            await a_assert_ready(mutating=False)
+        await a_assert_ready(mutating=False)
 
-        await _emit_custom(run_id, {"type": "started", "total": len(req.models), "mode": mode})
+        await _emit_custom(run_id, {"type": "started", "total": len(req.models)})
         store = BaselineStore()
 
         for model_cfg in req.models:
@@ -400,9 +379,7 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
                     req.question,
                     norm_key,
                     extra_turns=req.turns,
-                    mock_tools=req.mock_tools,
                     agent_slug=req.agent_slug,
-                    mode=mode,
                 )
 
                 baseline = store.load(cp_case_id)
@@ -415,7 +392,6 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
                     expected,
                     baseline_latency,
                     expected_tool_params=req.expected_tool_params or None,
-                    mode=mode,
                     domain="custom_prompt",
                 )
                 sc.category = "custom-prompt"
@@ -428,8 +404,7 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
                     run_type="custom_prompt",
                     case_ids=[cp_case_id],
                     models=[norm_key],
-                    mode=mode,
-                    shared_loaded=mode == "live",
+                    shared_loaded=True,
                 )
                 pin["prompt_question"] = req.question[:300]
                 run_dir = save_run(
@@ -477,12 +452,6 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
         state["status"] = "failed"
         await _emit_custom(run_id, {"type": "done", "status": "failed", "error": str(exc)})
     finally:
-        # BENCH_MODE is process-wide; a prompt run that overrode it must put it back
-        # or the next run inherits a mode nobody selected.
-        if mode_backup is None:
-            os.environ.pop("BENCH_MODE", None)
-        else:
-            os.environ["BENCH_MODE"] = mode_backup
         for q in list(state.get("listeners", [])):
             await q.put(None)
 
@@ -512,14 +481,13 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.get("/api/config")
 async def get_config():
-    from bench.mcp_provider import mode_banner
-    from config import bench_mode, condor_path, staging_config
+    from bench.mcp_provider import target_banner
+    from config import condor_path, staging_config
 
     staging = staging_config()
     return {
         "judge_key_configured": _judge_key_configured(),
-        "mode": bench_mode(),
-        "mode_banner": mode_banner(),
+        "target_banner": target_banner(),
         "condor_path": str(condor_path()) if condor_path() else None,
         "staging": {
             "api_url": staging["api_url"],
@@ -541,7 +509,6 @@ async def get_staging_health():
     except Exception as exc:
         # A crash in the checker itself must not read as "staging is fine".
         return {
-            "mode": "live",
             "ok": False,
             "mutating_ok": False,
             "api_url": None,
@@ -586,7 +553,7 @@ async def get_datasets():
 
 
 @app.get("/api/matrix")
-async def get_matrix(mode: str | None = None, rebuild: bool = True):
+async def get_matrix(rebuild: bool = True):
     """Model × domain/tool matrix.
 
     Rebuilt from results on request by default: a cached matrix.json goes stale the
@@ -600,7 +567,7 @@ async def get_matrix(mode: str | None = None, rebuild: bool = True):
         if cached:
             return cached
 
-    data = build_matrix(mode=mode)
+    data = build_matrix()
     if not data["models"]:
         raise HTTPException(404, "No benchmark runs found yet.")
     save_matrix(data)
@@ -609,7 +576,6 @@ async def get_matrix(mode: str | None = None, rebuild: bool = True):
 
 @app.get("/api/routing")
 async def get_routing(
-    mode: str | None = None,
     min_pass_rate: float = 0.80,
     min_cases: int = 3,
     prefer_lower_tokens: bool = False,
@@ -619,7 +585,6 @@ async def get_routing(
     from bench.routing import generate, save_routing
 
     matrix_data, routing = generate(
-        mode=mode,
         min_pass_rate=min_pass_rate,
         min_cases=min_cases,
         prefer_lower_tokens=prefer_lower_tokens,
@@ -695,8 +660,6 @@ class RunRequest(BaseModel):
     layers: list[str] | None = None
     consult_only: bool = False
     tick_only: bool = False
-    # "live" | "mock" | None (leave BENCH_MODE as configured)
-    mode: str | None = None
 
 
 class CustomPromptRequest(BaseModel):
@@ -704,12 +667,10 @@ class CustomPromptRequest(BaseModel):
     turns: list[str] = []
     expected_tools: list[str] = []  # empty → no ground truth, tool accuracy skipped
     expected_tool_params: dict = {}
-    mock_tools: dict = {}
     models: list[ModelConfig]
     # None keeps the run chat-scoped (a production consult); a slug scopes condor's
     # memory/skill tools to that agent's own stores.
     agent_slug: str | None = None
-    mode: str | None = None
 
 
 @app.post("/api/runs")

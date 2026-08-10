@@ -10,12 +10,6 @@ const LAYER_OPTS = [
   { id: 'agent', label: 'Agents', hint: 'Layer 3 — routed to a specific Condor assistant' },
 ]
 
-const MODE_OPTS = [
-  { id: '', label: 'Use configured' },
-  { id: 'mock', label: 'Mock' },
-  { id: 'live', label: 'Live' },
-]
-
 export default function RunConfig({ onRunStarted, isRunning, config }) {
   const [providers, setProviders] = useState([])
   // cfg: { [providerId]: { enabled, apiKey, baseUrl, loadedModels, selectedModel, loading, error } }
@@ -23,7 +17,6 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   const [layers, setLayers] = useState([])   // empty = all layers
   const [domain, setDomain] = useState('')
   const [category, setCategory] = useState('')
-  const [mode, setMode] = useState('')
   const [datasets, setDatasets] = useState(null)
   const [staging, setStaging] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -115,7 +108,6 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
         layers: layers.length ? layers : null,
         domain: domain || null,
         category: category.trim() || null,
-        mode: mode || null,
       }
       const data = await createRun(body)
       onRunStarted(data.run_id)
@@ -127,11 +119,8 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   }
 
   const modelCount = enabledModels().length
-  const effectiveMode = mode || config?.mode || 'mock'
   const stagingBlocked =
-    effectiveMode === 'live' &&
-    staging?.mode === 'live' &&
-    (staging.checks || []).some(c => c.blocking && !c.ok && !c.mutating_only)
+    (staging?.checks || []).some(c => c.blocking && !c.ok && !c.mutating_only)
 
   // Case count for the current filters, so "start" isn't a guess about scope.
   const selectedCases = (() => {
@@ -328,28 +317,15 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
       <div className="card">
         <div className="card-title">Options</div>
 
-        <div className="field" style={{ marginBottom: 14 }}>
-          <label>Execution mode</label>
-          <div className="radio-group">
-            {MODE_OPTS.map(o => (
-              <button
-                key={o.id}
-                className={`radio-btn ${mode === o.id ? 'active' : ''}`}
-                onClick={() => setMode(o.id)}
-              >
-                {o.label}
-                {o.id === '' && config?.mode ? ` (${config.mode})` : ''}
-              </button>
-            ))}
-          </div>
-          {effectiveMode === 'live' && !staging?.allow_mutating && (
+        {!staging?.allow_mutating && (
+          <div className="field" style={{ marginBottom: 14 }}>
             <span className="run-meta">
               BENCH_ALLOW_MUTATING is off, so mutating and destructive cases are skipped —
               that changes which domains end up with enough evidence to earn a routing
               recommendation.
             </span>
-          )}
-        </div>
+          </div>
+        )}
 
         <div className="field" style={{ marginBottom: 14 }}>
           <label>Dataset layers {layers.length === 0 && <span className="run-meta">(all)</span>}</label>
@@ -412,12 +388,11 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
               <>
                 <strong>{modelCount}</strong> model{modelCount !== 1 ? 's' : ''}
                 {selectedCases != null && <> × <strong>{selectedCases}</strong> case{selectedCases !== 1 ? 's' : ''}</>}
-                {' '}in <strong>{effectiveMode}</strong> mode
               </>
             )}
           {stagingBlocked && (
             <span className="error-text" style={{ marginLeft: 12 }}>
-              staging pre-flight is failing — a live run will refuse to start
+              staging pre-flight is failing — the run will refuse to start
             </span>
           )}
           {submitError && (
