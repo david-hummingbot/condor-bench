@@ -298,7 +298,14 @@ class BenchmarkResult:
 
         parts: list[str] = []
         for i, turn in enumerate(self.turns, 1):
-            lines = [f"--- Turn {i} ---"]
+            # The response comes first, before the tool log. The judge's prompt caps
+            # the transcript it is shown (answer_quality._build_prompt), and the tool
+            # log is unbounded in practice: eight calls at the digest budget produce
+            # ~13k characters, which pushed the answer past the cap entirely. The
+            # judge then reported "cuts off before any actual response" and scored a
+            # complete, correct answer 0.15. Ordering the answer first makes that
+            # failure impossible however long the tool log runs.
+            lines = [f"--- Turn {i} ---", f"Response:\n{turn.response}"]
             if not turn.tool_calls:
                 lines.append("Tools called: (none)")
             else:
@@ -324,7 +331,6 @@ class BenchmarkResult:
                             for idx, ln in enumerate(digest_lines)
                         )
                         lines.append(indented)
-            lines.append(f"Response:\n{turn.response}")
             parts.append("\n".join(lines))
 
         if self.error:

@@ -65,11 +65,18 @@ def is_infra_failure(text: str) -> bool:
     return any(p.search(text) for p in _INFRA_PATTERNS)
 
 
+# How much of the transcript the judge is shown. The transcript leads with the
+# model's answer (see BenchmarkResult.transcript_for_judge) precisely because this
+# cap exists: a long tool log must never be able to push the answer out of view.
+JUDGE_INPUT_CHARS = 8000
+JUDGE_QUESTION_CHARS = 2500
+
+
 def _build_prompt(input_text: str, actual_output: str) -> str:
     return (
         f"{_CRITERIA}\n\n"
-        f"USER INPUT:\n{input_text[:2500]}\n\n"
-        f"ACTUAL RESPONSE / TRANSCRIPT:\n{actual_output[:8000]}\n\n"
+        f"USER INPUT:\n{input_text[:JUDGE_QUESTION_CHARS]}\n\n"
+        f"ACTUAL RESPONSE / TRANSCRIPT:\n{actual_output[:JUDGE_INPUT_CHARS]}\n\n"
         "Rate this response. Reply with JSON only, no markdown:\n"
         '{"score": <float 0.0–1.0>, "reason": "<one sentence>"}'
     )

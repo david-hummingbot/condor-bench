@@ -131,3 +131,69 @@ def test_json_list_digest_summarises_length():
     digest = digest_tool_output("get_market_data", candles)
     assert "500 items" in digest
     assert len(digest) < 500
+
+
+# ── the answer must reach the judge ────────────────────────────────────────────
+def test_the_answer_survives_a_tool_log_longer_than_the_judge_window():
+    """The failure this ordering exists to prevent.
+
+    The judge is shown only the first JUDGE_INPUT_CHARS of the transcript. With the
+    tool log first, eight calls at the digest budget produced ~13k characters and
+    pushed the answer past the cap — the judge reported "cuts off before any actual
+    response" and scored a complete, correct answer 0.15.
+    """
+    from bench.client import BenchmarkResult, TurnResult
+    from metrics.answer_quality import JUDGE_INPUT_CHARS
+
+    calls = [
+        {"tool": f"manage_x{i}", "args": {"action": "list"}, "tool_call_id": str(i)}
+        for i in range(8)
+    ]
+    responses = [
+        {"tool": f"manage_x{i}", "tool_call_id": str(i), "output": "y" * 4000}
+        for i in range(8)
+    ]
+    result = BenchmarkResult(
+        case_id="x",
+        model="m",
+        turns=[
+            TurnResult(
+                response="THE ACTUAL ANSWER",
+                tool_calls=calls,
+                latency_s=1.0,
+                tool_responses=responses,
+            )
+        ],
+    )
+    transcript = result.transcript_for_judge()
+    assert len(transcript) > JUDGE_INPUT_CHARS, (
+        "premise gone: this transcript no longer overflows the judge window"
+    )
+    assert "THE ACTUAL ANSWER" in transcript[:JUDGE_INPUT_CHARS], (
+        "the answer was pushed out of the judge's view by the tool log"
+    )
+
+
+def test_tool_log_still_reaches_the_judge_for_short_transcripts():
+    """Reordering must not cost the grounding check on ordinary cases."""
+    from bench.client import BenchmarkResult, TurnResult
+    from metrics.answer_quality import JUDGE_INPUT_CHARS
+
+    result = BenchmarkResult(
+        case_id="x",
+        model="m",
+        turns=[
+            TurnResult(
+                response="mid price is 65000",
+                tool_calls=[{"tool": "get_market_data", "args": {}, "tool_call_id": "1"}],
+                latency_s=1.0,
+                tool_responses=[
+                    {"tool": "get_market_data", "tool_call_id": "1", "output": '{"mid_price": 65000}'}
+                ],
+            )
+        ],
+    )
+    visible = result.transcript_for_judge()[:JUDGE_INPUT_CHARS]
+    assert "mid price is 65000" in visible
+    assert "get_market_data" in visible
+    assert "65000" in visible
