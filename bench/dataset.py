@@ -76,6 +76,10 @@ class ConsultCase:
     # Ground truth for the real-API metrics
     expected_tool_params: dict[str, dict] = field(default_factory=dict)
     live_expected: dict[str, Any] = field(default_factory=dict)
+    # Tools that must NOT be called. A consult can be a restraint test — "ask me
+    # what you need before building anything" — and without this the ban is
+    # unscoreable, because the scorer reads it off the case by name.
+    expected_no_calls: list[str] = field(default_factory=list)
     risk_level: str = "read_only"
     agent_slug: str | None = None
     # Ordered build phases. When present, tool accuracy is scored by
@@ -238,6 +242,7 @@ def load_consult_cases(path: Path | None = None) -> list[ConsultCase]:
             turns=data.get("turns", []),
             steps=data.get("steps", []),
             post_conditions=data.get("post_conditions", {}),
+            expected_no_calls=data.get("expected_no_calls", []),
             tags=data.get("tags", []),
             type=data.get("type", "consult"),
             expected_tool_params=data.get("expected_tool_params", {}),

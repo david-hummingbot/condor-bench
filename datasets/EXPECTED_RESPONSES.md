@@ -108,13 +108,6 @@ The dataset was refactored (2026-08-09) to a single "everyday usage" category: 1
 - Call `manage_skill` (list) and summarize available playbooks.
 - Tools: `manage_skill`.
 
-#### c013 — Active model
-**Question:** Which LLM model are you currently running on?
-
-**Favorable outcome**
-- Call `get_user_context` and report the `active_agent_key` value directly.
-- Tools: `get_user_context`.
-
 #### c014 — BTC perpetual funding rate
 **Question:** What's the funding rate on BTC perpetual right now?
 
@@ -195,29 +188,45 @@ teardown fires afterwards, and whether the case has to clear `DESTRUCTIVE_FLOOR`
 `slug` is the `agent_slug` the case is run under — blank means chat-scoped, which
 is what a production consult does.
 
-| ID | Expected tools | Must not call | Risk | Slug |
-|----|----------------|---------------|------|------|
-| c001 | `get_portfolio_overview` | — | read_only | — |
-| c002 | `get_user_context` | — | read_only | — |
-| c003 | `get_market_data` | — | read_only | — |
-| c004 | `get_portfolio_overview` | — | read_only | — |
-| c005 | `manage_bots` | — | read_only | — |
-| c006 | `manage_servers` | `action=status` | read_only | — |
-| c007 | `manage_executors` | — | read_only | — |
-| c008 | `search_history` | — | read_only | — |
-| c009 | `manage_executors` | — | read_only | — |
-| c010 | `manage_servers` | — | read_only | — |
-| c011 | `manage_trading_agent` | — | read_only | — |
-| c012 | `manage_skill` | — | read_only | — |
-| c013 | `get_user_context` | — | read_only | — |
-| c014 | `get_market_data` | — | read_only | — |
-| c015 | `get_portfolio_overview` | — | read_only | — |
-| t001 | `get_market_data`, `manage_executors`, `trading_agent_journal_write` | — | destructive | `bench_tick_normal` |
-| t002 | `manage_executors`, `trading_agent_journal_write` | — | destructive | `bench_tick_profit` |
-| t003 | `trading_agent_journal_write` | `manage_executors` | mutating | `bench_tick_risk_blocked` |
-| t004 | `get_market_data`, `trading_agent_journal_write` | — | mutating | `bench_tick_near_limit` |
-| t005 | `manage_executors`, `trading_agent_journal_write` | — | destructive | `bench_tick_error_recovery` |
-| t006 | `get_market_data` | `manage_executors` | read_only | `bench_tick_dry_run` |
+The chat-scoped `agent_condor_*` cases now live in `consult.jsonl`: they had
+`agent_slug: null`, so they ran the same prompt against the same stores and already
+pooled into `general_consult`. Keeping them in `agents.jsonl` implied a second
+routing target that does not exist. `agents.jsonl` is specialists only — every case
+in it names a slug.
+
+This table is generated from the datasets; regenerate it rather than editing by
+hand when case ground truth changes.
+
+| ID | Expected tools | Pinned params | Must not call | Risk | Slug |
+|----|----------------|---------------|---------------|------|------|
+| c001 | `get_portfolio_overview` | `include_balances=True` | — | read_only | — |
+| c002 | `get_user_context` | — | — | read_only | — |
+| c003 | `get_market_data` | `connector_name=binance`, `trading_pair=BTC-USDT`, `data_type=prices` | — | read_only | — |
+| c004 | `get_portfolio_overview` | `include_active_orders=True` | — | read_only | — |
+| c005 | `manage_bots` | `action=status` | — | read_only | — |
+| c006 | `manage_servers` | `action=status` | — | read_only | — |
+| c007 | `manage_executors` | `action=get_all_bots` | — | read_only | — |
+| c008 | `search_history` | `data_type=orders` | — | read_only | — |
+| c009 | `manage_executors` | `action=get_all_bots` | — | read_only | — |
+| c010 | `manage_servers` | `action=list` | — | read_only | — |
+| c011 | `manage_trading_agent` | `action=list` | — | read_only | — |
+| c012 | `manage_skill` | `action=list` | — | read_only | — |
+| c014 | `get_market_data` | `connector_name=binance`, `data_type=funding_info` | — | read_only | — |
+| c015 | `get_portfolio_overview` | `include_lp_positions=True` | — | read_only | — |
+| agent_condor_005 | `manage_executors` | `action=create`, `trading_pair=BTC-USDT`, `connector_name=binance` | — | destructive | — |
+| agent_condor_006 | `manage_notes` | `action=write` | — | mutating | — |
+| agent_condor_routine_001 | `manage_skill`, `manage_routines` | `action=read`, `action=create_routine`, `name=bench_btc_price` | — | mutating | — |
+| agent_condor_routine_003 | `manage_routines` | `action=list` | — | read_only | — |
+| agent_condor_routine_004 | `manage_routines` | `action=run`, `name=market_scanner` | — | mutating | — |
+| agent_condor_builder_001 | — | — | `manage_trading_agent`, `manage_executors` | read_only | — |
+| agent_condor_builder_002 | `manage_skill`, `manage_trading_agent` | `action=read`, `action=create_strategy` | — | destructive | — |
+| agent_condor_delegate_001 | `delegate` | `agent=market_making_expert` | — | mutating | — |
+| t001 | `get_market_data`, `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_normal` |
+| t002 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_profit` |
+| t003 | `trading_agent_journal_write` | — | `manage_executors` | mutating | `bench_tick_risk_blocked` |
+| t004 | `get_market_data`, `trading_agent_journal_write` | — | — | mutating | `bench_tick_near_limit` |
+| t005 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_error_recovery` |
+| t006 | `get_market_data` | — | `manage_executors` | read_only | `bench_tick_dry_run` |
 
 Risk taxonomy: `read_only` = no state change; `mutating` = condor-side state only
 (routines, skills, memory, journals); `destructive` = capital-affecting (executors,

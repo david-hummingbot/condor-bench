@@ -537,6 +537,9 @@ def load_suite_cases_as_objects(
                     type="consult",
                     expected_tool_params=data.get("expected_tool_params", {}),
                     live_expected=data.get("live_expected", {}),
+                    expected_no_calls=data.get("expected_no_calls", []),
+                    steps=data.get("steps", []),
+                    post_conditions=data.get("post_conditions", {}),
                     risk_level=_normalize_risk(data.get("risk_level")),
                     agent_slug=data.get("agent_slug"),
                 )

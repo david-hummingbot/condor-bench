@@ -148,3 +148,58 @@ def test_scoped_specialists_get_a_smaller_grant_than_the_full_surface():
         pytest.skip("market_making_expert declares no tools upstream")
     assert 0 < len(grant) < 24, f"expected a scoped grant, got {len(grant)}"
     assert "get_market_data" in grant
+
+
+# ── dataset shape after the consult/agent merge ────────────────────────────────
+def test_agents_dataset_holds_only_agent_scoped_cases():
+    """A null-slug case in agents.jsonl implies a routing target that isn't real.
+
+    Those cases run the generic Condor prompt against the chat's stores and pool
+    into `general_consult` regardless, so filing them as agent cases only inflated
+    one domain while looking like coverage of another. They live in consult.jsonl.
+    """
+    import json
+
+    from config import DATASETS_DIR
+
+    rows = [
+        json.loads(line)
+        for line in (DATASETS_DIR / "agents.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    unscoped = [r["id"] for r in rows if not r.get("agent_slug")]
+    assert not unscoped, (
+        f"agents.jsonl has chat-scoped cases: {unscoped}. Move them to "
+        "consult.jsonl — agent_slug: null is general_consult work."
+    )
+
+
+def test_every_dataset_slug_is_real_or_a_declared_bench_synthetic():
+    """A typo'd slug silently becomes its own domain with no config key.
+
+    `market_making_exprt` would produce a routing domain nothing can apply, and it
+    would look like a legitimately unmet domain rather than a dataset bug. Tick
+    slugs are bench-owned by design and prefixed `bench_`.
+    """
+    from bench.dataset import load_all_cases
+    from config import condor_path
+
+    repo = condor_path()
+    if repo is None or not (repo / "agents").is_dir():
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+
+    shipped = {p.name for p in (repo / "agents").iterdir() if p.is_dir()}
+    bogus = sorted(
+        {
+            slug
+            for c in load_all_cases()
+            if (slug := getattr(c, "agent_slug", None))
+            and not slug.startswith("bench_")
+            and slug not in shipped
+        }
+    )
+    assert not bogus, (
+        f"cases name agent slugs condor does not ship: {bogus}. condor's roster is "
+        f"{sorted(shipped)}. A slug that doesn't exist becomes a phantom routing "
+        "domain with no config key."
+    )
