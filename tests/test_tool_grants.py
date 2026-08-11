@@ -203,3 +203,46 @@ def test_every_dataset_slug_is_real_or_a_declared_bench_synthetic():
         f"{sorted(shipped)}. A slug that doesn't exist becomes a phantom routing "
         "domain with no config key."
     )
+
+
+def test_specialist_cases_only_expect_tools_the_agent_is_granted():
+    """An out-of-grant expectation is unpassable, not just optimistic.
+
+    With allowed_tools live, a market_making_expert case is offered MM's 8 tools.
+    Expecting `manage_trading_agent` — which MM does not declare — means the model
+    is asked for a tool it cannot see: tool accuracy is 0 by construction and the
+    row is then flagged as a harness artifact and dropped from routing. The domain
+    silently loses a case instead of failing loudly.
+
+    This is the authoring-time counterpart to the runtime `offered_tools` check in
+    bench.scorer: catch it in the dataset, not in the results.
+    """
+    from bench.dataset import load_all_cases
+
+    from config import condor_path
+
+    if condor_path() is None:
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+
+    broken: dict[str, list[str]] = {}
+    for case in load_all_cases():
+        slug = getattr(case, "agent_slug", None)
+        if not slug:
+            continue
+        grant = load_agent_tools(slug)
+        if not grant:
+            continue  # full-surface agent, or a bench synthetic with no AGENT.md
+        expected = set(
+            getattr(case, "expected_tools", None)
+            or getattr(case, "expected_tool_calls", None)
+            or []
+        )
+        outside = sorted(expected - set(grant))
+        if outside:
+            broken[case.id] = outside
+
+    assert not broken, (
+        "cases expect tools their agent is not granted, so the model can never "
+        f"call them: {broken}. Either rewrite the case against the grant, or check "
+        "whether condor's AGENT.md tools: list actually changed."
+    )

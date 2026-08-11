@@ -55,12 +55,17 @@
   "tool_journal_write_001": "You are agent bench-journal-probe on tick 7. Write a journal entry of type decision recording that you held position because spread was below target.",
   "tool_journal_read_001": "Read back the journal for agent bench-journal-probe and summarise its last few decisions.",
   "agent_market_making_expert_001": "Check current BTC-USDT conditions on Binance and tell me whether a 0.2% grid spread is too tight right now. Do not create anything.",
-  "agent_market_making_expert_002": "Read your pmm_config_playbook skill, then create a risk-managed PMM strategy for ETH-USDT on Binance: $500 total, max 5% drawdown. Show me the config before starting anything.",
-  "agent_market_making_expert_003": "Show me all my existing trading strategies and which LLM each one is assigned.",
+  "agent_market_making_expert_002": "Read your pmm_config_playbook skill, then look at the controller configs I already have and tell me what you would change to run PMM on ETH-USDT with $500 and a 5% max drawdown. Give me the parameters — do not create or deploy anything yet.",
+  "agent_market_making_expert_003": "List the bots I currently have deployed and tell me which of them look like market-making setups rather than directional ones, and why.",
   "agent_directional_trader_001": "Pull 1h candles for ETH-USDT on Binance and tell me whether the current trend supports a long entry. Do not deploy anything.",
   "agent_directional_trader_002": "Read your backtesting skill and summarise how you would validate a new directional controller before deploying it.",
   "agent_solana_dex_lp_expert_001": "Find the deepest SOL-USDC pools on Solana and tell me which one you would provide liquidity into. Do not open a position.",
   "agent_solana_dex_lp_expert_002": "Read your lp_range_config skill, then explain what range you would set for a SOL-USDC CLMM position given current volatility, and how impermanent loss factors in.",
   "agent_delta_neutral_funding_001": "Check the current BTC perpetual funding rate on Binance and tell me whether a delta-neutral funding capture is worth opening right now. Do not open anything.",
-  "agent_delta_neutral_funding_002": "Show me my current perpetual positions and tell me whether my book is actually delta neutral right now."
+  "agent_delta_neutral_funding_002": "Show me my current perpetual positions and tell me whether my book is actually delta neutral right now.",
+  "agent_market_making_expert_004": "Look at my portfolio for BTC-USDT and tell me whether inventory has skewed far enough that I should stop quoting both sides. Do not change anything.",
+  "agent_market_making_expert_005": "Show me the executors running across my bots and flag any that look stuck or that I should pause quoting on. Do not stop anything.",
+  "agent_market_making_expert_006": "Pull my recent fills on Binance and tell me whether I am getting adversely selected — filled mostly on one side into a move — or whether the spread is holding up.",
+  "agent_market_making_expert_007": "Read your capital_allocation skill and tell me how you would size a new PMM position given the balances I have available right now.",
+  "agent_market_making_expert_008": "Remember this for future PMM work: on binance_perpetual I want at least 0.08% take-profit after fees, never tighter."
 }
