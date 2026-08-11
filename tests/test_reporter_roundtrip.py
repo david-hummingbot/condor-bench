@@ -89,6 +89,53 @@ def test_summary_counts_capped_post_condition_failures_separately(tmp_path, monk
     assert summary["harness_artifacts"] == 1
 
 
+def test_case_records_persist_the_dataset_layer(tmp_path, monkeypatch):
+    """The dashboard's Type column reads ``case_type`` and cannot re-derive it.
+
+    Chat-scoped Layer 3 cases were merged into the consult layer but kept their
+    ``agent_*`` ids, so the dashboard's old id-prefix guess labelled eight of them
+    "agent". The layer has to travel with the result.
+    """
+    import bench.reporter as reporter
+
+    monkeypatch.setattr(reporter, "RESULTS_DIR", tmp_path)
+
+    run_dir = save_run(
+        "m",
+        [_card("agent_condor_005", 0.9, case_type="consult")],
+        {},
+        "smoke04",
+    )
+    record = json.loads((run_dir / "cases" / "agent_condor_005.json").read_text())
+    assert record["case_type"] == "consult"
+
+
+def test_score_case_stamps_the_layer_off_the_case(monkeypatch):
+    """score_case is the only place that knows a case's layer; it must record it."""
+    import asyncio
+
+    from bench.client import BenchmarkResult, TurnResult
+    from bench.dataset import ConsultCase
+    from bench.scorer import score_case
+
+    case = ConsultCase(id="agent_condor_005", question="q", type="consult")
+    result = BenchmarkResult(
+        case_id=case.id,
+        model="m",
+        turns=[TurnResult(response="an answer", tool_calls=[], latency_s=1.0)],
+        wiring={"api_url": "http://localhost:8000"},
+    )
+
+    async def fake_quality(self, *_a, **_k):
+        return 1.0, "fine"
+
+    monkeypatch.setattr(
+        "metrics.answer_quality.AnswerQualityMetric.a_score", fake_quality
+    )
+    card = asyncio.run(score_case(case, result, 1.0))
+    assert card.case_type == "consult"
+
+
 def test_saved_run_is_readable_by_the_report_loader(tmp_path, monkeypatch):
     """A run that saves but cannot be loaded back is still a lost run."""
     import bench.reporter as reporter

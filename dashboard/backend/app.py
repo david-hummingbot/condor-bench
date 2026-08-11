@@ -472,7 +472,17 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.get("/api/config")
 async def get_config():
     from bench.mcp_provider import target_banner
-    from config import condor_path, staging_config
+    from config import (
+        DESTRUCTIVE_FLOOR,
+        DOMAIN_PASS_RATE,
+        MIN_TOOL_CASES,
+        PASS_THRESHOLD,
+        POST_CONDITION_FAIL_CAP,
+        SCORE_WEIGHTS,
+        TOOL_PASS_RATE,
+        condor_path,
+        staging_config,
+    )
 
     staging = staging_config()
     return {
@@ -482,6 +492,18 @@ async def get_config():
         "staging": {
             "api_url": staging["api_url"],
             "server_name": staging["server_name"],
+        },
+        # Served rather than hardcoded in the UI: a weights change in config.py has
+        # to move the labels the dashboard prints, or the breakdown it shows stops
+        # describing the composite it is breaking down.
+        "scoring": {
+            "weights": SCORE_WEIGHTS,
+            "pass_threshold": PASS_THRESHOLD,
+            "domain_pass_rate": DOMAIN_PASS_RATE,
+            "tool_pass_rate": TOOL_PASS_RATE,
+            "min_tool_cases": MIN_TOOL_CASES,
+            "destructive_floor": DESTRUCTIVE_FLOOR,
+            "post_condition_fail_cap": POST_CONDITION_FAIL_CAP,
         },
     }
 
@@ -524,10 +546,19 @@ async def get_datasets():
             out[str(key(case))] = out.get(str(key(case)), 0) + 1
         return dict(sorted(out.items()))
 
+    # layer × domain, so the run form can size a filter that names both. Summing
+    # one axis and ignoring the other is how "3 models × 8 cases" became a number
+    # unrelated to what the run actually executed.
+    layer_domains: dict[str, dict[str, int]] = {}
+    for case in cases:
+        bucket = layer_domains.setdefault(str(case.type), {})
+        bucket[str(case.domain)] = bucket.get(str(case.domain), 0) + 1
+
     return {
         "total": len(cases),
         "layers": _tally(lambda c: c.type),
         "domains": _tally(lambda c: c.domain),
+        "layer_domains": {k: dict(sorted(v.items())) for k, v in sorted(layer_domains.items())},
         "routing_domains": sorted(
             {c.domain for c in cases if is_routing_domain(c.domain)}
         ),

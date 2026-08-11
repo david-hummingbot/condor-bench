@@ -32,7 +32,8 @@ check-drift:
 	              tests/test_matrix_routing.py::test_config_keys_name_agents_condor_actually_ships \
 	              tests/test_matrix_routing.py::test_every_shipped_agent_has_a_routing_domain -q
 
-# Regenerate the dashboard's case_id → question map after editing a dataset.
+# Regenerate the dashboard's case_id → question and case_id → layer maps after
+# editing a dataset. tests/test_dashboard_case_maps.py fails until you do.
 case-prompts:
 	uv run python scripts/sync_case_prompts.py
 

@@ -109,5 +109,26 @@ export function orderedModels(matrix) {
   })
 }
 
+/**
+ * "0.45 quality · 0.20 tools · …" from the weights the backend actually scores with
+ * (/api/config → scoring.weights). Read rather than hardcoded: a weights change in
+ * config.py has to move the label, or the breakdown stops describing the composite
+ * it sits next to. Empty string when config hasn't loaded yet.
+ */
+const WEIGHT_LABELS = {
+  answer_quality: 'quality',
+  tool_accuracy: 'tools',
+  tool_params: 'params',
+  live_validity: 'live validity',
+  latency_score: 'latency',
+}
+
+export function weightSummary(weights) {
+  return Object.entries(weights || {})
+    .filter(([, w]) => w > 0)
+    .map(([k, w]) => `${w} ${WEIGHT_LABELS[k] || k}`)
+    .join(' · ')
+}
+
 export const isToolDomain = (d) => typeof d === 'string' && d.startsWith('tool:')
 export const stripToolPrefix = (d) => (isToolDomain(d) ? d.slice(5) : d)

@@ -246,13 +246,17 @@ export default function ModelRouter() {
 
           <div className="card">
             <div className="card-title">Criteria used</div>
+            {/* Only thresholds the backend actually reports. A "Mode" chip lived here
+                until the mock execution path was removed; with nothing left to read it
+                printed a hardcoded "any" on every run. */}
             <div className="score-chips">
               <Chip label="Min pass rate" value={fmtPct(routing.criteria?.min_pass_rate)} />
               <Chip label="Min cases" value={String(routing.criteria?.min_cases)} />
               <Chip label="Case pass bar" value={String(routing.criteria?.pass_threshold)} />
               <Chip label="Destructive floor" value={String(routing.criteria?.destructive_floor)} />
+              <Chip label="Tool bar" value={fmtPct(routing.criteria?.min_tool_pass_rate)} />
+              <Chip label="Min tool cases" value={String(routing.criteria?.min_tool_cases)} />
               <Chip label="Prefer lower tokens" value={routing.routing_options?.prefer_lower_tokens ? 'on' : 'off'} />
-              <Chip label="Mode" value={routing.mode || 'any'} />
             </div>
           </div>
         </>

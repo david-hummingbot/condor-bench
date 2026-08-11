@@ -2,7 +2,7 @@ import {
   Bar, BarChart, CartesianGrid, Cell,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
-import { buildLeaderboard, fmtLatency, fmtScore, scoreColor, shortModel } from '../utils.js'
+import { buildLeaderboard, fmtLatency, fmtScore, scoreColor, shortModel, weightSummary } from '../utils.js'
 import PageHeader from './PageHeader.jsx'
 import EmptyState from './EmptyState.jsx'
 
@@ -10,7 +10,7 @@ const DESCRIPTION =
   'Overall model ranking by composite score, using each model’s most recent run. ' +
   'For per-domain strengths rather than one number per model, use the Matrix.'
 
-export default function Leaderboard({ runs, onNavigate }) {
+export default function Leaderboard({ runs, onNavigate, config }) {
   if (!runs || runs.length === 0) {
     return (
       <div>
@@ -29,6 +29,7 @@ export default function Leaderboard({ runs, onNavigate }) {
   }
 
   const rows = buildLeaderboard(runs)
+  const weights = weightSummary(config?.scoring?.weights)
   const chartData = rows.map(r => ({
     model: shortModel(r.model),
     fullModel: r.model,
@@ -81,6 +82,16 @@ export default function Leaderboard({ runs, onNavigate }) {
 
       <div className="card">
         <div className="card-title">Score breakdown — latest run per model</div>
+        {/* Every weighted component, not a subset: params and live validity are 0.25
+            of the composite between them, so leaving them out made the columns fail
+            to add up to the number they sit next to. */}
+        {weights && (
+          <div className="matrix-note" style={{ marginTop: -8, marginBottom: 14 }}>
+            Composite = {weights}. A metric shows “—” when no case in the run pinned
+            ground truth for it; its weight moves to answer quality rather than
+            scoring zero.
+          </div>
+        )}
         <table className="lb-table">
           <thead>
             <tr>
@@ -89,6 +100,8 @@ export default function Leaderboard({ runs, onNavigate }) {
               <th>Composite</th>
               <th>Quality</th>
               <th>Tools</th>
+              <th>Params</th>
+              <th>Live validity</th>
               <th>Latency score</th>
               <th>Avg latency</th>
               <th>Cases</th>
@@ -110,6 +123,12 @@ export default function Leaderboard({ runs, onNavigate }) {
                 </td>
                 <td style={{ color: scoreColor(r.tool_accuracy_avg) }}>
                   {fmtScore(r.tool_accuracy_avg)}
+                </td>
+                <td style={{ color: scoreColor(r.tool_params_avg) }}>
+                  {fmtScore(r.tool_params_avg)}
+                </td>
+                <td style={{ color: scoreColor(r.live_validity_avg) }}>
+                  {fmtScore(r.live_validity_avg)}
                 </td>
                 <td style={{ color: scoreColor(r.latency_score_avg) }}>
                   {fmtScore(r.latency_score_avg)}

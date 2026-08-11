@@ -123,16 +123,20 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
     (staging?.checks || []).some(c => c.blocking && !c.ok)
 
   // Case count for the current filters, so "start" isn't a guess about scope.
+  // Counted off the layer × domain cross-tab: summing one axis and ignoring the
+  // other reported a domain's whole case count for "this domain, tick layer only".
+  // The category filter is free text applied server-side, so it is not counted here.
   const selectedCases = (() => {
     if (!datasets) return null
-    if (!layers.length && !domain) return datasets.total
+    const cross = datasets.layer_domains || {}
+    const wantedLayers = layers.length ? layers : Object.keys(cross)
     let n = 0
-    for (const [d, count] of Object.entries(datasets.domains || {})) {
-      if (domain && d !== domain) continue
-      n += count
-    }
-    if (!domain) {
-      n = layers.reduce((acc, l) => acc + (datasets.layers?.[l] || 0), 0)
+    for (const layer of wantedLayers) {
+      const byDomain = cross[layer] || {}
+      for (const [d, count] of Object.entries(byDomain)) {
+        if (domain && d !== domain) continue
+        n += count
+      }
     }
     return n
   })()
@@ -378,6 +382,9 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
               <>
                 <strong>{modelCount}</strong> model{modelCount !== 1 ? 's' : ''}
                 {selectedCases != null && <> × <strong>{selectedCases}</strong> case{selectedCases !== 1 ? 's' : ''}</>}
+                {category.trim() && (
+                  <span className="run-meta"> · before the category filter narrows it</span>
+                )}
               </>
             )}
           {stagingBlocked && (

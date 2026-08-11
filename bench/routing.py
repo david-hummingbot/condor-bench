@@ -389,7 +389,7 @@ def _tool_gaps(
     which is the signal to keep that specific capability on a cloud model.
 
     **This axis uses its own bar, not the domain one.** ``min_tool_pass_rate``
-    (0.67) asks "can the model drive this tool at all", where the domain bar (0.80)
+    (0.65) asks "can the model drive this tool at all", where the domain bar (0.80)
     asks "can it own this job". Reusing 0.80 here made every affordable sample size
     require a perfect score, so one unlucky case marked a tool unhandled — see the
     note on ``TOOL_PASS_RATE``.

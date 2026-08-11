@@ -218,9 +218,11 @@ export default function App() {
           />
         )}
         {key === 'results/runs' && (
-          <Runs runs={runs} onRefresh={refreshRuns} onNavigate={navigate} />
+          <Runs runs={runs} onRefresh={refreshRuns} onNavigate={navigate} config={config} />
         )}
-        {key === 'results/leaderboard' && <Leaderboard runs={runs} onNavigate={navigate} />}
+        {key === 'results/leaderboard' && (
+          <Leaderboard runs={runs} onNavigate={navigate} config={config} />
+        )}
         {key === 'results/matrix' && <Matrix />}
         {key === 'results/router' && <ModelRouter />}
         {key === 'settings' && <Settings onSaved={refreshConfig} />}

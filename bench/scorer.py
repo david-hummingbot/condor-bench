@@ -64,6 +64,11 @@ class ScoreCard:
     baseline_latency_s: float
     error: str | None = None
     category: str = ""
+    # Dataset layer this case came from (consult | tick | tool | agent). Persisted
+    # because the dashboard cannot infer it: chat-scoped Layer 3 cases were merged
+    # into the consult layer but kept their `agent_*` ids, so an id-prefix guess
+    # labels eight of them as the wrong layer.
+    case_type: str = ""
     tool_calls: list[str] = field(default_factory=list)
     # The tools this case is evidence about. Persisted so the per-tool matrix can
     # be rebuilt from results alone, without re-reading (a possibly since-edited)
@@ -107,6 +112,7 @@ class ScoreCard:
             "case_id": self.case_id,
             "model": self.model,
             "category": self.category,
+            "case_type": self.case_type,
             "domain": self.domain,
             "risk_level": self.risk_level,
             "answer_quality": round(self.answer_quality, 4),
@@ -399,4 +405,5 @@ async def score_case(
         risk_level=getattr(case, "risk_level", "read_only"),
     )
     card.category = getattr(case, "category", "")
+    card.case_type = getattr(case, "type", "")
     return card
