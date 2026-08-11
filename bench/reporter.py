@@ -154,18 +154,24 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
     with_validity = [s for s in valid if s.live_validity is not None]
     infra_excluded = sum(1 for sc in scorecards if sc.error and str(sc.error).startswith("infra:"))
     artifacts = [sc for sc in scorecards if sc.harness_artifact]
-    modes = {sc.mode for sc in scorecards}
+    unbuilt = [sc for sc in scorecards if getattr(sc, "post_condition_failed", None)]
 
     return {
         "model": model,
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "mode": modes.pop() if len(modes) == 1 else "mixed",
         "cases_total": len(scorecards),
         "cases_scored": len(valid),
         "infra_excluded": infra_excluded,
         "harness_artifacts": len(artifacts),
         "harness_artifact_cases": [
             {"case_id": sc.case_id, "reason": sc.harness_artifact} for sc in artifacts
+        ],
+        # Cases that asserted an end state which was not there afterwards. Counted
+        # separately from harness artifacts: those are excluded from routing, these
+        # are genuine model failures whose composite was capped.
+        "post_condition_failures": len(unbuilt),
+        "post_condition_failure_cases": [
+            {"case_id": sc.case_id, "reason": sc.post_condition_failed} for sc in unbuilt
         ],
         "answer_quality_avg": round(_mean([s.answer_quality for s in valid]), 4) if valid else 0.0,
         "tool_accuracy_avg": round(_mean([s.tool_accuracy for s in with_tools]), 4)
