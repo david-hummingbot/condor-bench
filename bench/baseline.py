@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from config import BASELINE_DIR, BASELINE_MODEL
+from bench.cleanup import teardown
 from bench.client import run_case
+from bench.dataset import is_mutating
 
 
 @dataclass
@@ -91,6 +93,22 @@ async def generate_baselines(
         except Exception as exc:
             console.print(f"[red]Error on {case.id}: {exc}[/red]")
             continue
+
+        # Same teardown a scored run does. Baselining the whole dataset executes
+        # every mutating and destructive case, so without this it leaves behind
+        # executors, routines, strategies and leverage changes — and the pre-flight's
+        # orphaned-executor check is blocking, so one baseline run would lock out
+        # every run after it.
+        if is_mutating(case):
+            report = await teardown(
+                result, model, agent_slug=getattr(case, "agent_slug", None)
+            )
+            for row in report.failed + report.manual:
+                console.print(
+                    f"      [yellow]left behind: {row.get('tool')} "
+                    f"{row.get('identifier')} — "
+                    f"{row.get('error') or row.get('reason', 'manual')}[/yellow]"
+                )
 
         ts = datetime.now(timezone.utc).isoformat()
         record = BaselineRecord(
