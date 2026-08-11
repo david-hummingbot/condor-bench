@@ -41,6 +41,24 @@ _CREATE_ACTIONS = {
     "manage_controllers": {"create", "save"},
 }
 
+# Tools that *set state* rather than create a named thing. They have no `action`
+# argument, so _CREATE_ACTIONS cannot see them and _UNDO's (action, identifier)
+# shape cannot reverse them. Their teardown is a second call to the same tool with a
+# baseline value, carrying through whichever scoping args the original used.
+#
+# Leverage is the case that matters: it is real account state with no delete, so
+# without this a sweep ratchets leverage upward across models and never comes back.
+_STATE_SETTERS: dict[str, dict[str, Any]] = {
+    "set_account_position_mode_and_leverage": {
+        "leverage": 1,
+        "position_mode": "ONEWAY",
+    },
+}
+
+# Args carried from the original call into the reset, so it lands on the same
+# account / connector / pair rather than resetting something else.
+_STATE_SETTER_SCOPE = ("account_name", "connector_name", "trading_pair")
+
 _UNDO = {
     "manage_executors": ("manage_executors", "stop"),
     "manage_routines": ("manage_routines", "delete"),
@@ -110,6 +128,24 @@ def created_resources(result: Any) -> list[CreatedResource]:
     found: list[CreatedResource] = []
     for call in getattr(result, "tool_calls", []) or []:
         tool = normalize_tool_name(str(call.get("tool", "")))
+        if tool in _STATE_SETTERS:
+            setter_args = call.get("args") or {}
+            if isinstance(setter_args, dict):
+                found.append(
+                    CreatedResource(
+                        tool=tool,
+                        action="set",
+                        # The pair (or the connector when no pair was given) is what
+                        # the reset has to target; there is no created id here.
+                        identifier=str(
+                            setter_args.get("trading_pair")
+                            or setter_args.get("connector_name")
+                            or "account"
+                        ),
+                        args=setter_args,
+                    )
+                )
+            continue
         creating = _CREATE_ACTIONS.get(tool)
         if not creating:
             continue
@@ -189,6 +225,8 @@ async def teardown(
 
     for resource in reversible:
         undo = _UNDO.get(resource.tool)
+        if undo is None and resource.tool in _STATE_SETTERS:
+            undo = (resource.tool, "set")
         if undo is None:
             report.manual.append({**resource.as_dict(), "reason": "no undo action defined"})
             continue
@@ -214,6 +252,15 @@ async def teardown(
 
 
 def _undo_args(resource: CreatedResource, undo_action: str) -> dict[str, Any]:
+    if resource.tool in _STATE_SETTERS:
+        # A reset, not a delete: baseline values plus the original scoping args. No
+        # `action` key — the tool does not take one.
+        args = dict(_STATE_SETTERS[resource.tool])
+        for key in _STATE_SETTER_SCOPE:
+            if resource.args.get(key):
+                args[key] = resource.args[key]
+        return args
+
     args: dict[str, Any] = {"action": undo_action}
     if resource.tool == "manage_executors":
         args["executor_id"] = resource.identifier

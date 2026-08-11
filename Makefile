@@ -1,5 +1,6 @@
 .PHONY: install test-suite baseline test report dashboard dashboard-dev clean \
         tool-surface check-drift case-prompts staging-check register-server \
+        clean-journals \
         sweep matrix route
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
@@ -45,6 +46,13 @@ staging-check:
 # Register BENCH_SERVER_NAME in condor's config.yml from bench's env vars.
 register-server:
 	uv run python scripts/register_bench_server.py
+
+# Clear the journals of bench's own probe agents (bench_* slugs only).
+# There is no MCP journal delete, so per-case teardown cannot reverse a journal
+# write — entries accumulate across sweeps until journal_read responses crowd the
+# judge's context. Dry-run by default; APPLY=1 to delete.
+clean-journals:
+	uv run python scripts/clean_probe_journals.py $(if $(APPLY),--apply,)
 
 # ── Workflow ───────────────────────────────────────────────────────────────────
 
