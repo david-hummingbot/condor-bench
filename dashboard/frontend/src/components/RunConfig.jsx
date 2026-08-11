@@ -120,7 +120,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
 
   const modelCount = enabledModels().length
   const stagingBlocked =
-    (staging?.checks || []).some(c => c.blocking && !c.ok && !c.mutating_only)
+    (staging?.checks || []).some(c => c.blocking && !c.ok)
 
   // Case count for the current filters, so "start" isn't a guess about scope.
   const selectedCases = (() => {
@@ -316,16 +316,6 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
 
       <div className="card">
         <div className="card-title">Options</div>
-
-        {!staging?.allow_mutating && (
-          <div className="field" style={{ marginBottom: 14 }}>
-            <span className="run-meta">
-              BENCH_ALLOW_MUTATING is off, so mutating and destructive cases are skipped —
-              that changes which domains end up with enough evidence to earn a routing
-              recommendation.
-            </span>
-          </div>
-        )}
 
         <div className="field" style={{ marginBottom: 14 }}>
           <label>Dataset layers {layers.length === 0 && <span className="run-meta">(all)</span>}</label>

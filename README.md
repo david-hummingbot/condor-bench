@@ -236,7 +236,9 @@ Three layers.
 | `datasets/models.json` | — | Model registry with parameter counts. Drives sweep order and routing. |
 
 Every case carries a `risk_level` (`read_only` / `mutating` / `destructive`) and
-resolves to a **routing domain**. Layer 2 domains are namespaced `tool:` because a
+resolves to a **routing domain**. Every risk level runs — the level drives teardown
+and the destructive score floor, not whether the case is allowed; isolation comes
+from pointing at a test-connector-only API. Layer 2 domains are namespaced `tool:` because a
 capability bucket like "market data" is not something Condor can route to — those
 verdicts come out of the matrix's per-tool axis instead.
 

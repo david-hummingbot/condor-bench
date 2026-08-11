@@ -190,10 +190,10 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 
 ## Quick reference — Layer 1 expected tools
 
-`risk` gates whether a case runs at all in live mode: without
-`BENCH_ALLOW_MUTATING`, only `read_only` cases run. `slug` is the `agent_slug` the
-case is run under — blank means chat-scoped, which is what a production consult
-does.
+`risk` no longer gates whether a case runs — every case runs. It decides whether
+teardown fires afterwards, and whether the case has to clear `DESTRUCTIVE_FLOOR`.
+`slug` is the `agent_slug` the case is run under — blank means chat-scoped, which
+is what a production consult does.
 
 | ID | Expected tools | Must not call | Risk | Slug |
 |----|----------------|---------------|------|------|

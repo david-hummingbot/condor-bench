@@ -38,12 +38,8 @@ async def _run(job: dict) -> dict:
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.scorer import score_case
-    from bench.suites import (
-        load_suite_cases_as_objects,
-        risk_ceiling,
-        suite_prompt_map,
-    )
-    from config import build_run_pin, staging_config
+    from bench.suites import load_suite_cases_as_objects, suite_prompt_map
+    from config import build_run_pin
 
     suite_id = job["suite_id"]
     environment_id = job["environment_id"]
@@ -56,18 +52,15 @@ async def _run(job: dict) -> dict:
     from bench.staging_health import StagingUnhealthy, assert_ready
 
     try:
-        assert_ready(mutating=False)
+        assert_ready()
     except StagingUnhealthy as exc:
         return {"ok": False, "error": str(exc), "member_run_id": member_run_id}
 
-    max_risk = risk_ceiling()
-    cases = load_suite_cases_as_objects(
-        suite_id, case_ids=case_ids, max_risk=max_risk
-    )
+    cases = load_suite_cases_as_objects(suite_id, case_ids=case_ids)
     if not cases:
         return {
             "ok": False,
-            "error": "No suite cases matched (empty suite or risk ceiling filtered all)",
+            "error": "No suite cases matched (empty suite or unknown case ids)",
             "member_run_id": member_run_id,
         }
 
@@ -117,13 +110,11 @@ async def _run(job: dict) -> dict:
         run_group_id=run_group_id,
         case_ids=[c.id for c in cases],
         models=[model],
-        risk_ceiling=max_risk,
         include_in_matrix=include_in_matrix,
         shared_loaded=True,
     )
     pin["target_banner"] = target_banner()
     pin["parent_run_id"] = job.get("parent_run_id")
-    pin["allow_mutating"] = bool(staging_config()["allow_mutating"])
 
     run_dir = save_run(
         model,

@@ -159,7 +159,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.scorer import score_case
-    from config import build_run_pin, staging_config
+    from config import build_run_pin
 
     state = _active_runs[run_id]
     state["status"] = "running"
@@ -169,13 +169,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
         # on the wrong API must not start at all.
         from bench.staging_health import a_assert_ready
 
-        await a_assert_ready(mutating=False)
-
-        # Without BENCH_ALLOW_MUTATING only read-only cases run. Reported, because
-        # it changes which domains end up with enough evidence.
-        max_risk = None
-        if not staging_config()["allow_mutating"]:
-            max_risk = "read_only"
+        await a_assert_ready()
 
         all_cases = load_all_cases()
         layers = None
@@ -191,7 +185,6 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             domain=req.domain,
             category=req.category,
             layers=layers,
-            max_risk=max_risk,
         )
         if not cases:
             raise ValueError("No cases matched the selected filters.")
@@ -206,8 +199,6 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             "models": len(req.models),
             "cases_per_model": len(cases),
             "target_banner": target_banner(),
-            "risk_ceiling": max_risk,
-            "skipped_by_risk": len(all_cases) - len(cases) if max_risk else 0,
         })
 
         done_count = 0
@@ -292,7 +283,6 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                         run_type="adhoc",
                         case_ids=[c.id for c in cases],
                         models=[norm_key],
-                        risk_ceiling=max_risk,
                         shared_loaded=True,
                     )
                     run_dir = save_run(
@@ -356,7 +346,7 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
         # pre-flight a benchmark run does.
         from bench.staging_health import a_assert_ready
 
-        await a_assert_ready(mutating=False)
+        await a_assert_ready()
 
         await _emit_custom(run_id, {"type": "started", "total": len(req.models)})
         store = BaselineStore()
@@ -492,7 +482,6 @@ async def get_config():
         "staging": {
             "api_url": staging["api_url"],
             "server_name": staging["server_name"],
-            "allow_mutating": staging["allow_mutating"],
         },
     }
 
@@ -509,17 +498,14 @@ async def get_staging_health():
         # A crash in the checker itself must not read as "staging is fine".
         return {
             "ok": False,
-            "mutating_ok": False,
             "api_url": None,
             "server_name": None,
-            "allow_mutating": False,
             "checks": [
                 {
                     "name": "preflight",
                     "ok": False,
                     "detail": f"pre-flight itself failed: {exc}",
                     "blocking": True,
-                    "mutating_only": False,
                 }
             ],
         }

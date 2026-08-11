@@ -56,14 +56,6 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
     if len(case_sets) > 1:
         differences.append("case_set")
 
-    ceilings = {m.get("risk_ceiling") for m in members}
-    if len(ceilings) > 1:
-        differences.append("risk_ceiling")
-
-    mutating = {bool(m.get("allow_mutating")) for m in members}
-    if len(mutating) > 1:
-        differences.append("allow_mutating")
-
     if any(int(m.get("harness_artifacts") or 0) > 0 for m in members):
         differences.append("harness_artifacts")
 

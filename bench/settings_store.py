@@ -94,14 +94,6 @@ SETTINGS_FIELDS: list[dict[str, Any]] = [
         "secret": True,
     },
     {
-        "key": "BENCH_ALLOW_MUTATING",
-        "label": "Allow mutating cases",
-        "group": "Staging",
-        "secret": False,
-        "choices": ["false", "true"],
-        "hint": "Only enable after staging-check passes. Default false.",
-    },
-    {
         "key": "TELEGRAM_TOKEN",
         "label": "Telegram bot token",
         "group": "Staging",

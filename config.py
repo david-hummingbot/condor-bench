@@ -139,7 +139,6 @@ def build_run_pin(
     run_group_id: str | None = None,
     case_ids: list[str] | None = None,
     models: list[str] | None = None,
-    risk_ceiling: str | None = None,
     include_in_matrix: bool = False,
     shared_loaded: bool = False,
 ) -> dict[str, object]:
@@ -158,7 +157,6 @@ def build_run_pin(
         and commit != "unknown"
         and surface_commit != commit
     )
-    staging = staging_config()
     pin: dict[str, object] = {
         "run_type": run_type,
         "suite_id": suite_id,
@@ -177,8 +175,6 @@ def build_run_pin(
         },
         "case_ids": list(case_ids or []),
         "models": list(models or []),
-        "risk_ceiling": risk_ceiling,
-        "allow_mutating": bool(staging["allow_mutating"]),
     }
     return pin
 
@@ -245,15 +241,7 @@ def staging_config() -> dict[str, object]:
         "server_name": os.environ.get("BENCH_SERVER_NAME") or BENCH_SERVER_NAME,
         "chat_id": int(os.environ.get("BENCH_CHAT_ID") or BENCH_CHAT_ID),
         "user_id": int(os.environ.get("BENCH_USER_ID") or BENCH_USER_ID),
-        "allow_mutating": _env_flag("BENCH_ALLOW_MUTATING", False),
     }
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 # ── Composite score weights ────────────────────────────────────────────────────

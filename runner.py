@@ -38,23 +38,6 @@ def _resolve_layers(
     return None
 
 
-def _max_risk() -> tuple[str | None, str | None]:
-    """Risk ceiling for this run, plus a note when cases are being dropped.
-
-    Without ``BENCH_ALLOW_MUTATING`` a run is limited to read-only cases. That is
-    not a silent filter: it changes which domains have enough evidence to earn a
-    routing recommendation, so the caller is told.
-    """
-    from config import staging_config
-
-    if staging_config()["allow_mutating"]:
-        return None, None
-    return (
-        "read_only",
-        "BENCH_ALLOW_MUTATING unset — running read-only cases only",
-    )
-
-
 @app.command()
 def baseline(
     overwrite: bool = typer.Option(False, help="Regenerate existing baselines"),
@@ -87,12 +70,7 @@ def staging_check() -> None:
     report = asyncio.run(check_staging())
     console.print(format_report(report))
     if not report.ok:
-        console.print("\n[red]Blocking checks failed — live runs are refused.[/red]")
-        raise typer.Exit(1)
-    if report.allow_mutating and not report.mutating_ok:
-        console.print(
-            "\n[yellow]Read-only runs are allowed; mutating cases stay blocked.[/yellow]"
-        )
+        console.print("\n[red]Blocking checks failed — runs are refused.[/red]")
         raise typer.Exit(1)
     console.print("\n[green]Staging pre-flight passed.[/green]")
 
@@ -119,24 +97,20 @@ def test(
     from config import PASS_THRESHOLD, build_run_pin
 
     try:
-        assert_ready(mutating=False)
+        assert_ready()
     except StagingUnhealthy as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
-    max_risk, risk_note = _max_risk()
     cases = filter_cases(
         load_all_cases(),
         domain=domain,
         category=category,
         layers=_resolve_layers(consult_only, tick_only, layers),
-        max_risk=max_risk,
     )
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
         raise typer.Exit(1)
-    if risk_note:
-        console.print(f"[yellow]{risk_note}[/yellow]")
 
     store = BaselineStore()
     prompts = case_prompt_map()
@@ -158,7 +132,6 @@ def test(
         run_type="adhoc",
         case_ids=[c.id for c in cases],
         models=[model],
-        risk_ceiling=max_risk,
         shared_loaded=True,
     )
     run_dir = save_run(
@@ -250,7 +223,7 @@ def sweep(
     from config import PASS_THRESHOLD, build_run_pin
 
     try:
-        assert_ready(mutating=False)
+        assert_ready()
     except StagingUnhealthy as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
@@ -272,18 +245,14 @@ def sweep(
             m for m in registry if m.params_b is None or m.params_b <= max_params_b
         ]
 
-    max_risk, risk_note = _max_risk()
     cases = filter_cases(
         load_all_cases(),
         domain=domain,
         layers=_resolve_layers(False, False, layers),
-        max_risk=max_risk,
     )
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
         raise typer.Exit(1)
-    if risk_note:
-        console.print(f"[yellow]{risk_note}[/yellow]")
 
     store = BaselineStore()
     prompts = case_prompt_map()
@@ -304,8 +273,7 @@ def sweep(
             run_type="adhoc",
             case_ids=[c.id for c in cases],
             models=[entry.key],
-            risk_ceiling=max_risk,
-            shared_loaded=True,
+                shared_loaded=True,
         )
         pin["sweep"] = True
         run_dir = save_run(

@@ -18,11 +18,12 @@ case:
     ``bench/mcp_provider.py``).
 
 ``risk_level``
-    ``read_only`` | ``mutating`` | ``destructive``. Gates whether a case may run
-    against staging at all (``BENCH_ALLOW_MUTATING``) and raises the score bar
-    for destructive cases in routing. Unset defaults to ``read_only``, so a case
-    that *does* mutate must say so explicitly — the safe default is the one that
-    can't place an order.
+    ``read_only`` | ``mutating`` | ``destructive``. Every case runs — isolation is
+    the API instance's job, not a flag here. What the level still decides is the
+    score bar: ``destructive`` cases must clear ``DESTRUCTIVE_FLOOR`` before a
+    model can own the domain, and ``is_mutating`` decides whether teardown runs
+    after the case. Unset defaults to ``read_only``, so a case that *does* mutate
+    must say so explicitly or it will not be cleaned up.
 """
 from __future__ import annotations
 
@@ -342,14 +343,8 @@ def filter_cases(
     domain: str | None = None,
     category: str | None = None,
     layers: Iterable[str] | None = None,
-    max_risk: str | None = None,
 ) -> list[Case]:
-    """Apply the CLI/dashboard filters in one place.
-
-    ``max_risk`` keeps cases at or below a risk level in ``RISK_LEVELS`` order, so
-    ``max_risk="read_only"`` is how a run against a staging API without
-    ``BENCH_ALLOW_MUTATING`` drops the cases it isn't allowed to run.
-    """
+    """Apply the CLI/dashboard filters in one place."""
     out = list(cases)
     if layers:
         wanted = set(layers)
@@ -358,12 +353,4 @@ def filter_cases(
         out = [c for c in out if c.domain == domain]
     if category:
         out = [c for c in out if getattr(c, "category", "") == category]
-    if max_risk:
-        ceiling = RISK_LEVELS.index(_normalize_risk(max_risk))
-        out = [
-            c
-            for c in out
-            if RISK_LEVELS.index(_normalize_risk(getattr(c, "risk_level", None)))
-            <= ceiling
-        ]
     return out

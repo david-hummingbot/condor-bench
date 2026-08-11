@@ -315,8 +315,7 @@ def target_banner() -> str:
     """One-line description of the API a run will hit, for CLI/dashboard display."""
     staging = staging_config()
     url = staging["api_url"] or "(HUMMINGBOT_API_URL unset)"
-    mutating = "mutating allowed" if staging["allow_mutating"] else "read-only"
-    return f"{url} via server '{staging['server_name']}' ({mutating})"
+    return f"{url} via server '{staging['server_name']}'"
 
 
 def env_overlay_keys(cfg: dict) -> set[str]:

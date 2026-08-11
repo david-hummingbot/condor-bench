@@ -512,11 +512,9 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .staging-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .staging-pill { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 650; }
 .staging-pill.ready { background: rgba(39, 195, 110, 0.14); color: var(--green); }
-.staging-pill.partial { background: rgba(240, 180, 41, 0.14); color: var(--yellow); }
 .staging-pill.blocked { background: rgba(232, 64, 64, 0.14); color: var(--red); }
 .staging-pill.mock { background: var(--panel-2); color: var(--muted); }
 .staging-url { font-family: var(--mono); font-size: 12px; color: var(--text); }
-.staging-mutating { color: var(--yellow); }
 
 .staging-checks { margin-top: 14px; display: flex; flex-direction: column; gap: 2px; }
 .staging-check {
