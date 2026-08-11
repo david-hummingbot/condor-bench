@@ -233,6 +233,9 @@ class BenchmarkResult:
     usage: dict[str, Any] = field(default_factory=dict)
     # agent_slug / resolved URL / effective tool count for this case.
     wiring: dict[str, Any] = field(default_factory=dict)
+    # Post-condition probe rows (see bench/post_conditions.py). Empty when the case
+    # declares none; a row with score None means the probe could not run.
+    post_conditions: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def response(self) -> str:
@@ -595,27 +598,36 @@ async def run_case(case: Any, model: str) -> BenchmarkResult:
 
     One entry point so the CLI, the dashboard and the sweep runner cannot drift on
     which cases get an ``agent_slug`` or an assistant prompt.
+
+    Post-conditions are verified here rather than by the caller, which puts them
+    structurally before ``cleanup.teardown`` — teardown deletes exactly the
+    artefacts a post-condition asserts exist, so the ordering cannot be left to
+    each call site remembering it.
     """
+    slug = getattr(case, "agent_slug", None)
     if case.type == "tick":
         prompt = build_tick_prompt_for_case(case, model)
-        return await run_tick(
+        result = await run_tick(case.id, prompt, model, agent_slug=slug)
+    else:
+        expected = list(getattr(case, "expected_tools", []) or [])
+        result = await run_consult(
             case.id,
-            prompt,
+            case.question,
             model,
-            agent_slug=getattr(case, "agent_slug", None),
+            extra_turns=list(getattr(case, "turns", []) or []),
+            required_tools=expected or None,
+            agent_slug=slug,
+            instructions=load_assistant_prompt(slug) if slug else None,
         )
 
-    slug = getattr(case, "agent_slug", None)
-    expected = list(getattr(case, "expected_tools", []) or [])
-    return await run_consult(
-        case.id,
-        case.question,
-        model,
-        extra_turns=list(getattr(case, "turns", []) or []),
-        required_tools=expected or None,
-        agent_slug=slug,
-        instructions=load_assistant_prompt(slug) if slug else None,
-    )
+    conditions = getattr(case, "post_conditions", {}) or {}
+    if conditions and not result.error:
+        from bench.post_conditions import verify  # noqa: PLC0415
+
+        result.post_conditions = await verify(
+            conditions, model=model, agent_slug=slug
+        )
+    return result
 
 
 def case_input_text(case: Any) -> str:

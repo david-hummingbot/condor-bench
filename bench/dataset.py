@@ -78,6 +78,14 @@ class ConsultCase:
     live_expected: dict[str, Any] = field(default_factory=dict)
     risk_level: str = "read_only"
     agent_slug: str | None = None
+    # Ordered build phases. When present, tool accuracy is scored by
+    # metrics.tool_accuracy.score_phases instead of multiset F1 — see that
+    # function for why a build cannot be scored order-blind.
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    # Assertions checked against the API *after* the run, before teardown. Same
+    # shape as live_expected but the tool is called by bench, not the model:
+    # {"manage_routines": {"action": "list", "contains": ["bench_btc_price"]}}
+    post_conditions: dict[str, Any] = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -109,6 +117,14 @@ class TickCase:
     # the case id so a dataset that forgets the field still gets its own store
     # rather than silently borrowing the chat's.
     agent_slug: str | None = None
+    # Ordered build phases. When present, tool accuracy is scored by
+    # metrics.tool_accuracy.score_phases instead of multiset F1 — see that
+    # function for why a build cannot be scored order-blind.
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    # Assertions checked against the API *after* the run, before teardown. Same
+    # shape as live_expected but the tool is called by bench, not the model:
+    # {"manage_routines": {"action": "list", "contains": ["bench_btc_price"]}}
+    post_conditions: dict[str, Any] = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -169,6 +185,14 @@ class AgentCase:
     tags: list[str] = field(default_factory=list)
     category: str = "agent"
     type: str = "agent"
+    # Ordered build phases. When present, tool accuracy is scored by
+    # metrics.tool_accuracy.score_phases instead of multiset F1 — see that
+    # function for why a build cannot be scored order-blind.
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    # Assertions checked against the API *after* the run, before teardown. Same
+    # shape as live_expected but the tool is called by bench, not the model:
+    # {"manage_routines": {"action": "list", "contains": ["bench_btc_price"]}}
+    post_conditions: dict[str, Any] = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -212,6 +236,8 @@ def load_consult_cases(path: Path | None = None) -> list[ConsultCase]:
             category=data.get("category", ""),
             expected_tools=data.get("expected_tools", []),
             turns=data.get("turns", []),
+            steps=data.get("steps", []),
+            post_conditions=data.get("post_conditions", {}),
             tags=data.get("tags", []),
             type=data.get("type", "consult"),
             expected_tool_params=data.get("expected_tool_params", {}),
@@ -242,6 +268,8 @@ def load_tick_cases(path: Path | None = None) -> list[TickCase]:
                 tick_number=data.get("tick_number", 1),
                 expected_tool_calls=data.get("expected_tool_calls", []),
                 expected_no_calls=data.get("expected_no_calls", []),
+                steps=data.get("steps", []),
+                post_conditions=data.get("post_conditions", {}),
                 category=data.get("category", ""),
                 tags=data.get("tags", []),
                 expected_tool_params=data.get("expected_tool_params", {}),
@@ -293,6 +321,8 @@ def load_agent_cases(path: Path | None = None) -> list[AgentCase]:
             expected_no_calls=data.get("expected_no_calls", []),
             turns=data.get("turns", []),
             live_expected=data.get("live_expected", {}),
+            steps=data.get("steps", []),
+            post_conditions=data.get("post_conditions", {}),
             risk_level=_normalize_risk(data.get("risk_level")),
             tags=data.get("tags", []),
         )

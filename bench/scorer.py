@@ -21,11 +21,12 @@ from typing import Any
 
 from config import SCORE_WEIGHTS
 from bench.client import BenchmarkResult
+from bench.post_conditions import post_condition_score
 from metrics.answer_quality import AnswerQualityMetric, is_infra_failure
 from metrics.judge import JUDGE_USAGE
 from metrics.latency import LatencyMetric
 from metrics.live_validity import LiveValidityMetric, validity_breakdown
-from metrics.tool_accuracy import ToolAccuracyMetric
+from metrics.tool_accuracy import ToolAccuracyMetric, phase_breakdown, score_phases
 from metrics.tool_params import ToolParamMetric, param_breakdown
 
 _quality_metric = AnswerQualityMetric()
@@ -75,6 +76,8 @@ class ScoreCard:
     tool_call_details: list[dict[str, Any]] = field(default_factory=list)
     tool_param_detail: dict[str, Any] = field(default_factory=dict)
     live_validity_detail: dict[str, Any] = field(default_factory=dict)
+    # Per-phase results for cases that declare ordered steps; empty otherwise.
+    phase_detail: list[dict[str, Any]] = field(default_factory=list)
     # Set when the harness — not the model — is why this row is bad. Excluded
     # from routing so a misconfiguration can't become a model recommendation.
     harness_artifact: str | None = None
@@ -108,6 +111,7 @@ class ScoreCard:
             "tool_call_details": self.tool_call_details,
             "tool_param_detail": self.tool_param_detail,
             "live_validity_detail": self.live_validity_detail,
+            "phase_detail": self.phase_detail,
             "usage": self.usage,
             "judge_usage": self.judge_usage,
             "wiring": self.wiring,
@@ -147,6 +151,7 @@ async def score(
     expected_no_calls: list[str] | None = None,
     expected_tool_params: dict[str, dict] | None = None,
     live_expected: dict[str, Any] | None = None,
+    steps: list[dict] | None = None,
     domain: str = "",
     risk_level: str = "read_only",
 ) -> ScoreCard:
@@ -197,7 +202,15 @@ async def score(
     required = normalize_expected_tools(expected_tools)
     forbidden = list(expected_no_calls or [])
     tool_accuracy: float | None = None
-    if required is not None:
+    phase_detail: list[dict[str, Any]] = []
+    if steps:
+        # A case that declares ordered phases is scored on them instead of on
+        # multiset F1: F1 is order-blind (so building before reading the playbook
+        # scores full marks) and charges for retries (so recovering from a schema
+        # error looks the same as skipping a phase).
+        tool_accuracy = score_phases(tool_names, steps, forbidden or None)
+        phase_detail = phase_breakdown(tool_names, steps)
+    elif required is not None:
         tool_accuracy = _tool_metric.score(
             actual_tools=tool_names,
             expected_tools=required,
@@ -220,6 +233,19 @@ async def score(
     )
     validity_detail = validity_breakdown(result.tool_responses, live_expected)
 
+    # Post-conditions belong to live validity, not to a sixth weighted metric:
+    # both answer "did this actually work against the real API", one from the
+    # response the model saw and one from the state it left behind. Folding them
+    # keeps SCORE_WEIGHTS summing to 1.0 and needs no reweighting.
+    probe_score = post_condition_score(result.post_conditions)
+    if probe_score is not None:
+        live_validity = (
+            probe_score if live_validity is None else (live_validity + probe_score) / 2
+        )
+    validity_detail = dict(validity_detail or {})
+    if result.post_conditions:
+        validity_detail["post_conditions"] = result.post_conditions
+
     latency_score = _latency_metric.score(
         test_latency=result.latency_s,
         baseline_latency=baseline_latency_s,
@@ -239,6 +265,7 @@ async def score(
         answer_quality=answer_quality,
         answer_reason=answer_reason,
         tool_accuracy=tool_accuracy,
+        phase_detail=phase_detail,
         tool_params=tool_params,
         live_validity=live_validity,
         latency_score=latency_score,
@@ -322,6 +349,7 @@ async def score_case(
         expected_no_calls=list(getattr(case, "expected_no_calls", []) or []) or None,
         expected_tool_params=getattr(case, "expected_tool_params", {}) or None,
         live_expected=getattr(case, "live_expected", {}) or None,
+        steps=list(getattr(case, "steps", []) or []) or None,
         domain=getattr(case, "domain", ""),
         risk_level=getattr(case, "risk_level", "read_only"),
     )

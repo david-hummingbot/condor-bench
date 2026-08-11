@@ -73,6 +73,92 @@ class ToolAccuracyMetric:
         return any(_normalize(t) in actual_set for t in forbidden_tools)
 
 
+def score_phases(
+    actual_tools: list[str],
+    steps: list[dict],
+    forbidden_tools: list[str] | None = None,
+) -> float:
+    """Fraction of ordered phases satisfied, tolerant of extra calls.
+
+    Multiset F1 cannot score a build. It is order-blind, so "create the routine,
+    then read the playbook" scores 1.0 exactly like doing it the right way round;
+    and it charges for every extra call, so a model that hit a schema error and
+    retried correctly scores the same 0.667 as one that skipped a required phase
+    outright. Those two behaviours should not be indistinguishable.
+
+    A phase is satisfied when all of its ``required_tools`` appear at or after the
+    position where the previous phase was satisfied — "required ⊆ actual, in order
+    of first occurrence". Extra calls inside a phase cost nothing, which is what
+    makes a retry survivable, while skipping a phase costs that phase's share.
+
+    ``expected_no_calls`` still zeroes the whole score: a dry-run violation is not
+    a partial credit situation.
+    """
+    actual = [_normalize(t) for t in actual_tools]
+    if forbidden_tools:
+        seen = set(actual)
+        if any(_normalize(t) in seen for t in forbidden_tools):
+            return 0.0
+    if not steps:
+        return 1.0
+
+    cursor = 0
+    satisfied = 0
+    for step in steps:
+        required = [_normalize(str(t)) for t in (step.get("required_tools") or [])]
+        if not required:
+            satisfied += 1
+            continue
+        # Earliest position by which every required tool of this phase has appeared,
+        # searching only from where the previous phase completed.
+        positions = []
+        for name in required:
+            try:
+                positions.append(actual.index(name, cursor))
+            except ValueError:
+                positions = []
+                break
+        if not positions:
+            continue
+        satisfied += 1
+        cursor = max(positions) + 1
+    return satisfied / len(steps)
+
+
+def phase_breakdown(
+    actual_tools: list[str], steps: list[dict]
+) -> list[dict[str, object]]:
+    """Per-phase detail, so a low score names the phase that was skipped."""
+    actual = [_normalize(t) for t in actual_tools]
+    cursor = 0
+    rows: list[dict[str, object]] = []
+    for step in steps:
+        required = [_normalize(str(t)) for t in (step.get("required_tools") or [])]
+        positions = []
+        ok = True
+        for name in required:
+            try:
+                positions.append(actual.index(name, cursor))
+            except ValueError:
+                ok = False
+                break
+        missing = []
+        if not ok:
+            found = set(actual[cursor:])
+            missing = [t for t in required if t not in found]
+        rows.append(
+            {
+                "phase": str(step.get("name") or f"step{len(rows) + 1}"),
+                "required": required,
+                "satisfied": ok,
+                "missing_or_out_of_order": missing,
+            }
+        )
+        if ok and positions:
+            cursor = max(positions) + 1
+    return rows
+
+
 def normalize_tool_name(tool: str) -> str:
     """Strip MCP server prefixes so mcp__condor__manage_routines → manage_routines."""
     name = tool.strip()
