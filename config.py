@@ -7,6 +7,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 
+# Load .env here, at the one module every entry point imports before reading an env
+# var. Without it CONDOR_PATH is unset for anything that is not runner.py or the
+# dashboard, and condor_path() silently falls back to a sibling ../condor — which on
+# a machine with two clones is a different, usually older checkout.
+#
+# This has now caused three separate wrong answers: a maintenance script that would
+# have deleted from the wrong checkout, and two analyses that reported an agent as
+# having no tool grant because the fallback clone predates it. It also removes an
+# accidental dependency — under pytest the only reason .env was loaded at all is that
+# importing deepeval calls load_dotenv() as a side effect, so dropping an unrelated
+# test dependency would have silently changed which condor every drift check read.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
+except ImportError:  # pragma: no cover — dotenv is a declared dependency
+    pass
+
 DATASETS_DIR = ROOT / "datasets"
 BASELINE_DIR = ROOT / "baseline"
 RESULTS_DIR = ROOT / "results"
