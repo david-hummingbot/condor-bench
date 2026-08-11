@@ -71,6 +71,14 @@ export default function CaseTable({ cases }) {
                         harness
                       </span>
                     )}
+                    {c.post_condition_failed && (
+                      <span
+                        className="router-flag"
+                        title={`Composite capped — ${c.post_condition_failed}`}
+                      >
+                        not built
+                      </span>
+                    )}
                   </td>
                   <td><span className={`type-tag ${ctype}`}>{ctype}</span></td>
                   <td style={{ color: 'var(--muted)', fontSize: 12, textAlign: 'left' }}>
@@ -119,6 +127,13 @@ export default function CaseTable({ cases }) {
                           <div style={{ marginBottom: 10, color: 'var(--yellow)', fontSize: 12 }}>
                             Harness artifact — excluded from the routing matrix rather than
                             counted as a model failure: {c.harness_artifact}
+                          </div>
+                        )}
+                        {c.post_condition_failed && (
+                          <div className="error-text" style={{ marginBottom: 10 }}>
+                            {c.post_condition_failed}. This is the model's failure, not the
+                            harness's — the composite is capped so the case cannot pass, however
+                            convincing the answer read.
                           </div>
                         )}
                         <div className="case-detail-grid">

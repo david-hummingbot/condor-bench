@@ -157,3 +157,119 @@ def test_post_conditions_do_not_add_a_sixth_weight():
 
     assert "post_conditions" not in SCORE_WEIGHTS
     assert sum(SCORE_WEIGHTS.values()) == pytest.approx(1.0)
+
+
+# ── the post-condition cap ─────────────────────────────────────────────────────
+def _built(post: list[dict]) -> object:
+    """A convincing-sounding build result, with whatever the probe found."""
+    from bench.client import BenchmarkResult, TurnResult
+
+    r = BenchmarkResult(
+        case_id="b",
+        model="m",
+        turns=[
+            TurnResult(
+                "Created it!",
+                [{"tool": "manage_routines", "args": {}}],
+                2.0,
+                tool_responses=[{"tool": "manage_routines", "output": '{"ok":1}'}],
+            )
+        ],
+        wiring={"api_url": "http://staging:8000", "autodiscovery_extras": []},
+    )
+    r.post_conditions = post
+    return r
+
+
+async def _score_with(post: list[dict]):
+    from unittest.mock import patch
+
+    from bench.scorer import score
+
+    with patch("bench.scorer._quality_metric.a_score", return_value=(0.95, "ok")):
+        return await score(_built(post), "create a routine", ["manage_routines"], 5.0)
+
+
+async def test_absent_artefact_fails_the_case_even_when_the_prose_is_good():
+    """0.5, not 0.0, is the real failure mode.
+
+    Against {action: list, contains: [name]} a missing routine scores 0.5 — the
+    `nonempty` half passes because the list holds *other* routines. A ==0 test would
+    wave this through, which is why the cap triggers below 1.0.
+    """
+    from config import PASS_THRESHOLD, POST_CONDITION_FAIL_CAP
+
+    card = await _score_with(
+        [{"tool": "manage_routines", "reachable": True, "score": 0.5}]
+    )
+    assert card.composite == POST_CONDITION_FAIL_CAP
+    assert card.composite < PASS_THRESHOLD, "a build that built nothing must not pass"
+    assert card.post_condition_failed
+    assert "manage_routines" in card.post_condition_failed
+
+
+async def test_met_post_condition_leaves_the_composite_alone():
+    from config import PASS_THRESHOLD
+
+    card = await _score_with(
+        [{"tool": "manage_routines", "reachable": True, "score": 1.0}]
+    )
+    assert card.composite > PASS_THRESHOLD
+    assert card.post_condition_failed is None
+
+
+async def test_unreachable_probe_does_not_cap():
+    """A staging blip must not read as a model that failed to build something."""
+    from config import PASS_THRESHOLD
+
+    card = await _score_with(
+        [{"tool": "manage_routines", "reachable": False, "score": None}]
+    )
+    assert card.composite > PASS_THRESHOLD
+    assert card.post_condition_failed is None
+
+
+async def test_case_without_post_conditions_is_untouched():
+    from config import PASS_THRESHOLD
+
+    card = await _score_with([])
+    assert card.composite > PASS_THRESHOLD
+    assert card.post_condition_failed is None
+
+
+async def test_the_failure_reaches_the_matrix_through_the_composite():
+    """matrix.py recomputes pass from composite, not from ScoreCard.passed.
+
+    A flag alone would never affect a domain pass rate — this pins the mechanism.
+    """
+    from config import PASS_THRESHOLD
+
+    card = await _score_with(
+        [{"tool": "manage_routines", "reachable": True, "score": 0.0}]
+    )
+    persisted = card.as_dict()
+    assert persisted["composite"] < PASS_THRESHOLD
+    assert persisted["post_condition_failed"]
+
+
+def test_every_post_condition_in_the_dataset_asserts_something_specific():
+    """`nonempty` on a list call passes if *anything* is stored.
+
+    Four post-conditions originally used it, so they would have passed even if the
+    model did nothing — and once the cap exists, a vacuous assertion is worse than
+    no assertion because it manufactures the appearance of verification.
+    """
+    from bench.dataset import load_all_cases
+
+    vague = {}
+    for case in load_all_cases():
+        for tool, spec in (getattr(case, "post_conditions", {}) or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            if not spec.get("contains") and not spec.get("fields"):
+                vague[case.id] = tool
+    assert not vague, (
+        f"post-conditions assert only nonempty: {vague}. Pin `contains` (or `fields`) "
+        "on something the case created — name the artefact in the question so the "
+        "assertion can check for it."
+    )

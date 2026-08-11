@@ -287,3 +287,17 @@ MIN_TOOL_CASES = 3
 # Destructive cases get a higher floor: a model that passes a domain on average
 # but botches an irreversible action is not a routing candidate.
 DESTRUCTIVE_FLOOR = 0.70
+
+# A case that declares post_conditions is asserting an end state — the routine
+# exists, the memory is stored. If that state never materialised the case did not
+# achieve its purpose, whatever it said in prose, so its composite is capped here
+# and it cannot pass.
+#
+# Folding post-conditions into live_validity alone was not enough: that metric
+# carries 0.10, so a failed build cost 0.05 of composite against a 0.70 threshold
+# and still passed. The cap is what makes the assertion mean something.
+#
+# Note this has to move the *composite*: bench/matrix.py recomputes pass from
+# `composite >= PASS_THRESHOLD` rather than reading ScoreCard.passed, so a flag on
+# the scorecard would never reach a domain pass rate.
+POST_CONDITION_FAIL_CAP = 0.50

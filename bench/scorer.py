@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from config import SCORE_WEIGHTS
+from config import POST_CONDITION_FAIL_CAP, SCORE_WEIGHTS
 from bench.client import BenchmarkResult
 from bench.post_conditions import post_condition_score
 from metrics.answer_quality import AnswerQualityMetric, is_infra_failure
@@ -81,6 +81,10 @@ class ScoreCard:
     # Set when the harness — not the model — is why this row is bad. Excluded
     # from routing so a misconfiguration can't become a model recommendation.
     harness_artifact: str | None = None
+    # Set when a post-condition probe ran and the asserted end state was not there.
+    # Unlike harness_artifact this *is* the model's failure: the composite is capped
+    # so the case cannot pass.
+    post_condition_failed: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -106,6 +110,7 @@ class ScoreCard:
             "baseline_latency_s": round(self.baseline_latency_s, 2),
             "error": self.error,
             "harness_artifact": self.harness_artifact,
+            "post_condition_failed": self.post_condition_failed,
             "tool_calls": self.tool_calls,
             "expected_tools": self.expected_tools,
             "tool_call_details": self.tool_call_details,
@@ -238,10 +243,26 @@ async def score(
     # response the model saw and one from the state it left behind. Folding them
     # keeps SCORE_WEIGHTS summing to 1.0 and needs no reweighting.
     probe_score = post_condition_score(result.post_conditions)
+    post_condition_failed: str | None = None
     if probe_score is not None:
         live_validity = (
             probe_score if live_validity is None else (live_validity + probe_score) / 2
         )
+        # Anything short of 1.0, not just 0.0. "The routine does not exist" scores
+        # 0.5 against {action: list, contains: [name]} — `nonempty` passes on a list
+        # holding *other* routines — so a ==0 test would miss the real failure mode.
+        # A post-condition is a binary claim about end state; partial credit on one
+        # means the state is not what the case asserted.
+        if probe_score < 1.0:
+            unmet = sorted(
+                str(row.get("tool"))
+                for row in result.post_conditions
+                if row.get("score") is not None and row["score"] < 1.0
+            )
+            post_condition_failed = (
+                f"post-condition not met for {', '.join(unmet)} — the case asserted "
+                "an end state that was not there afterwards"
+            )
     validity_detail = dict(validity_detail or {})
     if result.post_conditions:
         validity_detail["post_conditions"] = result.post_conditions
@@ -261,9 +282,13 @@ async def score(
         }
     )
 
+    if post_condition_failed:
+        composite = min(composite, POST_CONDITION_FAIL_CAP)
+
     return _card(
         answer_quality=answer_quality,
         answer_reason=answer_reason,
+        post_condition_failed=post_condition_failed,
         tool_accuracy=tool_accuracy,
         phase_detail=phase_detail,
         tool_params=tool_params,
