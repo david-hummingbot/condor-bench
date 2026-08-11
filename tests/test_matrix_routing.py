@@ -499,21 +499,31 @@ def test_every_shipped_agent_has_a_routing_domain():
     if repo is None or not (repo / "agents").is_dir():
         pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
 
+    from bench.dataset import STRATEGY_AGENTS
+
     routed = {
         key.split("/")[1]
         for key in CONDOR_CONFIG_KEYS.values()
         if key.startswith("agents/")
     }
+    # Strategies are excluded by name, not by pattern, precisely so this check keeps
+    # working: a new agent upstream still trips it instead of being waved through as
+    # "probably a strategy".
     unrouted = sorted(
         p.name
         for p in (repo / "agents").iterdir()
-        if p.is_dir() and (p / "AGENT.md").is_file() and p.name not in routed
+        if p.is_dir()
+        and (p / "AGENT.md").is_file()
+        and p.name not in routed
+        and p.name not in STRATEGY_AGENTS
     )
 
     assert not unrouted, (
         f"condor ships agents with no routing domain: {unrouted}. The Router can "
-        "never recommend a model for them. Add them to CONDOR_CONFIG_KEYS in "
-        "bench/routing.py and author dataset cases with the matching agent_slug."
+        "never recommend a model for them. Either add them to CONDOR_CONFIG_KEYS in "
+        "bench/routing.py with dataset cases using the matching agent_slug, or — if "
+        "it is a user-created strategy specialising a base specialist — add it to "
+        "bench.dataset.STRATEGY_AGENTS with a note saying which base it derives from."
     )
 
 
@@ -639,4 +649,35 @@ def test_tool_bar_stays_below_the_domain_bar():
     assert (MIN_TOOL_CASES - 1) / MIN_TOOL_CASES >= TOOL_PASS_RATE, (
         f"{MIN_TOOL_CASES - 1}/{MIN_TOOL_CASES} must clear {TOOL_PASS_RATE} — "
         "otherwise the guard buys no tolerance and the sample size is theatre"
+    )
+
+
+def test_strategies_are_not_routing_domains():
+    """A strategy slug must not produce a recommendation of its own.
+
+    AgentCase.domain returns the agent_slug, so a case slugged to a strategy would
+    otherwise create a routing domain with no config key — a recommendation that
+    reads as actionable and applies nowhere.
+    """
+    from bench.dataset import STRATEGY_AGENTS, is_routing_domain
+    from bench.routing import CONDOR_CONFIG_KEYS
+
+    for slug in STRATEGY_AGENTS:
+        assert not is_routing_domain(slug), f"{slug} is still routable"
+        assert slug not in CONDOR_CONFIG_KEYS, f"{slug} still has a config key"
+
+
+def test_no_dataset_case_is_slugged_to_a_strategy():
+    """Such a case would run, score, and land in a domain nobody reads."""
+    from bench.dataset import STRATEGY_AGENTS, load_all_cases
+
+    stranded = sorted(
+        c.id
+        for c in load_all_cases()
+        if getattr(c, "agent_slug", None) in STRATEGY_AGENTS
+    )
+    assert not stranded, (
+        f"cases are slugged to strategies: {stranded}. Their domain is excluded from "
+        "routing, so they cost a live run and inform nothing. Re-slug them to the "
+        "base specialist, convert them to tool cases, or delete them."
     )

@@ -4,7 +4,7 @@ Sketch of the exact cases needed so a model can be recommended for a Condor
 agent role. **Grants come from each agent’s `AGENT.md` `tools:` list** — do not
 invent specialist ownership for tools nobody declares.
 
-This is a plan, not a dataset dump. Status markers:
+This is a plan, not a dataset dump. **Parts of it are superseded** — the tool bar is 0.65 over 3 cases (not 0.80 over 2), `BENCH_ALLOW_MUTATING` no longer exists, and three agents here are now strategies rather than routing domains. Status markers:
 
 | marker | meaning |
 |--------|---------|
@@ -18,7 +18,7 @@ This is a plan, not a dataset dump. Status markers:
 
 | Role | Gate | Evidence |
 |------|------|----------|
-| **Tool competence** | each of 24 tools has ≥2 scored cases at ≥80% pass | Layer A (`type: tool`) |
+| **Tool competence** | each of 24 tools has ≥`MIN_TOOL_CASES` (3) scored cases at ≥`TOOL_PASS_RATE` (0.65) | Layer A (`type: tool`) |
 | **Specialist** (MM, SOL, DN, XRPL, MET) | tool competence on **that grant** *and* Layer B job cases with `agent_slug` set pass (≥80%, ≥3 scored, `DESTRUCTIVE_FLOOR`) | Layer A ∩ grant + Layer B |
 | **General consult / condor** | tool competence on orphan + coordinator tools *and* Layer C job cases | Layer A orphans + Layer C |
 | **Directional / smart_money** | Layer B job cases (they inherit all 24 — selection alone is a weak discriminator) | Layer B only for role; Layer A still required for full-surface claim |
@@ -118,6 +118,8 @@ Target: **≥8 cases / specialist**, ≥5 read-only, so `min_cases=3` still hold
 
 ### `delta_neutral_funding_agent` (grant: 9)
 
+> **Superseded — not a routing domain.** `delta_neutral_funding_agent` is a user-created *strategy*, a specialisation of a base specialist rather than a role bench sizes a model for. It is in `bench.dataset.STRATEGY_AGENTS`, excluded from `CONDOR_CONFIG_KEYS`, and its evidence comes from Layer A tool competence. The Layer B table below is kept for reference only — do not author these cases.
+
 `get_market_data`, `get_portfolio_overview`, `manage_executors`, `manage_controllers`, `manage_bots`, `manage_routines`, `search_history`, `manage_memory`, `manage_skill`
 
 | ID | Status | Risk | Tools | Prompt sketch |
@@ -136,6 +138,8 @@ Target: **≥8 cases / specialist**, ≥5 read-only, so `min_cases=3` still hold
 (No skills dir upstream — skip `manage_skill` job cases or use list/read only if skills appear later.)
 
 ### `xrpl_market_maker` (grant: 9)
+
+> **Superseded — not a routing domain.** `xrpl_market_maker` is a user-created *strategy*, a specialisation of a base specialist rather than a role bench sizes a model for. It is in `bench.dataset.STRATEGY_AGENTS`, excluded from `CONDOR_CONFIG_KEYS`, and its evidence comes from Layer A tool competence. The Layer B table below is kept for reference only — do not author these cases.
 
 `get_market_data`, `get_portfolio_overview`, `explore_geckoterminal`, `manage_executors`, `manage_controllers`, `manage_bots`, `manage_routines`, `manage_skill`, `send_notification`
 
@@ -186,6 +190,8 @@ Skills: `backtesting`, `controller_development`, `deploy_and_monitor`, `research
 | `agent_dir_010` | **add** | destructive | `manage_skill`, `manage_controllers` | Read `deploy_and_monitor`; upload/deploy path (shortlist). |
 
 ### `smart_money_flow` (inherit all 24)
+
+> **Superseded — not a routing domain.** `smart_money_flow` is a user-created *strategy*, a specialisation of a base specialist rather than a role bench sizes a model for. It is in `bench.dataset.STRATEGY_AGENTS`, excluded from `CONDOR_CONFIG_KEYS`, and its evidence comes from Layer A tool competence. The Layer B table below is kept for reference only — do not author these cases.
 
 Skill: `smart_money_playbook`
 

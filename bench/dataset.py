@@ -51,10 +51,34 @@ _DEFAULT_CONSULT_DOMAIN = "general_consult"
 # ("market_data") from something Condor can actually route ("market_making_expert").
 TOOL_DOMAIN_PREFIX = "tool:"
 
+# Agents condor ships that are *strategies*, not roles bench should size a model
+# for. A strategy is a user-created specialisation of a base specialist — an XRPL
+# market maker is market_making_expert pointed at one connector — so it exercises
+# the same tools and inherits its base's model assignment. Recommending a model per
+# strategy would multiply routing targets every time a user creates one, and the
+# evidence would be the base specialist's evidence wearing a different name.
+#
+# They are named explicitly rather than pattern-matched so that a genuinely new
+# agent shipped upstream still trips the roster drift check instead of being
+# silently swallowed as "probably a strategy".
+STRATEGY_AGENTS = frozenset(
+    {
+        "delta_neutral_funding_agent",
+        "xrpl_market_maker",
+        "smart_money_flow",
+    }
+)
+
 
 def is_routing_domain(domain: str) -> bool:
-    """True when a domain names something a Condor model assignment can target."""
-    return not domain.startswith(TOOL_DOMAIN_PREFIX)
+    """True when a domain names something a Condor model assignment can target.
+
+    False for Layer 2 capability buckets (``tool:market_data`` — there is no config
+    key for "market data") and for strategies (see :data:`STRATEGY_AGENTS`).
+    """
+    if domain.startswith(TOOL_DOMAIN_PREFIX):
+        return False
+    return domain not in STRATEGY_AGENTS
 
 
 def _normalize_risk(value: Any) -> str:

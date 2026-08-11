@@ -61,8 +61,6 @@
   "agent_directional_trader_002": "Read your backtesting skill and summarise how you would validate a new directional controller before deploying it.",
   "agent_solana_dex_lp_expert_001": "Find the deepest SOL-USDC pools on Solana and tell me which one you would provide liquidity into. Do not open a position.",
   "agent_solana_dex_lp_expert_002": "Read your lp_range_config skill, then explain what range you would set for a SOL-USDC CLMM position given current volatility, and how impermanent loss factors in.",
-  "agent_delta_neutral_funding_001": "Check the current BTC perpetual funding rate on Binance and tell me whether a delta-neutral funding capture is worth opening right now. Do not open anything.",
-  "agent_delta_neutral_funding_002": "Show me my current perpetual positions and tell me whether my book is actually delta neutral right now.",
   "agent_market_making_expert_004": "Look at my portfolio for BTC-USDT and tell me whether inventory has skewed far enough that I should stop quoting both sides. Do not change anything.",
   "agent_market_making_expert_005": "Show me the executors running across my bots and flag any that look stuck or that I should pause quoting on. Do not stop anything.",
   "agent_market_making_expert_006": "Pull my recent fills on Binance and tell me whether I am getting adversely selected — filled mostly on one side into a move — or whether the spread is holding up.",
