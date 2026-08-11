@@ -26,7 +26,13 @@ from metrics.answer_quality import AnswerQualityMetric, is_infra_failure
 from metrics.judge import JUDGE_USAGE
 from metrics.latency import LatencyMetric
 from metrics.live_validity import LiveValidityMetric, validity_breakdown
-from metrics.tool_accuracy import ToolAccuracyMetric, phase_breakdown, score_phases
+from metrics.tool_accuracy import (
+    ToolAccuracyMetric,
+    phase_breakdown,
+    score_phases,
+    score_recall,
+    violated_forbidden_calls,
+)
 from metrics.tool_params import ToolParamMetric, param_breakdown
 
 _quality_metric = AnswerQualityMetric()
@@ -81,6 +87,10 @@ class ScoreCard:
     # Set when the harness — not the model — is why this row is bad. Excluded
     # from routing so a misconfiguration can't become a model recommendation.
     harness_artifact: str | None = None
+    # Bans the run violated, as `tool` or `tool:action`. Empty on a clean run — a
+    # tool_accuracy of 0.0 with no explanation is exactly the debugging dead end the
+    # first smoke run hit.
+    forbidden_violations: list[str] = field(default_factory=list)
     # Set when a post-condition probe ran and the asserted end state was not there.
     # Unlike harness_artifact this *is* the model's failure: the composite is capped
     # so the case cannot pass.
@@ -111,6 +121,7 @@ class ScoreCard:
             "error": self.error,
             "harness_artifact": self.harness_artifact,
             "post_condition_failed": self.post_condition_failed,
+            "forbidden_violations": self.forbidden_violations,
             "tool_calls": self.tool_calls,
             "expected_tools": self.expected_tools,
             "tool_call_details": self.tool_call_details,
@@ -157,6 +168,7 @@ async def score(
     expected_tool_params: dict[str, dict] | None = None,
     live_expected: dict[str, Any] | None = None,
     steps: list[dict] | None = None,
+    strict_tools: bool = False,
     domain: str = "",
     risk_level: str = "read_only",
 ) -> ScoreCard:
@@ -206,28 +218,33 @@ async def score(
 
     required = normalize_expected_tools(expected_tools)
     forbidden = list(expected_no_calls or [])
+    # Bans are checked against the full calls, not just names, so `tool:action`
+    # entries work — a case can require manage_executors and still forbid
+    # manage_executors:create.
+    violations = violated_forbidden_calls(result.tool_calls, forbidden)
+
     tool_accuracy: float | None = None
     phase_detail: list[dict[str, Any]] = []
-    if steps:
-        # A case that declares ordered phases is scored on them instead of on
-        # multiset F1: F1 is order-blind (so building before reading the playbook
-        # scores full marks) and charges for retries (so recovering from a schema
-        # error looks the same as skipping a phase).
-        tool_accuracy = score_phases(tool_names, steps, forbidden or None)
+    if violations:
+        # A restraint violation is not a partial-credit situation.
+        tool_accuracy = 0.0
+    elif steps:
+        # Ordered phases instead of F1: F1 is order-blind (building before reading
+        # the playbook scores full marks) and charges for retries (recovering from a
+        # schema error looks the same as skipping a phase).
+        tool_accuracy = score_phases(tool_names, steps)
         phase_detail = phase_breakdown(tool_names, steps)
     elif required is not None:
-        tool_accuracy = _tool_metric.score(
-            actual_tools=tool_names,
-            expected_tools=required,
-            forbidden_tools=forbidden or None,
+        # Layer 2 probes are "call exactly this tool", so precision counts. Job cases
+        # are scored on recall: the agent's own prompt tells it to gather context, and
+        # charging it for calls the case did not happen to list measures nothing.
+        tool_accuracy = (
+            _tool_metric.score(actual_tools=tool_names, expected_tools=required)
+            if strict_tools
+            else score_recall(tool_names, required)
         )
     elif forbidden:
-        # Only a must-not-call list: 1.0 if clean, else 0.0
-        tool_accuracy = (
-            0.0
-            if ToolAccuracyMetric.violated_forbidden(tool_names, forbidden)
-            else 1.0
-        )
+        tool_accuracy = 1.0
 
     params = expected_tool_params or {}
     tool_params = _param_metric.score(result.tool_calls, params)
@@ -289,6 +306,7 @@ async def score(
         answer_quality=answer_quality,
         answer_reason=answer_reason,
         post_condition_failed=post_condition_failed,
+        forbidden_violations=violations,
         tool_accuracy=tool_accuracy,
         phase_detail=phase_detail,
         tool_params=tool_params,
@@ -375,6 +393,8 @@ async def score_case(
         expected_tool_params=getattr(case, "expected_tool_params", {}) or None,
         live_expected=getattr(case, "live_expected", {}) or None,
         steps=list(getattr(case, "steps", []) or []) or None,
+        # Layer 2 probes are the only cases where tool *precision* is the point.
+        strict_tools=getattr(case, "type", "") == "tool",
         domain=getattr(case, "domain", ""),
         risk_level=getattr(case, "risk_level", "read_only"),
     )

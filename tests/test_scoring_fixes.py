@@ -180,3 +180,103 @@ def test_journal_cleaner_ignores_agents_without_journals(tmp_path):
     d = tmp_path / "agents" / "bench_empty"
     (d / "sessions").mkdir(parents=True)
     assert journal_targets(d) == []
+
+
+# ── action-level restraint bans ────────────────────────────────────────────────
+def test_reads_the_agents_prompt_mandates_are_not_violations():
+    """The failure the first live smoke run exposed.
+
+    market_making_expert's AGENT.md instructs it to call manage_bots(action="status")
+    and check manage_memory before advising. A name-level ban on manage_bots scored
+    that 0.0 — the model was penalised for following production instructions.
+    """
+    from metrics.tool_accuracy import violated_forbidden_calls
+
+    calls = [
+        {"tool": "get_market_data", "args": {"data_type": "prices"}},
+        {"tool": "manage_bots", "args": {"action": "status"}},
+        {"tool": "manage_memory", "args": {"action": "list"}},
+    ]
+    assert violated_forbidden_calls(calls, ["manage_bots:deploy"]) == []
+
+
+def test_the_banned_action_still_trips():
+    from metrics.tool_accuracy import violated_forbidden_calls
+
+    calls = [{"tool": "manage_bots", "args": {"action": "deploy"}}]
+    assert violated_forbidden_calls(calls, ["manage_bots:deploy"]) == ["manage_bots:deploy"]
+
+
+def test_a_tool_can_be_required_and_one_of_its_actions_forbidden():
+    """agent_market_making_expert_005 expects manage_executors and says "do not stop
+    anything" — a name ban there is self-contradictory."""
+    from metrics.tool_accuracy import violated_forbidden_calls
+
+    listing = [{"tool": "manage_executors", "args": {"action": "get_all_bots"}}]
+    stopping = [{"tool": "manage_executors", "args": {"action": "stop"}}]
+    bans = ["manage_executors:stop"]
+    assert violated_forbidden_calls(listing, bans) == []
+    assert violated_forbidden_calls(stopping, bans) == bans
+
+
+def test_name_level_bans_still_work_for_read_only_tools():
+    """tool_consult_003 bans get_market_data: the test is "route it, don't answer
+    yourself". That tool has no mutating action, so the name ban is the right shape."""
+    from metrics.tool_accuracy import violated_forbidden_calls
+
+    calls = [{"tool": "get_market_data", "args": {"data_type": "prices"}}]
+    assert violated_forbidden_calls(calls, ["get_market_data"]) == ["get_market_data"]
+
+
+def test_every_dataset_ban_on_a_mutating_tool_names_an_action():
+    """A bare name ban on a tool that also reads will punish context gathering."""
+    from bench.dataset import load_all_cases
+
+    also_reads = {
+        "manage_executors",
+        "manage_bots",
+        "manage_amm",
+        "manage_controllers",
+        "manage_trading_agent",
+        "manage_memory",
+        "manage_skill",
+        "manage_routines",
+        "manage_notes",
+    }
+    offenders = {}
+    for case in load_all_cases():
+        bare = [
+            b
+            for b in (getattr(case, "expected_no_calls", None) or [])
+            if ":" not in b and b in also_reads
+        ]
+        if bare:
+            offenders[case.id] = bare
+    assert not offenders, (
+        f"bare name bans on tools that also read: {offenders}. Use tool:action — a "
+        "name ban makes the case unpassable for an agent whose prompt tells it to "
+        "gather context with that tool."
+    )
+
+
+# ── job cases are scored on recall, probes on precision ────────────────────────
+def test_extra_context_reads_do_not_cost_a_job_case():
+    from metrics.tool_accuracy import ToolAccuracyMetric, score_recall
+
+    expected = ["get_portfolio_overview"]
+    thorough = [
+        "get_portfolio_overview",
+        "manage_bots",
+        "get_market_data",
+        "manage_memory",
+    ]
+    assert score_recall(thorough, expected) == 1.0
+    # F1 charged 0.4 for the same trajectory, which is what tanked the smoke run.
+    assert ToolAccuracyMetric().score(thorough, expected) < 0.5
+
+
+def test_recall_still_penalises_a_missed_required_tool():
+    from metrics.tool_accuracy import score_recall
+
+    assert score_recall(["manage_skill"], ["manage_skill", "get_portfolio_overview"]) == 0.5
+    assert score_recall(["manage_bots"], ["get_portfolio_overview"]) == 0.0

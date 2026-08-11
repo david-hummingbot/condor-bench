@@ -66,11 +66,78 @@ class ToolAccuracyMetric:
 
     @staticmethod
     def violated_forbidden(actual_tools: list[str], forbidden_tools: list[str]) -> bool:
-        """True if any forbidden tool name appears in actual_tools."""
+        """True if any forbidden tool name appears in actual_tools.
+
+        Name-level only. Prefer :func:`violated_forbidden_calls`, which also
+        understands ``tool:action`` bans — most restraint rules are about an action,
+        not a tool.
+        """
         if not forbidden_tools:
             return False
         actual_set = {_normalize(t) for t in actual_tools}
-        return any(_normalize(t) in actual_set for t in forbidden_tools)
+        return any(
+            _normalize(t.split(":", 1)[0]) in actual_set
+            for t in forbidden_tools
+            if ":" not in t
+        )
+
+
+def violated_forbidden_calls(
+    tool_calls: list[dict], forbidden: list[str] | None
+) -> list[str]:
+    """Which bans a run violated. Entries are ``tool`` or ``tool:action``.
+
+    Banning a whole tool is usually the wrong granularity, and the smoke run proved
+    it: ``market_making_expert``'s own AGENT.md instructs it to call
+    ``manage_bots(action="status")`` and check ``manage_memory`` before advising, so a
+    name-level ban on ``manage_bots`` scored the model 0.0 for obeying production
+    instructions. Its actual restraint rule is "do NOT deploy unless explicitly
+    asked" — an action.
+
+    ``manage_executors:create`` bans creating while leaving ``get_all_bots`` free, so
+    a case can require a tool *and* forbid one of its actions — which a name ban
+    cannot express at all.
+    """
+    if not forbidden:
+        return []
+    violations: list[str] = []
+    for ban in forbidden:
+        tool, _, action = str(ban).partition(":")
+        tool_n = _normalize(tool)
+        for call in tool_calls:
+            if _normalize(str(call.get("tool", ""))) != tool_n:
+                continue
+            if not action:
+                violations.append(ban)
+                break
+            args = call.get("args")
+            called = str((args or {}).get("action", "")).strip().lower()
+            if called == action.strip().lower():
+                violations.append(ban)
+                break
+    return violations
+
+
+def score_recall(actual_tools: list[str], expected_tools: list[str]) -> float:
+    """Fraction of the required tools that were called. Extras cost nothing.
+
+    For a *job* case, multiset F1 measures the wrong thing. A specialist's own
+    AGENT.md tells it to gather context before advising — check the bots, read the
+    memory, look at the portfolio — so a thorough model makes more calls than the
+    case names, and F1 charges it for precision against a list that was never meant
+    to be exhaustive. In the first live smoke run that cost 0.29-0.50 on cases the
+    model handled correctly.
+
+    Precision still matters for a Layer 2 probe, where the case *is* "call exactly
+    this tool", so those keep F1. What stops a job case from being a free pass is
+    ``expected_no_calls`` (now action-aware), the pinned params, live validity and
+    the judge — not a guess at how many reads the agent should have made.
+    """
+    required = {_normalize(t) for t in expected_tools}
+    if not required:
+        return 1.0
+    called = {_normalize(t) for t in actual_tools}
+    return len(required & called) / len(required)
 
 
 def score_phases(
