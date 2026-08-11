@@ -39,28 +39,35 @@ from config import (
     RESULTS_DIR,
     TOOL_PASS_RATE,
 )
-from bench.dataset import is_routing_domain
+from bench.dataset import expert_agents, is_routing_domain, routing_domain_for
 from bench.matrix import UNCLASSIFIED, ModelEntry, build_matrix, load_models
 
 # Domains whose recommendation maps onto a concrete condor config key. Domains
-# absent from this map still get a recommendation; they just don't produce a
-# config line, because bench doesn't know where they'd be applied.
-# Keys track condor's shipped agent roster. It changes: `routine_builder` and
-# `agent_builder` were agents once and are now a shared skill and a condor skill
-# respectively, so pointing a recommendation at them would write a config key
-# nothing reads.
+# absent from this map still get a recommendation; they just don't produce a config
+# line, because bench doesn't know where they'd be applied.
 #
-# Strategies are absent on purpose — see bench.dataset.STRATEGY_AGENTS. They are
-# user-created specialisations that call the same tools as their base specialist,
-# so tool competence is the evidence for them, not a routing domain of their own.
-CONDOR_CONFIG_KEYS = {
-    "general_consult": "agents/condor/agent_key",
-    "market_making_expert": "agents/market_making_expert/agent_key",
-    "directional_trader": "agents/directional_trader/agent_key",
-    "solana_dex_lp_expert": "agents/solana_dex_lp_expert/agent_key",
-    "meteora_launch_lp": "agents/meteora_launch_lp/agent_key",
-    "tick_execution": "agents/_defaults/agent_key",
-}
+# Derived from datasets/agent_roles.json rather than hand-maintained, so the roster
+# and the config keys cannot disagree — the previous literal dict is how three agents
+# shipped upstream with no routing domain, and how a fourth kept a key after being
+# reclassified as a strategy. Strategies are absent by construction: they inherit
+# their base's model assignment.
+#
+# tick_execution is the one entry with no agent behind it: condor's agents/_defaults
+# is a fallback model setting for agent ticks, not an agent with an AGENT.md.
+_TICK_CONFIG_KEY = "agents/_defaults/agent_key"
+
+
+def condor_config_keys() -> dict[str, str]:
+    """domain -> condor config path, for every expert plus tick_execution."""
+    keys = {
+        routing_domain_for(slug): f"agents/{slug}/agent_key"
+        for slug in sorted(expert_agents())
+    }
+    keys["tick_execution"] = _TICK_CONFIG_KEY
+    return keys
+
+
+CONDOR_CONFIG_KEYS = condor_config_keys()
 
 
 @dataclass

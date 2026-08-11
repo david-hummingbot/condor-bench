@@ -499,31 +499,41 @@ def test_every_shipped_agent_has_a_routing_domain():
     if repo is None or not (repo / "agents").is_dir():
         pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
 
-    from bench.dataset import STRATEGY_AGENTS
+    from bench.dataset import load_agent_roles
 
+    # Classification lives in datasets/agent_roles.json. An agent absent from it is
+    # *unclassified*, which fails here on purpose: users will ship their own agents,
+    # and the expert/strategy call should be made deliberately once rather than
+    # defaulted silently in either direction. A pattern match would have quietly
+    # swallowed every future agent.
+    roles = load_agent_roles()
+    shipped_with_prompt = sorted(
+        p.name
+        for p in (repo / "agents").iterdir()
+        if p.is_dir() and (p / "AGENT.md").is_file()
+    )
+    unclassified = [a for a in shipped_with_prompt if a not in roles]
+
+    assert not unclassified, (
+        f"condor ships agents bench has not classified: {unclassified}. Add each to "
+        "datasets/agent_roles.json:\n"
+        '  "role": "expert"   -> bench sizes a model for it; it gets a routing '
+        "domain and a config key\n"
+        '  "role": "strategy" -> a specialisation of another agent; name its "base". '
+        "No routing domain; tool competence is its evidence.\n"
+        "Leaving it out is not neutral — the Router would simply never mention it."
+    )
+
+    # And every expert must actually have resolved into a config key.
     routed = {
         key.split("/")[1]
         for key in CONDOR_CONFIG_KEYS.values()
         if key.startswith("agents/")
     }
-    # Strategies are excluded by name, not by pattern, precisely so this check keeps
-    # working: a new agent upstream still trips it instead of being waved through as
-    # "probably a strategy".
-    unrouted = sorted(
-        p.name
-        for p in (repo / "agents").iterdir()
-        if p.is_dir()
-        and (p / "AGENT.md").is_file()
-        and p.name not in routed
-        and p.name not in STRATEGY_AGENTS
-    )
-
-    assert not unrouted, (
-        f"condor ships agents with no routing domain: {unrouted}. The Router can "
-        "never recommend a model for them. Either add them to CONDOR_CONFIG_KEYS in "
-        "bench/routing.py with dataset cases using the matching agent_slug, or — if "
-        "it is a user-created strategy specialising a base specialist — add it to "
-        "bench.dataset.STRATEGY_AGENTS with a note saying which base it derives from."
+    experts = [a for a in shipped_with_prompt if roles.get(a, {}).get("role") == "expert"]
+    missing_key = sorted(a for a in experts if a not in routed)
+    assert not missing_key, (
+        f"agents classified as experts produced no config key: {missing_key}"
     )
 
 
@@ -659,25 +669,45 @@ def test_strategies_are_not_routing_domains():
     otherwise create a routing domain with no config key — a recommendation that
     reads as actionable and applies nowhere.
     """
-    from bench.dataset import STRATEGY_AGENTS, is_routing_domain
+    from bench.dataset import is_routing_domain, strategy_agents
     from bench.routing import CONDOR_CONFIG_KEYS
 
-    for slug in STRATEGY_AGENTS:
+    for slug in strategy_agents():
         assert not is_routing_domain(slug), f"{slug} is still routable"
         assert slug not in CONDOR_CONFIG_KEYS, f"{slug} still has a config key"
 
 
 def test_no_dataset_case_is_slugged_to_a_strategy():
     """Such a case would run, score, and land in a domain nobody reads."""
-    from bench.dataset import STRATEGY_AGENTS, load_all_cases
+    from bench.dataset import load_all_cases, strategy_agents
 
     stranded = sorted(
         c.id
         for c in load_all_cases()
-        if getattr(c, "agent_slug", None) in STRATEGY_AGENTS
+        if getattr(c, "agent_slug", None) in strategy_agents()
     )
     assert not stranded, (
         f"cases are slugged to strategies: {stranded}. Their domain is excluded from "
         "routing, so they cost a live run and inform nothing. Re-slug them to the "
         "base specialist, convert them to tool cases, or delete them."
     )
+
+
+def test_every_strategy_names_the_base_it_derives_from():
+    """"strategy" without a base is an assertion with no reasoning attached.
+
+    The base is what makes the classification checkable: an XRPL market maker is
+    market_making_expert pointed at one connector, so its evidence is that domain's.
+    Without it, "strategy" is just a way to make an agent disappear from the Router.
+    """
+    from bench.dataset import expert_agents, load_agent_roles, strategy_agents
+
+    roles = load_agent_roles()
+    experts = expert_agents()
+    for slug in sorted(strategy_agents()):
+        base = (roles.get(slug) or {}).get("base")
+        assert base, f"{slug} is role: strategy but names no base"
+        assert base in experts, (
+            f"{slug} derives from {base!r}, which is not an expert. A strategy must "
+            "inherit from something bench actually sizes a model for."
+        )

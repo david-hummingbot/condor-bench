@@ -1,0 +1,64 @@
+{
+  "_comment": [
+    "Which of condor's agents bench sizes a model for, and which it does not.",
+    "",
+    "condor separates agents from strategies by storage, not by a field: a strategy is",
+    "created *under* an agent (create_strategy(slug, ...) writes into strategy.dir) and",
+    "inherits that agent's identity. Everything in condor's agents/ directory is an",
+    "agent by that definition. But the roster has grown to include entries that are",
+    "really specialisations of another agent -- an XRPL market maker is a market maker",
+    "pointed at one connector -- and giving each its own routing domain would multiply",
+    "recommendations every time a user ships one, on evidence that is the base",
+    "specialist's evidence under a different name.",
+    "",
+    "condor does not encode this distinction (created_by does not correlate: two",
+    "experts carry a user id, two carry 0, one carries none), so bench records it here.",
+    "",
+    "role: expert   -> gets a routing domain and a CONDOR_CONFIG_KEYS entry",
+    "role: strategy -> no routing domain; evidence comes from Layer 2 tool competence",
+    "",
+    "Every agent condor ships must appear here. An unclassified agent fails",
+    "tests/test_matrix_routing.py::test_every_shipped_agent_has_a_routing_domain",
+    "on purpose: the decision should be made deliberately once, not defaulted",
+    "silently in either direction. If condor ever adds a role field to AGENT.md,",
+    "read it there and keep this file only for overrides."
+  ],
+  "agents": {
+    "condor": {
+      "role": "expert",
+      "domain": "general_consult",
+      "notes": "The chat assistant. Full surface, and the only domain whose name differs from its slug."
+    },
+    "market_making_expert": {
+      "role": "expert",
+      "notes": "Scoped to 8 tools. Base for connector-specific market-making strategies."
+    },
+    "directional_trader": {
+      "role": "expert",
+      "notes": "Declares tools: [] so it inherits all 24. Base for directional strategies."
+    },
+    "solana_dex_lp_expert": {
+      "role": "expert",
+      "notes": "Scoped to 8 tools. Base for chain- or venue-specific LP strategies."
+    },
+    "meteora_launch_lp": {
+      "role": "expert",
+      "notes": "Scoped to 7 tools and holds the only exclusive grant in the roster (manage_amm), so no other domain's evidence covers its core tool."
+    },
+    "delta_neutral_funding_agent": {
+      "role": "strategy",
+      "base": "market_making_expert",
+      "notes": "Beta-weighted pair market making. Same tools as the market-making base plus manage_routines."
+    },
+    "xrpl_market_maker": {
+      "role": "strategy",
+      "base": "market_making_expert",
+      "notes": "Market making specialised to the XRPL CLOB connector."
+    },
+    "smart_money_flow": {
+      "role": "strategy",
+      "base": "directional_trader",
+      "notes": "Directional perp trading on Derive. Declares tools: [] like its base."
+    }
+  }
+}

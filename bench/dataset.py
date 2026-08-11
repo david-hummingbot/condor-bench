@@ -51,34 +51,62 @@ _DEFAULT_CONSULT_DOMAIN = "general_consult"
 # ("market_data") from something Condor can actually route ("market_making_expert").
 TOOL_DOMAIN_PREFIX = "tool:"
 
-# Agents condor ships that are *strategies*, not roles bench should size a model
-# for. A strategy is a user-created specialisation of a base specialist — an XRPL
-# market maker is market_making_expert pointed at one connector — so it exercises
-# the same tools and inherits its base's model assignment. Recommending a model per
-# strategy would multiply routing targets every time a user creates one, and the
-# evidence would be the base specialist's evidence wearing a different name.
-#
-# They are named explicitly rather than pattern-matched so that a genuinely new
-# agent shipped upstream still trips the roster drift check instead of being
-# silently swallowed as "probably a strategy".
-STRATEGY_AGENTS = frozenset(
-    {
-        "delta_neutral_funding_agent",
-        "xrpl_market_maker",
-        "smart_money_flow",
-    }
-)
+# Expert vs strategy comes from datasets/agent_roles.json, not from code. Users will
+# ship their own agents, so this has to be a one-line data decision per agent rather
+# than an edit here — and an *unclassified* agent must fail loudly instead of
+# defaulting either way, which is what the roster drift test enforces.
+AGENT_ROLES_PATH = DATASETS_DIR / "agent_roles.json"
+
+
+def load_agent_roles() -> dict[str, dict[str, Any]]:
+    """slug -> {role, domain?, base?, notes?}. Empty when the file is unreadable."""
+    try:
+        data = json.loads(AGENT_ROLES_PATH.read_text())
+    except Exception:
+        return {}
+    agents = data.get("agents")
+    return agents if isinstance(agents, dict) else {}
+
+
+def _slugs_with_role(role: str) -> frozenset[str]:
+    return frozenset(
+        slug
+        for slug, spec in load_agent_roles().items()
+        if isinstance(spec, dict) and spec.get("role") == role
+    )
+
+
+def strategy_agents() -> frozenset[str]:
+    """Agents that specialise another agent, so bench does not route them.
+
+    An XRPL market maker is a market maker pointed at one connector: it calls the
+    same tools and inherits its base's model assignment, so giving it a routing
+    domain would multiply recommendations on evidence that is the base's evidence
+    under a different name.
+    """
+    return _slugs_with_role("strategy")
+
+
+def expert_agents() -> frozenset[str]:
+    """Agents bench sizes a model for, each getting a routing domain."""
+    return _slugs_with_role("expert")
+
+
+def routing_domain_for(slug: str) -> str:
+    """The domain an expert's cases pool into. Usually the slug itself."""
+    spec = load_agent_roles().get(slug) or {}
+    return str(spec.get("domain") or slug)
 
 
 def is_routing_domain(domain: str) -> bool:
     """True when a domain names something a Condor model assignment can target.
 
     False for Layer 2 capability buckets (``tool:market_data`` — there is no config
-    key for "market data") and for strategies (see :data:`STRATEGY_AGENTS`).
+    key for "market data") and for strategies (see :func:`strategy_agents`).
     """
     if domain.startswith(TOOL_DOMAIN_PREFIX):
         return False
-    return domain not in STRATEGY_AGENTS
+    return domain not in strategy_agents()
 
 
 def _normalize_risk(value: Any) -> str:
