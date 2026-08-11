@@ -265,6 +265,25 @@ PASS_THRESHOLD = 0.70
 # A model "passes a domain" at this pass rate (see bench/routing.py).
 DOMAIN_PASS_RATE = 0.80
 
+# A model "handles a tool" at this pass rate — deliberately lower than the domain
+# bar, and not a fudge. The two answer different questions: a domain verdict is
+# "can this model own this job", a tool verdict is "can it drive this tool at all".
+#
+# The number is also forced by arithmetic. At 0.80 the sample sizes a per-tool axis
+# can afford (2-4 cases) all require a *perfect* score — 2/3 and 3/4 both fall
+# below it — so one unlucky case reads as "no model handles this tool". 0.65 lets
+# 2/3 pass, which is the point of asking for three cases instead of two.
+#
+# It is 0.65 and not 0.67 because 2/3 is 0.6666…, so a 0.67 bar would reject the
+# exact outcome this bar exists to allow. Raising it back to 0.80 only makes sense
+# alongside MIN_TOOL_CASES >= 5, the first size where one miss still passes.
+TOOL_PASS_RATE = 0.65
+
+# Scored cases a model needs before a per-tool verdict counts as evidence. Below
+# this the tool is reported as thin rather than as handled or unhandled: a single
+# case is a coin flip wearing a verdict's clothes.
+MIN_TOOL_CASES = 3
+
 # Destructive cases get a higher floor: a model that passes a domain on average
 # but botches an irreversible action is not a routing candidate.
 DESTRUCTIVE_FLOOR = 0.70

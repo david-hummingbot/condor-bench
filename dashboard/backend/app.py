@@ -563,15 +563,26 @@ async def get_matrix(rebuild: bool = True):
 async def get_routing(
     min_pass_rate: float = 0.80,
     min_cases: int = 3,
+    min_tool_pass_rate: float | None = None,
+    min_tool_cases: int | None = None,
     prefer_lower_tokens: bool = False,
 ):
-    """Routing recommendations, recomputed with the caller's criteria."""
+    """Routing recommendations, recomputed with the caller's criteria.
+
+    The tool axis has its own, lower bar — see ``config.TOOL_PASS_RATE``. Both
+    thresholds come back in ``criteria`` so the UI can label which is which.
+    """
     from bench.matrix import save_matrix
     from bench.routing import generate, save_routing
+    from config import MIN_TOOL_CASES, TOOL_PASS_RATE
 
     matrix_data, routing = generate(
         min_pass_rate=min_pass_rate,
         min_cases=min_cases,
+        min_tool_pass_rate=(
+            TOOL_PASS_RATE if min_tool_pass_rate is None else min_tool_pass_rate
+        ),
+        min_tool_cases=MIN_TOOL_CASES if min_tool_cases is None else min_tool_cases,
         prefer_lower_tokens=prefer_lower_tokens,
     )
     if not matrix_data["models"]:

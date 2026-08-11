@@ -400,6 +400,17 @@ def route(
     min_cases: int = typer.Option(
         3, help="Minimum scored cases before a domain verdict counts as evidence"
     ),
+    min_tool_pass_rate: float = typer.Option(
+        None,
+        help="Pass rate a model needs to 'handle' a tool. Deliberately below "
+        "--min-pass-rate: a tool verdict asks whether the model can drive the tool "
+        "at all, not whether it can own a domain. Defaults to TOOL_PASS_RATE.",
+    ),
+    min_tool_cases: int = typer.Option(
+        None,
+        help="Scored cases before a per-tool verdict counts. Below this the tool is "
+        "reported as thin. Defaults to MIN_TOOL_CASES.",
+    ),
     prefer_lower_tokens: bool = typer.Option(
         False,
         help="Break ties between equally-small models by average token use "
@@ -410,10 +421,15 @@ def route(
     """Generate routing recommendations: the smallest model that passes each domain."""
     from bench.matrix import save_matrix
     from bench.routing import generate, save_routing
+    from config import MIN_TOOL_CASES, TOOL_PASS_RATE
 
     matrix_data, routing = generate(
         min_pass_rate=min_pass_rate,
         min_cases=min_cases,
+        min_tool_pass_rate=(
+            TOOL_PASS_RATE if min_tool_pass_rate is None else min_tool_pass_rate
+        ),
+        min_tool_cases=MIN_TOOL_CASES if min_tool_cases is None else min_tool_cases,
         prefer_lower_tokens=prefer_lower_tokens,
         models_path=models,
     )

@@ -359,9 +359,18 @@ def test_per_tool_verdicts_use_expected_tools(tmp_path, registry):
     assert matrix["tools"]["get_market_data"]["ollama:mid:14b"]["pass_rate"] == 1.0
     assert matrix["tools"]["manage_routines"]["ollama:mid:14b"]["pass_rate"] == 0.0
 
+    # One case per tool is below MIN_TOOL_CASES, so neither gets a verdict — the
+    # matrix rows are still correct, the router just refuses to call them.
     routing = recommend(matrix, models_path=registry)
-    assert "get_market_data" in routing["tool_gaps"]["smallest_passing"]
-    assert "manage_routines" in routing["tool_gaps"]["unhandled"]
+    gaps = routing["tool_gaps"]
+    assert "get_market_data" in gaps["thin"]
+    assert "manage_routines" in gaps["thin"]
+    assert not gaps["smallest_passing"] and not gaps["unhandled"]
+
+    # With the guard relaxed to 1, the verdicts come back as before.
+    relaxed = recommend(matrix, models_path=registry, min_tool_cases=1)
+    assert "get_market_data" in relaxed["tool_gaps"]["smallest_passing"]
+    assert "manage_routines" in relaxed["tool_gaps"]["unhandled"]
 
 
 def test_domain_is_backfilled_for_runs_saved_before_the_field_existed(tmp_path, registry):
@@ -543,3 +552,91 @@ def test_a_live_domain_is_still_reported_as_unmet(tmp_path, registry):
     )
     assert live in routing["unmet_domains"]
     assert live not in routing["stale_domains"]
+
+
+# ── per-tool bar (separate from the domain bar) ─────────────────────────────────
+def _tool_cells(scored: int, passing: int) -> list[dict]:
+    """Cases for one tool: `passing` of `scored` clear PASS_THRESHOLD."""
+    return [
+        case(f"tc{i}", "general_consult", 0.95 if i < passing else 0.10,
+             expected_tools=["manage_routines"])
+        for i in range(scored)
+    ]
+
+
+def test_two_of_three_handles_a_tool_but_not_a_domain(tmp_path, registry):
+    """The whole reason the tool axis has its own bar.
+
+    2/3 = 67% clears the tool bar and fails the 80% domain bar. Under the old code
+    both used 0.80, so a single unlucky case marked the tool unhandled.
+    """
+    results = tmp_path / "results"
+    write_run(results, "ollama:mid:14b", _tool_cells(3, 2))
+
+    from bench.routing import generate
+
+    _, routing = generate(results_dir=results, models_path=registry)
+    gaps = routing["tool_gaps"]
+    assert "manage_routines" in gaps["smallest_passing"], gaps
+    assert "manage_routines" not in gaps["unhandled"]
+
+    # Same evidence, judged at the domain bar: not handled.
+    _, strict = generate(
+        results_dir=results, models_path=registry, min_tool_pass_rate=0.80
+    )
+    assert "manage_routines" in strict["tool_gaps"]["unhandled"]
+
+
+def test_a_single_case_is_reported_thin_not_as_a_verdict(tmp_path, registry):
+    """One passing case used to be enough to name a smallest_passing model."""
+    results = tmp_path / "results"
+    write_run(results, "ollama:mid:14b", _tool_cells(1, 1))
+
+    from bench.routing import generate
+
+    _, routing = generate(results_dir=results, models_path=registry)
+    gaps = routing["tool_gaps"]
+    assert "manage_routines" not in gaps["smallest_passing"]
+    assert "manage_routines" not in gaps["unhandled"]
+    assert gaps["thin"]["manage_routines"]["best_scored"] == 1
+    assert gaps["thin"]["manage_routines"]["needs"] == 3
+
+
+def test_enough_cases_and_all_failing_is_unhandled(tmp_path, registry):
+    results = tmp_path / "results"
+    write_run(results, "ollama:mid:14b", _tool_cells(3, 0))
+
+    from bench.routing import generate
+
+    _, routing = generate(results_dir=results, models_path=registry)
+    assert "manage_routines" in routing["tool_gaps"]["unhandled"]
+
+
+def test_both_thresholds_are_reported_so_the_ui_can_label_them(tmp_path, registry):
+    """A 67% tool row next to an 80% domain row must be self-describing."""
+    results = tmp_path / "results"
+    write_run(results, "ollama:mid:14b", _tool_cells(3, 3))
+
+    from bench.routing import generate
+    from config import MIN_TOOL_CASES, TOOL_PASS_RATE
+
+    _, routing = generate(results_dir=results, models_path=registry)
+    crit = routing["criteria"]
+    assert crit["min_tool_pass_rate"] == TOOL_PASS_RATE
+    assert crit["min_tool_cases"] == MIN_TOOL_CASES
+    assert crit["min_pass_rate"] != crit["min_tool_pass_rate"], (
+        "the two bars must differ, otherwise the separate tool axis is pointless"
+    )
+    assert routing["tool_gaps"]["criteria"]["min_tool_pass_rate"] == TOOL_PASS_RATE
+
+
+def test_tool_bar_stays_below_the_domain_bar():
+    """Guards the arithmetic: at 0.80 no affordable sample size tolerates a miss."""
+    from config import DOMAIN_PASS_RATE, MIN_TOOL_CASES, TOOL_PASS_RATE
+
+    assert TOOL_PASS_RATE < DOMAIN_PASS_RATE
+    # The point of MIN_TOOL_CASES is that one failure can still pass.
+    assert (MIN_TOOL_CASES - 1) / MIN_TOOL_CASES >= TOOL_PASS_RATE, (
+        f"{MIN_TOOL_CASES - 1}/{MIN_TOOL_CASES} must clear {TOOL_PASS_RATE} — "
+        "otherwise the guard buys no tolerance and the sample size is theatre"
+    )
