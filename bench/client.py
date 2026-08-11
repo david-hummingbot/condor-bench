@@ -106,6 +106,80 @@ def assistant_prompt_source(slug: str | None) -> str:
     return f"fallback:vendored (no prompt found for '{slug}')"
 
 
+def _agent_md(slug: str) -> Path | None:
+    """The AGENT.md condor would load for a slug, or None."""
+    repo = condor_path()
+    if repo is None:
+        return None
+    for candidate in (
+        repo / "agents" / slug / "AGENT.md",
+        repo / "assistants" / slug / "AGENT.md",
+        repo / "assistants" / f"{slug}.md",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def load_agent_tools(slug: str | None) -> list[str] | None:
+    """The tool grant condor gives this agent, or None for the full surface.
+
+    condor scopes an agent to its declared tools — ``allowed_tools=agent.tools or
+    None`` in ``runtime/sessions.py``, ``agents/consult.py`` and
+    ``agents/engine.py``. Benchmarking a specialist against all 24 tools when
+    production offers it 8 measures a harder task than the one it does, and the
+    bench-side ``_TOOL_LIMITS`` cap makes that worse rather than merely stricter:
+    the cut is ``tool_defs[:limit]`` over whatever was discovered, so a small
+    model on a ``market_making_expert`` case can be handed six tools that don't
+    include ``manage_executors`` and fail for a tool it was never shown.
+
+    ``None`` means two different things and the caller must not conflate them:
+    no slug (chat-scoped), or an agent that declares no ``tools:`` key and
+    therefore legitimately inherits everything — which is how ``condor``,
+    ``directional_trader`` and ``smart_money_flow`` are defined. Both cases want
+    no allowlist, so returning None for each is correct here; the distinction is
+    recorded separately in wiring metadata via :func:`agent_tool_scope`.
+    """
+    if not slug:
+        return None
+    path = _agent_md(slug)
+    if path is None:
+        return None
+    meta = _frontmatter(path.read_text())
+    tools = meta.get("tools")
+    if not isinstance(tools, list):
+        return None
+    names = [str(t).strip() for t in tools if str(t).strip()]
+    return names or None
+
+
+def agent_tool_scope(slug: str | None, allowed: list[str] | None) -> str:
+    """Why this case's tool set is what it is, for results metadata."""
+    if not slug:
+        return "chat_scoped"
+    if allowed:
+        return "granted"
+    if _agent_md(slug) is None:
+        return "no_agent_md"
+    return "full_surface"
+
+
+def _frontmatter(text: str) -> dict[str, Any]:
+    """Parse the leading YAML block of an AGENT.md. ``{}`` when absent or broken."""
+    if not text.startswith("---"):
+        return {}
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        import yaml  # noqa: PLC0415
+
+        data = yaml.safe_load(parts[1])
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _strip_frontmatter(text: str) -> str:
     if text.startswith("---"):
         parts = text.split("---", 2)
@@ -313,8 +387,16 @@ def _make_client(
     mcp_configs: list[dict],
     *,
     tool_filter_mode: str | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> tuple[Any, bool]:
-    """Build the right client for a model key. Returns (client, is_acp)."""
+    """Build the right client for a model key. Returns (client, is_acp).
+
+    ``allowed_tools`` scopes the model to an agent's grant the way production does.
+    The ACP path cannot take it — ACP agents resolve their own tools from the MCP
+    servers in their working directory — so an ACP run of an agent-scoped case sees
+    the full surface regardless. That is recorded in wiring metadata rather than
+    silently tolerated, because it makes those rows measure a different task.
+    """
     if is_acp_model(model):
         command, extra_env = resolve_acp(model)
         # ACP agents auto-discover stdio MCP servers from .mcp.json in their cwd.
@@ -336,6 +418,8 @@ def _make_client(
     kwargs: dict[str, Any] = {}
     if tool_filter_mode:
         kwargs["tool_filter_mode"] = tool_filter_mode
+    if allowed_tools:
+        kwargs["allowed_tools"] = list(allowed_tools)
     return PydanticAIClient(model=model, mcp_servers=mcp_configs, **kwargs), False
 
 
@@ -360,16 +444,21 @@ async def run_consult(
     agent_slug: None keeps the run chat-scoped (a production consult); a slug
       scopes condor's memory/skill tools to that agent's own stores.
     """
+    allowed_tools = load_agent_tools(agent_slug)
     all_turns: list[TurnResult] = []
     usage_acc: dict[str, Any] = {}
     outer_error: str | None = None
     mcp_configs: list[dict] = []
     is_acp = False
+    client: Any = None
 
     try:
         mcp_configs = build_mcp_configs(agent_slug=agent_slug)
         client, is_acp = _make_client(
-            model, mcp_configs, tool_filter_mode=tool_filter_mode
+            model,
+            mcp_configs,
+            tool_filter_mode=tool_filter_mode,
+            allowed_tools=allowed_tools,
         )
 
         await client.start()
@@ -409,7 +498,14 @@ async def run_consult(
         turns=all_turns,
         error=outer_error,
         usage=usage_acc,
-        wiring=wiring_metadata(mcp_configs, agent_slug=agent_slug, is_acp=is_acp)
+        wiring=wiring_metadata(
+            mcp_configs,
+            agent_slug=agent_slug,
+            is_acp=is_acp,
+            allowed_tools=allowed_tools,
+            tool_scope=agent_tool_scope(agent_slug, allowed_tools),
+            offered_tools=getattr(client, "offered_tools", None),
+        )
         | {"assistant_prompt": assistant_prompt_source(agent_slug) if agent_slug else None},
     )
 
@@ -428,18 +524,23 @@ async def run_tick(
     tools write to the chat's stores, and a case asserting
     ``trading_agent_journal_write`` measures the wrong thing.
     """
+    allowed_tools = load_agent_tools(agent_slug)
     all_turns: list[TurnResult] = []
     usage_acc: dict[str, Any] = {}
     outer_error: str | None = None
     mcp_configs: list[dict] = []
     is_acp = False
+    client: Any = None
 
     try:
         mcp_configs = build_mcp_configs(agent_slug=agent_slug)
-        # Ticks get the full tool set: production does not filter an agent's tools
+        # Ticks skip the model-size cap: production does not filter an agent's tools
         # by model size on the tick path, and a truncated set would make a tick
-        # failure indistinguishable from a tool that was never offered.
-        client, is_acp = _make_client(model, mcp_configs, tool_filter_mode="full")
+        # failure indistinguishable from a tool that was never offered. The agent's
+        # own grant still applies when it declares one.
+        client, is_acp = _make_client(
+            model, mcp_configs, tool_filter_mode="full", allowed_tools=allowed_tools
+        )
 
         await client.start()
         try:
@@ -459,7 +560,14 @@ async def run_tick(
         turns=all_turns,
         error=outer_error,
         usage=usage_acc,
-        wiring=wiring_metadata(mcp_configs, agent_slug=agent_slug, is_acp=is_acp),
+        wiring=wiring_metadata(
+            mcp_configs,
+            agent_slug=agent_slug,
+            is_acp=is_acp,
+            allowed_tools=allowed_tools,
+            tool_scope=agent_tool_scope(agent_slug, allowed_tools),
+            offered_tools=getattr(client, "offered_tools", None),
+        ),
     )
 
 

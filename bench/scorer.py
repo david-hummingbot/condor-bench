@@ -157,7 +157,7 @@ async def score(
     tool_names = result.tool_names()
     judge_before = JUDGE_USAGE.snapshot()
 
-    harness_artifact = _detect_harness_artifact(result)
+    harness_artifact = _detect_harness_artifact(result, expected_tools)
 
     def _card(**overrides: Any) -> ScoreCard:
         base: dict[str, Any] = {
@@ -250,7 +250,9 @@ async def score(
     )
 
 
-def _detect_harness_artifact(result: BenchmarkResult) -> str | None:
+def _detect_harness_artifact(
+    result: BenchmarkResult, expected_tools: list[str] | None = None
+) -> str | None:
     """Name the harness misconfiguration behind a bad row, if that's what it is.
 
     The failure this guards against: an agent-scoped case that ran chat-scoped
@@ -277,6 +279,25 @@ def _detect_harness_artifact(result: BenchmarkResult) -> str | None:
             f"ACP auto-discovery added {extras} from condor/.mcp.json — the tool "
             "set differs from the PydanticAI path, so tool scores are not comparable"
         )
+
+    # A case cannot fail on a tool it was never shown. The model-size cap trims
+    # `tool_defs[:limit]`, so a case whose expected tool sorted past the cut is
+    # measuring the harness, not the model — the failure mode that made scoping
+    # specialists to their grant worth doing in the first place.
+    offered = wiring.get("offered_tools")
+    if isinstance(offered, list) and offered and expected_tools:
+        from metrics.tool_accuracy import normalize_tool_name
+
+        have = {normalize_tool_name(str(t)) for t in offered}
+        missing = sorted(
+            {normalize_tool_name(str(t)) for t in expected_tools} - have
+        )
+        if missing:
+            return (
+                f"expected tool(s) {', '.join(missing)} were never offered to the "
+                f"model (it saw {len(have)}: {', '.join(sorted(have))}) — the case "
+                "measures the tool filter, not the model"
+            )
     return None
 
 

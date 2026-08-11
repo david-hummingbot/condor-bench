@@ -248,6 +248,9 @@ def wiring_metadata(
     *,
     agent_slug: str | None,
     is_acp: bool = False,
+    allowed_tools: list[str] | None = None,
+    tool_scope: str | None = None,
+    offered_tools: list[str] | None = None,
 ) -> dict[str, Any]:
     """Describe the wiring a case ran under, for results + matrix comparisons.
 
@@ -277,6 +280,12 @@ def wiring_metadata(
                 ", ".join(extras),
             )
 
+    # An agent-scoped case on the ACP path keeps the full surface: ACPClient has no
+    # allowlist hook, so condor's grant cannot be applied there. Recorded rather
+    # than tolerated — those rows measure tool discrimination over 24 tools while
+    # the PydanticAI rows measure judgment over 7-9.
+    scope = tool_scope or "chat_scoped"
+    unscoped_acp = bool(is_acp and allowed_tools)
     return {
         "agent_slug": agent_slug,
         "agent_scoped": agent_slug is not None,
@@ -285,6 +294,9 @@ def wiring_metadata(
         "server_name": _server_name_arg(configs),
         "tool_count_effective": tool_count,
         "autodiscovery_extras": extras,
+        "tool_scope": "unscoped_acp" if unscoped_acp else scope,
+        "allowed_tools": sorted(allowed_tools) if allowed_tools else None,
+        "offered_tools": sorted(offered_tools) if offered_tools else None,
     }
 
 
