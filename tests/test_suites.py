@@ -118,11 +118,11 @@ def test_suite_store_crud_and_namespaced_import(tmp_path: Path, monkeypatch: pyt
         }
     )
     imported = suites.import_library_cases(
-        "canary", case_ids=["c001"], expected_version=suite["version"]
+        "canary", case_ids=["c002"], expected_version=suite["version"]
     )
     assert len(imported) == 1
     assert imported[0]["id"].startswith("canary__")
-    assert imported[0]["source_case_id"] == "c001"
+    assert imported[0]["source_case_id"] == "c002"
 
     suite2 = suites.get_suite("canary")
     prompts = suites.suite_prompt_map("canary")
@@ -191,3 +191,60 @@ def test_build_run_pin_paths_are_strings():
     for key in ("shared_py", "config_yml", "acp_working_dir", "sys_path_head"):
         val = condor["loaded"][key]
         assert val is None or isinstance(val, str)
+
+
+def test_import_names_case_ids_the_library_no_longer_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A partial import must not read as a complete one.
+
+    ``import_library_cases`` walks the library and keeps what was asked for, so an
+    id that has been trimmed is simply never reached; it only raises when *nothing*
+    matched. Asking for one live case and one deleted case therefore returned 200
+    having imported one of the two, with no indication which. Trimming the dataset
+    is exactly what makes stale ids reachable, so the endpoint reports the misses.
+    """
+    import asyncio
+
+    import bench.suites as suites
+    from dashboard.backend.app import api_import_suite_cases
+
+    monkeypatch.setattr(suites, "SUITES_DIR", tmp_path / "suites")
+    monkeypatch.setattr(suites, "ENVIRONMENTS_DIR", tmp_path / "suites" / "environments")
+
+    suite = suites.create_suite({"id": "canary", "name": "Canary"})
+    payload = asyncio.run(
+        api_import_suite_cases(
+            "canary",
+            {"case_ids": ["c002", "c001"], "version": suite["version"]},
+        )
+    )
+
+    assert payload["count"] == 1
+    assert payload["unknown_case_ids"] == ["c001"], (
+        "c001 was trimmed from the library — the caller has to be told, or the "
+        "import looks like it took both ids"
+    )
+
+
+def test_import_reports_nothing_unknown_when_every_id_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+
+    import bench.suites as suites
+    from dashboard.backend.app import api_import_suite_cases
+
+    monkeypatch.setattr(suites, "SUITES_DIR", tmp_path / "suites")
+    monkeypatch.setattr(suites, "ENVIRONMENTS_DIR", tmp_path / "suites" / "environments")
+
+    suite = suites.create_suite({"id": "canary", "name": "Canary"})
+    payload = asyncio.run(
+        api_import_suite_cases(
+            "canary",
+            {"case_ids": ["c002", "t006"], "version": suite["version"]},
+        )
+    )
+
+    assert payload["count"] == 2
+    assert payload["unknown_case_ids"] == []

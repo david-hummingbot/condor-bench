@@ -10,6 +10,8 @@ Endpoints:
   GET  /api/runs              list completed + active runs
   GET  /api/runs/{id}         get completed run detail
   GET  /api/runs/{id}/stream  SSE live progress
+  POST /api/runs/{id}/pause   stop after the in-flight case (for 429 backoff)
+  POST /api/runs/{id}/resume  continue a paused run
   DELETE /api/runs/{id}       cancel active run
   GET  /api/matrix            model × domain/tool matrix (rebuilt on request)
   GET  /api/routing           routing recommendations
@@ -158,6 +160,50 @@ async def _emit(run_id: str, event: dict) -> None:
         await q.put(event)
 
 
+# A paused run still owns the staging target and its accumulated scorecards, so it
+# counts as active: starting a second run alongside it would interleave two models
+# against one condor instance, which is the thing the one-run-at-a-time guard exists
+# to prevent. It also has to keep showing up in /api/runs, or the UI offers no way
+# back to the run holding the lock.
+_ACTIVE_STATUSES = ("starting", "running", "paused")
+
+
+async def _await_resume(run_id: str, state: dict) -> None:
+    """Block at a case boundary while the run is paused.
+
+    Called *between* cases, never mid-case: a pause that abandoned an in-flight
+    call would leave a mutating case half-applied with no teardown, which is the
+    one thing cancel already has to be careful about. Waiting here means the pause
+    costs at most one more case, and the run resumes on the same connection.
+
+    Pausing is what a 429 actually calls for — the provider is asking for fewer
+    requests per minute, and cancelling would throw away every case already paid
+    for.
+    """
+    pause_event = state.get("pause_event")
+    if pause_event is None or not pause_event.is_set():
+        return
+
+    state["status"] = "paused"
+    await _emit(run_id, {"type": "run_paused", "case_id": state.get("next_case")})
+
+    while pause_event.is_set() and not state.get("cancelling"):
+        # Polled rather than awaited on a second event so that cancelling a paused
+        # run stays instant: task.cancel() lands on this sleep.
+        await asyncio.sleep(0.25)
+
+    # `cancel_run` clears the pause flag so the cancellation can land, which looks
+    # exactly like a resume from in here. Announcing one would flash the run back to
+    # "running" a beat before it reports "cancelled"; the `cancelling` marker is what
+    # tells the two apart. Leave the status at "paused" and let the caller's
+    # CancelledError handler set the final state.
+    if state.get("cancelling"):
+        return
+
+    state["status"] = "running"
+    await _emit(run_id, {"type": "run_resumed", "case_id": state.get("next_case")})
+
+
 async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.baseline import BaselineStore
     from bench.cleanup import teardown
@@ -166,7 +212,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.scorer import score_case
-    from config import build_run_pin
+    from config import CASE_TIMEOUT_S, build_run_pin
 
     state = _active_runs[run_id]
     state["status"] = "running"
@@ -225,6 +271,11 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     os.environ[k] = v
 
                 for case in cases:
+                    # Gate before the case starts, so a pause requested mid-case
+                    # takes effect once that case has finished and been cleaned up.
+                    state["next_case"] = case.id
+                    await _await_resume(run_id, state)
+
                     state["current_case"] = case.id
                     question = case_input_text(case)
                     await _emit(run_id, {
@@ -243,7 +294,9 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     sc_dict: dict = {}
                     response = ""
                     try:
-                        result = await run_case(case, norm_key)
+                        result = await asyncio.wait_for(
+                            run_case(case, norm_key), timeout=CASE_TIMEOUT_S
+                        )
                         baseline = store.load(case.id)
                         baseline_latency = baseline.latency_s if baseline else result.latency_s
                         sc = await score_case(case, result, baseline_latency)
@@ -268,6 +321,8 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                                 })
                     except asyncio.CancelledError:
                         raise
+                    except asyncio.TimeoutError:
+                        error = f"timed out after {CASE_TIMEOUT_S:.0f}s"
                     except Exception as exc:
                         error = str(exc)
 
@@ -763,10 +818,12 @@ class CustomPromptRequest(BaseModel):
 
 @app.post("/api/runs")
 async def create_run(req: RunRequest):
-    # One run at a time
+    # One run at a time (a paused run still holds the target — see _ACTIVE_STATUSES)
     for state in _active_runs.values():
-        if state["status"] in ("starting", "running"):
-            raise HTTPException(409, "A benchmark is already running. Cancel it first.")
+        if state["status"] in _ACTIVE_STATUSES:
+            raise HTTPException(
+                409, f"A benchmark is already {state['status']}. Cancel it first."
+            )
 
     run_id = uuid.uuid4().hex[:8]
     _active_runs[run_id] = {
@@ -777,8 +834,10 @@ async def create_run(req: RunRequest):
         "task": None,
         "total": 0,
         "current_case": None,
+        "next_case": None,
         "started_at": time.time(),
         "models": [m.model_key for m in req.models],
+        "pause_event": asyncio.Event(),
     }
     task = asyncio.create_task(_run_benchmark(run_id, req))
     _active_runs[run_id]["task"] = task
@@ -790,13 +849,52 @@ async def cancel_run(run_id: str):
     state = _active_runs.get(run_id)
     if not state:
         raise HTTPException(404, "Run not found")
+    state["cancelling"] = True
     cancel_event = state.get("cancel_event")
     if cancel_event is not None:
         cancel_event.set()
+    # A paused run parks in a sleep loop; clearing the flag lets the cancellation
+    # land immediately instead of after a resume that will never come. `cancelling`
+    # is set first so the gate reads this as a cancel rather than as a resume.
+    pause_event = state.get("pause_event")
+    if pause_event is not None:
+        pause_event.clear()
     task = state.get("task")
     if task and not task.done():
         task.cancel()
     return {"status": "cancelling"}
+
+
+@app.post("/api/runs/{run_id}/pause")
+async def pause_run(run_id: str):
+    """Ask the run to stop at the next case boundary.
+
+    Returns as soon as the request is recorded — the run is still `running` until
+    the in-flight case finishes, at which point it emits `run_paused`. Callers that
+    need the settled state should watch the event stream rather than this response.
+    """
+    state = _active_runs.get(run_id)
+    if not state:
+        raise HTTPException(404, "Run not found")
+    if state["status"] not in ("starting", "running", "paused"):
+        raise HTTPException(409, f"Run is {state['status']} — nothing to pause.")
+    pause_event = state.get("pause_event")
+    if pause_event is None:
+        raise HTTPException(409, "This run does not support pausing.")
+    pause_event.set()
+    return {"status": state["status"], "pause_requested": True}
+
+
+@app.post("/api/runs/{run_id}/resume")
+async def resume_run(run_id: str):
+    state = _active_runs.get(run_id)
+    if not state:
+        raise HTTPException(404, "Run not found")
+    pause_event = state.get("pause_event")
+    if pause_event is None:
+        raise HTTPException(409, "This run does not support pausing.")
+    pause_event.clear()
+    return {"status": state["status"], "pause_requested": False}
 
 
 @app.get("/api/runs/{run_id}/stream")
@@ -851,14 +949,19 @@ async def list_runs():
 
     active = []
     for rid, state in _active_runs.items():
-        if state["status"] in ("starting", "running"):
+        if state["status"] in _ACTIVE_STATUSES:
+            # `.get` on models: a suite run's state carries `suite_id` and takes its
+            # model list from the suite, so it never sets this key — and subscripting
+            # it made this whole endpoint 500 whenever a suite run was in flight,
+            # which is exactly when the UI needs to find its way back to the run.
             active.append({
                 "run_id": rid,
                 "status": state["status"],
-                "models": state["models"],
-                "total": state["total"],
+                "models": state.get("models", []),
+                "total": state.get("total", 0),
                 "active": True,
-                "started_at": state["started_at"],
+                "started_at": state.get("started_at"),
+                "suite_id": state.get("suite_id"),
             })
     for rid, state in _custom_runs.items():
         if state["status"] in ("starting", "running"):
@@ -1164,13 +1267,21 @@ async def api_import_suite_cases(suite_id: str, body: dict):
     if expected is None:
         raise HTTPException(400, "version is required")
     try:
+        requested = body.get("case_ids") or []
         imported = import_library_cases(
             suite_id,
-            case_ids=body.get("case_ids"),
+            case_ids=requested,
             layers=body.get("layers"),
             expected_version=int(expected),
         )
-        return {"imported": imported, "count": len(imported)}
+        # `import_library_cases` walks the library and keeps what was asked for, so
+        # an id that no longer exists is simply never reached — it only raises when
+        # *nothing* matched. Asking for a trimmed case alongside a live one therefore
+        # succeeded quietly, having imported one of the two. Name the misses so a
+        # stale id reads as a mistake rather than as a completed import.
+        found = {r.get("source_case_id") for r in imported}
+        unknown = [cid for cid in requested if cid not in found]
+        return {"imported": imported, "count": len(imported), "unknown_case_ids": unknown}
     except SuiteStoreError as exc:
         raise _suite_http_error(exc) from exc
 
@@ -1201,8 +1312,10 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
     from bench.suites import SuiteStoreError, get_suite
 
     for state in _active_runs.values():
-        if state["status"] in ("starting", "running"):
-            raise HTTPException(409, "A benchmark is already running. Cancel it first.")
+        if state["status"] in _ACTIVE_STATUSES:
+            raise HTTPException(
+                409, f"A benchmark is already {state['status']}. Cancel it first."
+            )
 
     try:
         get_suite(suite_id)
@@ -1211,6 +1324,7 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
 
     run_id = uuid.uuid4().hex[:8]
     cancel_event = asyncio.Event()
+    pause_event = asyncio.Event()
     _active_runs[run_id] = {
         "run_id": run_id,
         "status": "starting",
@@ -1219,9 +1333,14 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
         "task": None,
         "total": 0,
         "current_case": None,
+        "next_case": None,
         "started_at": time.time(),
         "suite_id": suite_id,
         "cancel_event": cancel_event,
+        # Suite runs fan out to subprocess workers, so the finest boundary the
+        # parent can hold is between members, not between cases. Pausing a suite
+        # run therefore waits out the whole current model × environment member.
+        "pause_event": pause_event,
     }
 
     async def _go():
@@ -1245,6 +1364,7 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
                 environment_ids=req.environment_ids,
                 models=model_dicts,
                 cancel_event=cancel_event,
+                wait_if_paused=lambda: _await_resume(run_id, _active_runs[run_id]),
             )
             state["status"] = "completed"
         except asyncio.CancelledError:

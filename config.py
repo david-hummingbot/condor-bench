@@ -319,3 +319,14 @@ DESTRUCTIVE_FLOOR = 0.70
 # `composite >= PASS_THRESHOLD` rather than reading ScoreCard.passed, so a flag on
 # the scorecard would never reach a domain pass rate.
 POST_CONDITION_FAIL_CAP = 0.50
+
+# Wall-clock ceiling for a single case, in seconds. Runs are serial, so one case
+# that never returns stalls the whole sweep behind it — `c012` ("what skills do
+# you have?", a bare `manage_skill:list`) once took 609s, 23% of a 45-minute
+# suite, for a lookup whose median is under 16s.
+#
+# A timeout is scored as an infra failure, not as a 0: the model was not measured,
+# so excluding it is the honest reading (see bench/matrix.py). That means a
+# too-tight value silently thins the tool axis rather than failing loudly, which
+# is why this is well above the slowest legitimate case rather than near it.
+CASE_TIMEOUT_S = 180.0

@@ -14,6 +14,7 @@ from bench.suites import get_environment, get_suite
 from config import ROOT
 
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
+WaitFn = Callable[[], Awaitable[None]]
 
 
 async def run_suite(
@@ -25,6 +26,7 @@ async def run_suite(
     environment_ids: list[str] | None = None,
     models: list[dict[str, Any]] | None = None,
     cancel_event: asyncio.Event | None = None,
+    wait_if_paused: WaitFn | None = None,
 ) -> dict[str, Any]:
     """Fan out suite × environments × models via subprocess workers.
 
@@ -67,6 +69,12 @@ async def run_suite(
     current_proc: asyncio.subprocess.Process | None = None
 
     for index, (env, model_cfg) in enumerate(members_plan):
+        # Members are subprocesses, so this is the finest boundary the parent can
+        # pause on — the current member runs to completion first. Held before the
+        # cancel check so a cancel issued while paused still wins.
+        if wait_if_paused is not None:
+            await wait_if_paused()
+
         if cancel_event and cancel_event.is_set():
             await emit(
                 {

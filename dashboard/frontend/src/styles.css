@@ -306,6 +306,7 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .status-badge.completed { background: rgba(39, 195, 110, 0.12); color: var(--green); }
 .status-badge.failed { background: rgba(232, 64, 64, 0.12); color: var(--red); }
 .status-badge.cancelled, .status-badge.idle { background: rgba(123, 135, 160, 0.12); color: var(--muted); }
+.status-badge.paused { background: rgba(240, 180, 41, 0.12); color: var(--yellow); }
 
 .type-tag {
   display: inline-block; font-size: 10px; font-weight: 650; padding: 2px 7px;

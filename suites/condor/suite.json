@@ -1,7 +1,7 @@
 {
   "id": "condor",
   "name": "Condor",
-  "version": 2,
+  "version": 3,
   "environment_ids": [],
   "models": [
     {
@@ -10,6 +10,6 @@
   ],
   "include_in_matrix": false,
   "notes": "",
-  "updated_at": "2026-08-09T16:49:47.671304Z",
-  "cases_version": 2
+  "updated_at": "2026-08-12T05:57:42.345740Z",
+  "cases_version": 3
 }

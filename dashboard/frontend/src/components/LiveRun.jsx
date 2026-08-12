@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useRef } from 'react'
-import { cancelRun, streamUrl } from '../api.js'
+import { cancelRun, pauseRun, resumeRun, streamUrl } from '../api.js'
 import { scoreColor, fmtScore, fmtLatency, PASS_THRESHOLD } from '../utils.js'
 import casePrompts from '../casePrompts.json'
 import PageHeader from './PageHeader.jsx'
@@ -18,6 +18,9 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
   const [cases, setCases] = useState([]) // live result rows
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState(null)
+  // Requested-but-not-yet-settled: the button flips immediately, while the run
+  // finishes the case in flight. `status` becomes 'paused' when it actually stops.
+  const [pausePending, setPausePending] = useState(false)
   const esRef = useRef(null)
 
   const [memberInfo, setMemberInfo] = useState(null)
@@ -101,6 +104,12 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
         }
       } else if (t === 'model_done') {
         setCurrentModel(null)
+      } else if (t === 'run_paused') {
+        setStatus('paused')
+        setPausePending(false)
+      } else if (t === 'run_resumed') {
+        setStatus('running')
+        setPausePending(false)
       } else if (t === 'run_done') {
         setStatus(evt.status || 'completed')
         setCurrentCase(null)
@@ -127,6 +136,20 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
   const handleCancel = async () => {
     if (!runId) return
     try { await cancelRun(runId) } catch {}
+  }
+
+  const handlePauseToggle = async () => {
+    if (!runId) return
+    const resuming = status === 'paused'
+    // Optimistic only for pause — resume is confirmed by the run_resumed event,
+    // and showing 'running' before the loop wakes would misreport the state.
+    if (!resuming) setPausePending(true)
+    try {
+      await (resuming ? resumeRun(runId) : pauseRun(runId))
+    } catch (e) {
+      setPausePending(false)
+      setError(e.message || 'Could not change pause state')
+    }
   }
 
   if (!runId) {
@@ -157,8 +180,24 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
         title="Live run"
         description="Case-by-case progress, streamed as the run executes. Results are saved even if you navigate away."
       >
-        <span className={`status-badge ${status}`}>{status}</span>
-        {(status === 'running' || status === 'connecting') && (
+        <span className={`status-badge ${status}`}>
+          {pausePending ? 'pausing…' : status}
+        </span>
+        {(status === 'running' || status === 'paused') && (
+          <button
+            className="btn sm"
+            onClick={handlePauseToggle}
+            disabled={pausePending}
+            title={
+              status === 'paused'
+                ? 'Continue with the next case'
+                : 'Finish the case in flight, then stop before the next one'
+            }
+          >
+            {status === 'paused' ? '▶ Resume' : pausePending ? '⏸ Pausing…' : '⏸ Pause'}
+          </button>
+        )}
+        {(status === 'running' || status === 'connecting' || status === 'paused') && (
           <button className="btn sm danger" onClick={handleCancel}>Cancel</button>
         )}
         {(status === 'completed' || status === 'cancelled' || status === 'failed') && (
@@ -184,9 +223,11 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
         </div>
         <div className="progress-label">
           <span>
-            {currentCase
-              ? <>{currentCase.type === 'tick' ? '🔁' : '💬'} {currentCase.id}</>
-              : status === 'completed' ? 'All done' : ''}
+            {status === 'paused'
+              ? 'Paused — no case running'
+              : currentCase
+                ? <>{currentCase.type === 'tick' ? '🔁' : '💬'} {currentCase.id}</>
+                : status === 'completed' ? 'All done' : ''}
           </span>
           <span>{completed} / {total || '?'}</span>
         </div>

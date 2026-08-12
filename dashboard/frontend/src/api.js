@@ -31,6 +31,13 @@ export const streamCustomPromptUrl = (id) => `/api/custom-prompt/${id}/stream`
 export const cancelRun = (id) =>
   fetch(`/api/runs/${id}`, { method: 'DELETE' }).then(handle)
 
+/** Stop after the in-flight case finishes. Resolves on acceptance, not on pause. */
+export const pauseRun = (id) =>
+  fetch(`/api/runs/${id}/pause`, { method: 'POST' }).then(handle)
+
+export const resumeRun = (id) =>
+  fetch(`/api/runs/${id}/resume`, { method: 'POST' }).then(handle)
+
 export const listRuns = () => fetch('/api/runs').then(handle)
 export const getRun = (dir) => fetch(`/api/runs/${dir}`).then(handle)
 export const streamUrl = (id) => `/api/runs/${id}/stream`

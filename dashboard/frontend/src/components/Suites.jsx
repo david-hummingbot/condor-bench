@@ -69,7 +69,10 @@ export default function Suites({ onRunStarted }) {
   const [runs, setRuns] = useState([])
   const [compare, setCompare] = useState(null)
   const [newCaseQ, setNewCaseQ] = useState('')
-  const [importIds, setImportIds] = useState('c001,c002')
+  // Empty, not a sample id list: this used to default to 'c001,c002', so clicking
+  // Import without editing silently imported two cases nobody asked for — and once
+  // c001 was trimmed from the library, one of the two no longer existed.
+  const [importIds, setImportIds] = useState('')
   const [envForm, setEnvForm] = useState({
     name: '',
     condor_path: '',
@@ -192,10 +195,17 @@ export default function Suites({ onRunStarted }) {
     setError(null)
     try {
       const ids = importIds.split(/[\s,]+/).filter(Boolean)
-      await importSuiteCases(detail.id, {
+      const res = await importSuiteCases(detail.id, {
         case_ids: ids,
         version: detail.version,
       })
+      // A partial import is a success server-side; say so here rather than letting
+      // "imported 1 of 2" look like "imported everything you asked for".
+      if (res?.unknown_case_ids?.length) {
+        setError(
+          `Imported ${res.count}. Not in the library: ${res.unknown_case_ids.join(', ')}`
+        )
+      }
       await loadDetail(detail.id)
       await refresh()
     } catch (err) {
@@ -437,10 +447,14 @@ export default function Suites({ onRunStarted }) {
                     <input
                       value={importIds}
                       onChange={(e) => setImportIds(e.target.value)}
-                      placeholder="c001,c002,…"
+                      placeholder="Case ids from the library, e.g. c002, t006"
                       style={{ flex: 1 }}
                     />
-                    <button className="btn" onClick={handleImport} disabled={busy}>
+                    <button
+                      className="btn"
+                      onClick={handleImport}
+                      disabled={busy || !importIds.trim()}
+                    >
                       Import
                     </button>
                   </div>

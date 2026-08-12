@@ -19,17 +19,9 @@ This file describes the *favorable decision and content*, not a verbatim script 
 
 ## Consult cases (`consult.jsonl`)
 
-The dataset was refactored (2026-08-09) to a single "everyday usage" category: 15 simple, high-frequency status-lookup questions real users ask most often, each resolving to exactly one tool call. See `FRAMEWORK_IMPROVEMENTS.md` §10 for the roadmap toward broader per-tool/per-agent coverage.
+The dataset was refactored (2026-08-09) to a single "everyday usage" category: 10 simple, high-frequency status-lookup questions real users ask most often, each resolving to exactly one tool call. See `FRAMEWORK_IMPROVEMENTS.md` §10 for the roadmap toward broader per-tool/per-agent coverage.
 
 ### Everyday usage
-
-#### c001 — Portfolio balance
-**Question:** What's my current portfolio balance?
-
-**Favorable outcome**
-- Call `get_portfolio_overview` and report total/available balance in plain terms.
-- Don't fabricate numbers if the tool result is empty/unavailable — say so.
-- Tools: `get_portfolio_overview`.
 
 #### c002 — Active API server
 **Question:** What API server am I connected to right now?
@@ -37,13 +29,6 @@ The dataset was refactored (2026-08-09) to a single "everyday usage" category: 1
 **Favorable outcome**
 - Call `get_user_context` and state the `active_server` value directly.
 - Tools: `get_user_context`.
-
-#### c003 — BTC/USDT price
-**Question:** What's the current price of BTC/USDT?
-
-**Favorable outcome**
-- Call `get_market_data` and report the mid/bid/ask price.
-- Tools: `get_market_data`.
 
 #### c004 — Open orders
 **Question:** Do I have any open orders right now?
@@ -80,13 +65,6 @@ The dataset was refactored (2026-08-09) to a single "everyday usage" category: 1
 - Call `search_history` and summarize recent fills (pair, side, price, time).
 - Tools: `search_history`.
 
-#### c009 — Active executors
-**Question:** What executors do I have active right now?
-
-**Favorable outcome**
-- Call `manage_executors` (list/search) and summarize active executors by pair/type.
-- Tools: `manage_executors`.
-
 #### c010 — Accessible servers
 **Question:** List the API servers I have access to.
 
@@ -101,28 +79,12 @@ The dataset was refactored (2026-08-09) to a single "everyday usage" category: 1
 - Call `manage_trading_agent` (list agents) and summarize agent names/slugs/status.
 - Tools: `manage_trading_agent`.
 
-#### c012 — Available skills
-**Question:** What skills do you have available to you?
-
-**Favorable outcome**
-- Call `manage_skill` (list) and summarize available playbooks.
-- Tools: `manage_skill`.
-
 #### c014 — BTC perpetual funding rate
 **Question:** What's the funding rate on BTC perpetual right now?
 
 **Favorable outcome**
 - Call `get_market_data` (funding rate, on a `_perpetual` connector) and report the rate plainly.
 - Tools: `get_market_data`.
-
-#### c015 — Open LP positions
-**Question:** Do I have any LP positions open?
-
-**Favorable outcome**
-- Call `get_portfolio_overview` (LP positions included) and list any open positions, or state there are none.
-- Tools: `get_portfolio_overview`.
-
----
 
 ## Tick cases (`tick.jsonl`)
 
@@ -194,25 +156,20 @@ pooled into `general_consult`. Keeping them in `agents.jsonl` implied a second
 routing target that does not exist. `agents.jsonl` is specialists only — every case
 in it names a slug.
 
-This table is generated from the datasets; regenerate it rather than editing by
-hand when case ground truth changes.
+This table mirrors the datasets and is maintained by hand — update it in the same
+commit that changes case ground truth.
 
 | ID | Expected tools | Pinned params | Must not call | Risk | Slug |
 |----|----------------|---------------|---------------|------|------|
-| c001 | `get_portfolio_overview` | `include_balances=True` | — | read_only | — |
 | c002 | `get_user_context` | — | — | read_only | — |
-| c003 | `get_market_data` | `connector_name=binance`, `trading_pair=BTC-USDT`, `data_type=prices` | — | read_only | — |
 | c004 | `get_portfolio_overview` | `include_active_orders=True` | — | read_only | — |
 | c005 | `manage_bots` | `action=status` | — | read_only | — |
 | c006 | `manage_servers` | `action=status` | — | read_only | — |
 | c007 | `manage_executors` | `action=get_all_bots` | — | read_only | — |
 | c008 | `search_history` | `data_type=orders` | — | read_only | — |
-| c009 | `manage_executors` | `action=get_all_bots` | — | read_only | — |
 | c010 | `manage_servers` | `action=list` | — | read_only | — |
 | c011 | `manage_trading_agent` | `action=list` | — | read_only | — |
-| c012 | `manage_skill` | `action=list` | — | read_only | — |
 | c014 | `get_market_data` | `connector_name=binance`, `data_type=funding_info` | — | read_only | — |
-| c015 | `get_portfolio_overview` | `include_lp_positions=True` | — | read_only | — |
 | agent_condor_005 | `manage_executors` | `action=create`, `trading_pair=BTC-USDT`, `connector_name=binance` | — | destructive | — |
 | agent_condor_006 | `manage_notes` | `action=write` | — | mutating | — |
 | agent_condor_routine_001 | `manage_skill`, `manage_routines` | `action=read`, `action=create_routine`, `name=bench_btc_price` | — | mutating | — |

@@ -152,13 +152,13 @@ async def _run_cases(cases, model: str, store):
     from bench.client import run_case
     from bench.dataset import is_mutating
     from bench.scorer import score_case
-    from config import PASS_THRESHOLD
+    from config import CASE_TIMEOUT_S, PASS_THRESHOLD
 
     scorecards, responses = [], {}
     for case in cases:
         console.print(f"  [dim]{case.id}[/dim] ({case.type})", end=" ")
         try:
-            result = await run_case(case, model)
+            result = await asyncio.wait_for(run_case(case, model), timeout=CASE_TIMEOUT_S)
             baseline = store.load(case.id)
             baseline_latency = baseline.latency_s if baseline else result.latency_s
             card = await score_case(case, result, baseline_latency)
@@ -190,6 +190,8 @@ async def _run_cases(cases, model: str, store):
                         f"      [yellow]left behind: {row.get('tool')} "
                         f"{row.get('identifier')} — {row.get('error') or row.get('reason', 'manual')}[/yellow]"
                     )
+        except asyncio.TimeoutError:
+            console.print(f"[red]TIMEOUT after {CASE_TIMEOUT_S:.0f}s — excluded[/red]")
         except Exception as exc:
             console.print(f"[red]ERROR: {exc}[/red]")
     return scorecards, responses
