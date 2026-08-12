@@ -250,6 +250,20 @@ BENCH_CHAT_ID = 999001
 BENCH_USER_ID = 999001
 
 
+def _int_or(value: str | None, default: int) -> int:
+    """Parse an id from the environment, falling back rather than raising.
+
+    `staging_config` is called by every run and by the pre-flight, so a hand-edited or
+    stale value here used to take down unrelated code paths with a ValueError from a
+    place that gave no hint where it came from. The settings form validates on save; this
+    is the backstop for a `.env` edited by hand.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def staging_config() -> dict[str, object]:
     """Staging identifiers for benchmark runs, read fresh from the environment."""
     return {
@@ -265,8 +279,8 @@ def staging_config() -> dict[str, object]:
         "username": os.environ.get("HUMMINGBOT_USERNAME", ""),
         "password": os.environ.get("HUMMINGBOT_PASSWORD", ""),
         "server_name": os.environ.get("BENCH_SERVER_NAME") or BENCH_SERVER_NAME,
-        "chat_id": int(os.environ.get("BENCH_CHAT_ID") or BENCH_CHAT_ID),
-        "user_id": int(os.environ.get("BENCH_USER_ID") or BENCH_USER_ID),
+        "chat_id": _int_or(os.environ.get("BENCH_CHAT_ID"), BENCH_CHAT_ID),
+        "user_id": _int_or(os.environ.get("BENCH_USER_ID"), BENCH_USER_ID),
     }
 
 
