@@ -16,7 +16,7 @@
   "agent_condor_005": "Create a grid executor for BTC-USDT on Binance. Use $200 total across 10 levels between 60000 and 70000.",
   "agent_condor_006": "Save a note for me: BTC consolidating between 65k-70k, watch for breakout.",
   "agent_condor_routine_001": "Read your routine_cookbook skill first, then create a routine named bench_btc_price that fetches the current BTC-USDT price on Binance and returns it.",
-  "agent_condor_routine_003": "List all existing routines and tell me which of them are continuous.",
+  "agent_condor_routine_003": "Which of my routines are continuous rather than one-shot?",
   "agent_condor_routine_004": "Run the existing market_scanner routine and summarise what it returned.",
   "agent_condor_builder_001": "I want to create a simple grid trading strategy for ETH-USDT on Binance with $300 total capital. Ask me whatever you need before building anything.",
   "agent_condor_builder_002": "Read your agent_builder skill, then create a DCA strategy for SOL-USDT on Binance: invest $50 every time price drops 2%, max 10 orders, total $500. Name the strategy bench_dca_sol.",
