@@ -165,13 +165,29 @@ def test_the_answer_survives_a_tool_log_longer_than_the_judge_window():
             )
         ],
     )
+    # Eight calls at the full per-tool allowance used to produce ~13k characters against
+    # an 8000 cap, so a third of the log was unreachable however it was ordered — and
+    # the tail is where the *last* tool's output lives. A judge shown a truncated log
+    # concluded a call had never happened and marked a verbatim quote as fabricated
+    # (`agent_directional_trader_002`, aq 0.55). The log budget is now shared across the
+    # calls, so the whole transcript fits.
     transcript = result.transcript_for_judge()
-    assert len(transcript) > JUDGE_INPUT_CHARS, (
-        "premise gone: this transcript no longer overflows the judge window"
+    assert len(transcript) <= JUDGE_INPUT_CHARS, (
+        f"tool log budget exceeded the judge window: {len(transcript)} chars"
     )
     assert "THE ACTUAL ANSWER" in transcript[:JUDGE_INPUT_CHARS], (
         "the answer was pushed out of the judge's view by the tool log"
     )
+    # Every call is named within the window, so "it never called X" is not a conclusion
+    # truncation can produce.
+    for i in range(8):
+        assert f"manage_x{i}" in transcript[:JUDGE_INPUT_CHARS], f"call {i} unnamed"
+
+    # And if a caller overrides the budget back up, answer-first ordering still protects
+    # the answer — the property this test was originally written for.
+    overflowing = result.transcript_for_judge(output_chars=4000)
+    assert len(overflowing) > JUDGE_INPUT_CHARS
+    assert "THE ACTUAL ANSWER" in overflowing[:JUDGE_INPUT_CHARS]
 
 
 def test_tool_log_still_reaches_the_judge_for_short_transcripts():

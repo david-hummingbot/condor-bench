@@ -374,16 +374,52 @@ def _digest_generic_text(text: str, structured: Any, *, max_chars: int) -> str:
     return f"{text[:head]}\n…\n{text[-tail:]}"
 
 
+# How many rows of a list-of-records to actually show the judge, and how much of each.
+_LIST_ROWS = 15
+_LIST_ROW_CHARS = 160
+
+
 def _summarize_list_field(label: str, value: Any) -> str:
+    """Render a list field as rows, not just a count.
+
+    A count is unusable as evidence. The judge is asked to verify that figures in the
+    answer appear in tool output, and every list-returning tool — routines, servers,
+    agent definitions, orders, bots — was collapsed to "N items (e.g. keys: …)". So a
+    model that correctly named one continuous routine out of 29 was marked down for
+    "unverified implementation details": the names it cited had been deleted before the
+    judge ever saw them. `agent_condor_routine_003` scored 0.55 that way.
+
+    Rows are capped and the remainder is stated, mirroring the pipe-table digester —
+    the point is that *some* rows are citeable, not that all of them fit.
+    """
     if not isinstance(value, list):
         return f"{label}: {value!r}"
     if not value:
         return f"{label}: [] (0)"
-    sample = value[0]
-    if isinstance(sample, dict):
-        keys = ", ".join(list(sample.keys())[:6])
-        return f"{label}: {len(value)} items (e.g. keys: {keys})"
-    return f"{label}: {len(value)} items (e.g. {sample!r})"
+
+    shown, omitted = value[:_LIST_ROWS], max(0, len(value) - _LIST_ROWS)
+    lines = [f"{label}: {len(value)} items"]
+    for item in shown:
+        if isinstance(item, dict):
+            # Compact key=value so a row stays one line: the judge needs the values,
+            # not the JSON punctuation.
+            body = " ".join(
+                f"{k}={_scalar(v)}"
+                for k, v in item.items()
+                if isinstance(v, (str, int, float, bool)) or v is None
+            )
+            rendered = body or ", ".join(list(item.keys())[:6])
+        else:
+            rendered = str(item)
+        lines.append(f"  - {rendered[:_LIST_ROW_CHARS]}")
+    if omitted:
+        lines.append(f"  … {omitted} additional row(s) omitted")
+    return "\n".join(lines)
+
+
+def _scalar(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return text[:60]
 
 
 def _row_sort_key(parts: list[str]) -> float:

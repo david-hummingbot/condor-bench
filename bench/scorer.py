@@ -55,7 +55,9 @@ def normalize_expected_tools(expected_tools: list[str] | None) -> list[str] | No
 class ScoreCard:
     case_id: str
     model: str
-    answer_quality: float
+    # None when no judgement could be made — an infra failure or a judge that did not
+    # answer. Distinct from 0.0, which asserts the model gave a bad answer.
+    answer_quality: float | None
     answer_reason: str
     tool_accuracy: float | None  # None when no required expected_tools
     latency_score: float
@@ -120,7 +122,9 @@ class ScoreCard:
             "case_type": self.case_type,
             "domain": self.domain,
             "risk_level": self.risk_level,
-            "answer_quality": round(self.answer_quality, 4),
+            "answer_quality": (
+                round(self.answer_quality, 4) if self.answer_quality is not None else None
+            ),
             "answer_reason": self.answer_reason,
             "tool_accuracy": round(self.tool_accuracy, 4) if self.tool_accuracy is not None else None,
             "tool_params": round(self.tool_params, 4) if self.tool_params is not None else None,
@@ -156,9 +160,10 @@ def _composite(
     weights is always 1.0 and composites stay comparable across cases with
     different amounts of ground truth.
     """
-    quality = components.get("answer_quality") or 0.0
+    quality = components.get("answer_quality")
     total = 0.0
     absorbed = weights.get("answer_quality", 0.0)
+    scorable: list[tuple[str, float, float]] = []
     for name, weight in weights.items():
         if name == "answer_quality":
             continue
@@ -167,7 +172,22 @@ def _composite(
             absorbed += weight
             continue
         total += weight * value
-    return total + absorbed * quality
+        scorable.append((name, weight, value))
+
+    if quality is not None:
+        return total + absorbed * quality
+
+    # Quality is the absorber every other unscorable component folds into, so a None
+    # here cannot fall through to 0.0 — that would keep the absorbed weight in the
+    # denominator and score it zero, capping a flawless case at 0.55. Renormalise over
+    # whatever *was* measurable instead: "we could not judge the prose, so this is the
+    # score on the parts we could check."
+    measured_weight = sum(w for _, w, _ in scorable)
+    if not measured_weight:
+        # Nothing at all was scorable. 0.0 would read as a model failure; the caller
+        # marks these rows so the matrix excludes them.
+        return 0.0
+    return total / measured_weight
 
 
 async def score(
@@ -236,8 +256,11 @@ async def score(
             error=f"infra: {raw[:200]}",
         )
 
+    # `response=` is the gate input; the transcript is what the judge reads. Handing
+    # the transcript to the infra check let a skill file that mentions "rate limit"
+    # register as a provider outage.
     answer_quality, answer_reason = await _quality_metric.a_score(
-        input_text, result.transcript_for_judge()
+        input_text, result.transcript_for_judge(), response=result.response
     )
 
     required = normalize_expected_tools(expected_tools)
@@ -326,6 +349,17 @@ async def score(
     if post_condition_failed:
         composite = min(composite, POST_CONDITION_FAIL_CAP)
 
+    # An unjudgeable answer is not automatically an unusable row, and the two cases
+    # differ. An *infra* failure means the model never really answered, so the row is
+    # marked and the matrix drops it — the reason string used to promise that
+    # ("excluded from model-quality avg") while nothing set `error`, so a 0.0 sailed
+    # into the averages. A *judge* failure means the model answered and the judge did
+    # not: the tool evidence is still good, so the row stays and the composite is
+    # renormalised over what was measurable.
+    quality_infra = answer_quality is None and answer_reason.startswith(
+        "Infrastructure error"
+    )
+
     return _card(
         answer_quality=answer_quality,
         answer_reason=answer_reason,
@@ -337,7 +371,7 @@ async def score(
         live_validity=live_validity,
         latency_score=latency_score,
         composite=composite,
-        error=result.error,
+        error=result.error or (f"infra: {answer_reason[:200]}" if quality_infra else None),
         judge_usage=JUDGE_USAGE.delta_since(judge_before),
         tool_param_detail=param_detail,
         live_validity_detail=validity_detail,

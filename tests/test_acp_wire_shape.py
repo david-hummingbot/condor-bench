@@ -455,14 +455,24 @@ def test_a_plain_payload_is_left_alone():
 
 
 def test_the_judge_now_sees_the_tool_result():
-    """The end the bug was felt at: the digest carried none of the payload."""
+    """The end the bug was felt at: the digest carried none of the payload.
+
+    The original assertion here was a negative control — that the *wrapped* payload
+    showed the judge nothing — because a list field digested to a bare count. Lists are
+    now rendered as rows (a count is unusable as grounding evidence; see
+    `_summarize_list_field`), so the wrapped form leaks its text too and the control no
+    longer holds. What unwrapping still buys is structure: unwrapped, the fields are
+    fields; wrapped, they are an escaped string inside a `type=text` content block, and
+    nothing keyed on `status` can reach them (see the field-assertion test below).
+    """
     from bench.tool_digest import digest_tool_output
 
     before = digest_tool_output("manage_servers", C006_RAW_OUTPUT)
     after = digest_tool_output("manage_servers", acp_tool_output({"rawOutput": C006_RAW_OUTPUT}))
-    assert "bench_staging" not in before, "this is what the judge used to be shown"
     assert "bench_staging" in after
     assert "online" in after
+    assert "type=text" in before, "the wrapped form is still a content block, not data"
+    assert "type=text" not in after, "unwrapping should leave fields, not blocks"
 
 
 def test_field_assertions_can_reach_inside_the_envelope():
