@@ -200,3 +200,53 @@ def test_validity_breakdown_reports_the_reason():
     detail = validity_breakdown([response("get_market_data", "Error: timed out")])
     assert detail["responses"][0]["score"] == 0.0
     assert detail["responses"][0]["error"]
+
+
+# ── Legend text is not an error (regression) ──────────────────────────────────
+# Found while monitoring a live run: every `manage_bots` response scored 0.0 for
+# live validity. The payload ends with a legend explaining what each controller
+# state means, and `\berror\b\s*[:=]` matched "error = performance report failed"
+# inside it — so a healthy "0 active bots" answer was recorded as a failed call.
+MANAGE_BOTS_OK = (
+    '{"result":"Active Bots Status Summary:\\nTotal Active Bots: 0\\n\\n'
+    "No active bots found.\\n\\ncontroller state: running = active | "
+    "stopped = kill switch on (no new entries) | error = performance report failed | "
+    'unknown = controller config unread"}'
+)
+
+
+def test_a_legend_mentioning_error_is_not_a_failed_call():
+    from metrics.live_validity import _error_reason
+
+    assert _error_reason(MANAGE_BOTS_OK) is None
+
+
+def test_the_healthy_manage_bots_payload_scores_full_validity():
+    from metrics.live_validity import LiveValidityMetric
+
+    score = LiveValidityMetric().score(
+        [{"tool": "manage_bots", "output": MANAGE_BOTS_OK}],
+        {"manage_bots": {"nonempty": True}},
+    )
+    assert score == 1.0
+
+
+def test_a_real_error_is_still_caught():
+    from metrics.live_validity import _error_reason
+
+    assert _error_reason('{"result":"Error: connection refused"}')
+    assert _error_reason('{"error":"boom"}')
+    assert _error_reason("Traceback (most recent call last):")
+    # A single assignment is not a legend, so this must still fail.
+    assert _error_reason("error = could not reach the API")
+
+
+def test_a_legend_does_not_mask_a_real_error_elsewhere():
+    """The guard skips the legend line, it does not stop the scan."""
+    from metrics.live_validity import _error_reason
+
+    payload = (
+        "state: a = one | b = two | error = meaning\n"
+        "Error: the request was rejected"
+    )
+    assert _error_reason(payload)

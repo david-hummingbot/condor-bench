@@ -19,6 +19,10 @@ from typing import Any
 # enough that a multi-tool turn cannot crowd out the model response.
 DEFAULT_DIGEST_CHARS = 1600
 
+# How much of a *short* string field to show. Anything longer is treated as the
+# payload itself and digested rather than head-truncated — see _digest_structured.
+_SCALAR_PREVIEW_CHARS = 200
+
 _NUM_RE = re.compile(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
 _SUMMARY_LINE_RE = re.compile(
     r"(?i)\b("
@@ -122,10 +126,15 @@ def _digest_portfolio(text: str, structured: Any, *, max_chars: int) -> str:
         ):
             if key in structured:
                 lines_out.append(_summarize_list_field(label, structured[key]))
-        # Nested formatted_output from an unwrapped API payload.
-        nested = structured.get("formatted_output")
-        if isinstance(nested, str) and nested.strip():
-            text = nested
+        # The rendered table, wherever this server put it. hummingbot answers with
+        # {"result": "<table>"}, so reading only `formatted_output` left this
+        # digester parsing the JSON envelope — it found no holdings and no total,
+        # and quietly returned nothing for every live portfolio call.
+        for nested_key in ("formatted_output", "result", "output"):
+            nested = structured.get(nested_key)
+            if isinstance(nested, str) and nested.strip():
+                text = nested
+                break
 
     summary_lines = [
         ln.strip()
@@ -206,14 +215,39 @@ def _parse_portfolio_rows(text: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _digest_text_payload(text: str, *, max_chars: int) -> str:
+    """Summarise a string that *is* the payload, keeping its figures visible."""
+    if len(text) <= max_chars:
+        return text  # it fits: no summary can beat the real thing
+    if "|" in text and text.count("\n") >= 3:
+        table = _digest_pipe_table(text, None, max_chars=max_chars)
+        if table:
+            return _fit(table, max_chars)
+    return _fit(_digest_generic_text(text, None, max_chars=max_chars) or text, max_chars)
+
+
 def _digest_structured(text: str, structured: Any, *, max_chars: int) -> str:
     if isinstance(structured, dict):
         lines = ["[digest] json object"]
         scalars: list[str] = []
         nested: list[str] = []
+        # A long string field is not a scalar to preview — it is the whole answer.
+        # hummingbot's tools wrap their formatted output in {"result": "<table>"},
+        # so taking a 200-char head cut an order book off at its column headers,
+        # one line before the first price. The judge was shown a table with no rows
+        # and correctly concluded the cited bid/ask "appear fabricated".
+        payload_keys = [
+            k for k, v in structured.items()
+            if isinstance(v, str) and len(v) > _SCALAR_PREVIEW_CHARS
+        ]
+        per_payload = max(400, (max_chars - 200) // max(1, len(payload_keys)))
         for key, value in structured.items():
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                rendered = value if not isinstance(value, str) else value[:200]
+            if key in payload_keys:
+                body = _digest_text_payload(str(value), max_chars=per_payload)
+                indented = "\n".join(f"    {ln}" for ln in body.splitlines())
+                scalars.append(f"  {key}:\n{indented}")
+            elif isinstance(value, (str, int, float, bool)) or value is None:
+                rendered = value if not isinstance(value, str) else value[:_SCALAR_PREVIEW_CHARS]
                 scalars.append(f"  {key}: {rendered}")
             elif isinstance(value, list):
                 nested.append(f"  {_summarize_list_field(str(key), value)}")

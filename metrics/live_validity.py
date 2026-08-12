@@ -178,11 +178,35 @@ def _error_reason(output: Any) -> str | None:
             return f"status {status}"
     # Only inspect the head: a long successful payload can legitimately contain
     # the word "error" in a log line or a field name.
+    head = text[:400]
     for pattern in _ERROR_PATTERNS:
-        match = pattern.search(text[:400])
-        if match:
+        # Every match, not just the first: skipping a legend must not abandon the
+        # pattern, or a genuine "Error: …" further down the payload goes unseen.
+        for match in pattern.finditer(head):
+            if _is_legend_line(head, match.start()):
+                continue
             return f"matched {pattern.pattern!r} at {match.start()}"
     return None
+
+
+def _is_legend_line(text: str, position: int) -> bool:
+    """True when the match sits in a key describing what a value *means*.
+
+    ``manage_bots`` ends every successful payload with a legend::
+
+        controller state: running = active | stopped = kill switch on |
+        error = performance report failed | unknown = controller config unread
+
+    ``\\berror\\b\\s*[:=]`` matches "error =" there, so a healthy "0 active bots"
+    response scored 0.0 for live validity and dragged the case's composite down —
+    a false negative in the one metric whose job is to say whether the call really
+    worked. Real failures announce themselves in a sentence; an enum legend lists
+    several ``name = meaning`` pairs on one line, which is what this detects.
+    """
+    start = text.rfind("\n", 0, position) + 1
+    end = text.find("\n", position)
+    line = text[start:] if end == -1 else text[start:end]
+    return line.count("|") >= 2 and line.count("=") >= 2
 
 
 def _is_empty(output: Any) -> bool:
