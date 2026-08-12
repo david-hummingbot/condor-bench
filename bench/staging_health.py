@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -80,6 +81,45 @@ class HealthReport:
         }
 
 
+def is_condor_main_cmdline(parts: list[str]) -> bool:
+    """True when an argv looks like ``python … main.py``.
+
+    Argument-exact, not substring. A substring test on the whole command line matched
+    any *shell* whose script text happened to mention main.py — including this
+    project's own tooling — and a check that fires on itself is worse than no check.
+    """
+    if not parts or "python" not in parts[0]:
+        return False
+    return any(a == "main.py" or a.endswith("/main.py") for a in parts[1:])
+
+
+def running_condor_checkouts() -> list[str]:
+    """Working directories of any live condor ``main.py`` process.
+
+    Read from ``/proc`` and best-effort: an empty list means "could not tell", not
+    "nothing is running". Used only to warn about a mismatch, never to assert one.
+    """
+    found: set[str] = set()
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+            parts = [a for a in raw.decode(errors="replace").split("\0") if a]
+            if not parts:
+                continue
+            if not is_condor_main_cmdline(parts):
+                continue
+            cwd = (entry / "cwd").resolve()
+        except (OSError, PermissionError, RuntimeError):
+            continue
+        found.add(str(cwd))
+    return sorted(found)
+
+
 async def check_staging(*, timeout: float = 10.0) -> HealthReport:
     """Probe the live target and return a verdict per check. Never raises."""
     staging = staging_config()
@@ -99,6 +139,40 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
     )
     if repo is None:
         return report
+
+    # 1a. The checkout bench reads must be the one that is *running*.
+    #
+    # Two checkouts existed side by side — a feature branch serving the live bot and
+    # web API, and `main`, which is where CONDOR_PATH pointed. Nothing complained:
+    # bench spawned its MCP servers from `main`, and `_jwt_secret()` falls back to a
+    # secret persisted per-checkout in config.yml, so the subprocess signed service
+    # tokens with one key while the web API verified with the other. Every `delegate`,
+    # `consult` and `manage_routines:run` call answered "401: Invalid token", and eight
+    # cases were scored as model failures for it.
+    #
+    # The quieter half is worse: bench's vendored-prompt drift checks compared against
+    # a checkout nobody was running, so they could pass while the prompt in production
+    # had moved. A run measured code that was not deployed.
+    running = running_condor_checkouts()
+    if running:
+        resolved = str(Path(repo).resolve())
+        matched = resolved in running
+        report.checks.append(
+            Check(
+                "condor_process_matches_checkout",
+                matched,
+                f"live condor runs from {resolved}"
+                if matched
+                else (
+                    f"CONDOR_PATH is {resolved} but the running condor is "
+                    f"{', '.join(running)} — bench would measure code that is not "
+                    "deployed, and service tokens signed from a different config.yml "
+                    "are rejected as 401 by the running web API"
+                ),
+            )
+        )
+        if not matched:
+            return report
 
     # 1b. Auto-register the fixed bench_staging entry from HUMMINGBOT_* env so
     #     Settings (URL + creds) is enough — no manual server name / ACL step.
