@@ -256,6 +256,25 @@ def tool_error(outcome: Any) -> str | None:
     # FastMCP servers also answer with a plain string for an unknown action.
     if text and re.match(r"\s*(unknown|invalid|unsupported)\s+action\b", text, re.I):
         return text.strip()[:200]
+
+    # condor's tools report a *refused* call as an ordinary result whose content is
+    # a JSON body with an `error` key — no `isError`, and nothing matching the
+    # "unknown action" spelling above. `delete_agent` answers that way when the agent
+    # still owns a strategy, so the refusal was counted as a removal and the report
+    # came back clean with the agent still on disk.
+    payload = _as_json(text) if text else None
+    if payload is None and isinstance(outcome, (dict, list)):
+        payload = outcome
+    if isinstance(payload, dict):
+        message = payload.get("error")
+        if message:
+            return str(message)[:200]
+        # A delete that matched nothing is not an error either — `delete_agent` on an
+        # unknown slug returns `{"deleted": false}`. Only an explicitly *present* and
+        # falsy flag counts: absence means the tool simply does not report one.
+        for flag in ("deleted", "removed", "stopped", "success"):
+            if flag in payload and not payload[flag]:
+                return f"tool reported {flag}={payload[flag]!r} — nothing was removed"
     return None
 
 
@@ -299,7 +318,15 @@ async def teardown(
     if not reversible:
         return report
 
-    for resource in reversible:
+    # Reverse order: the last thing created is the thing nothing else depends on.
+    #
+    # `agent_condor_builder_002` creates an agent and then a strategy under it, and
+    # condor's `delete_agent` refuses outright while the agent still owns one
+    # ("Agent 'x' still owns 1 strategy(ies). Delete its strategies first."). Undoing
+    # in creation order therefore attempted the agent first, was refused, deleted the
+    # strategy second, and left `bench_dca_agent` in the condor checkout — where it
+    # then failed the roster drift check as an unclassified agent.
+    for resource in reversed(reversible):
         by_create = _UNDO_BY_CREATE.get((resource.tool, resource.action))
         undo = (resource.tool, by_create[0]) if by_create else _UNDO.get(resource.tool)
         if undo is None and resource.tool in _STATE_SETTERS:
