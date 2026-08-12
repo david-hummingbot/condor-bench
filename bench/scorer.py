@@ -96,6 +96,11 @@ class ScoreCard:
     # tool_accuracy of 0.0 with no explanation is exactly the debugging dead end the
     # first smoke run hit.
     forbidden_violations: list[str] = field(default_factory=list)
+    # The agent's own tools it reached for (Claude Code's ToolSearch, Read, …).
+    # Reported, never scored: they are not decisions about condor's surface. Kept
+    # visible so "the tool score ignored these" is a statement you can check rather
+    # than trust.
+    agent_internal_calls: list[str] = field(default_factory=list)
     # Set when a post-condition probe ran and the asserted end state was not there.
     # Unlike harness_artifact this *is* the model's failure: the composite is capped
     # so the case cannot pass.
@@ -128,6 +133,7 @@ class ScoreCard:
             "harness_artifact": self.harness_artifact,
             "post_condition_failed": self.post_condition_failed,
             "forbidden_violations": self.forbidden_violations,
+            "agent_internal_calls": self.agent_internal_calls,
             "tool_calls": self.tool_calls,
             "expected_tools": self.expected_tools,
             "tool_call_details": self.tool_call_details,
@@ -182,7 +188,15 @@ async def score(
 
     expected_no_calls: tools that must NOT appear; any hit → tool_accuracy 0.
     """
-    tool_names = result.tool_names()
+    # Scored against condor's MCP surface only. An ACP agent's own built-ins
+    # (Claude Code's ToolSearch, Read, …) are in the trace but are not decisions
+    # about condor: counting them cost Layer 2 F1 precision no model could recover
+    # and diluted live validity, which is a claim about the real API. The full trace
+    # is still persisted and displayed — see BenchmarkResult's scoring views.
+    tool_names = result.mcp_tool_names()
+    scored_calls = result.mcp_tool_calls
+    scored_responses = result.mcp_tool_responses
+    internal_calls = result.agent_internal_tool_names()
     judge_before = JUDGE_USAGE.snapshot()
 
     harness_artifact = _detect_harness_artifact(result, expected_tools)
@@ -195,9 +209,13 @@ async def score(
             "risk_level": risk_level,
             "usage": dict(result.usage),
             "wiring": dict(result.wiring),
+            # `tool_calls` is the scored list (MCP surface only); the untouched trace
+            # lives on `tool_call_details`, and what was set aside on
+            # `agent_internal_calls`.
             "tool_calls": tool_names,
             "expected_tools": list(expected_tools or []),
             "tool_call_details": result.tool_calls,
+            "agent_internal_calls": internal_calls,
             "baseline_latency_s": baseline_latency_s,
             "latency_s": result.latency_s,
             "harness_artifact": harness_artifact,
@@ -227,7 +245,7 @@ async def score(
     # Bans are checked against the full calls, not just names, so `tool:action`
     # entries work — a case can require manage_executors and still forbid
     # manage_executors:create.
-    violations = violated_forbidden_calls(result.tool_calls, forbidden)
+    violations = violated_forbidden_calls(scored_calls, forbidden)
 
     tool_accuracy: float | None = None
     phase_detail: list[dict[str, Any]] = []
@@ -253,13 +271,13 @@ async def score(
         tool_accuracy = 1.0
 
     params = expected_tool_params or {}
-    tool_params = _param_metric.score(result.tool_calls, params)
-    param_detail = param_breakdown(result.tool_calls, params) if params else {}
+    tool_params = _param_metric.score(scored_calls, params)
+    param_detail = param_breakdown(scored_calls, params) if params else {}
 
     live_validity = _validity_metric.score(
-        result.tool_responses, live_expected, expected_tools=required
+        scored_responses, live_expected, expected_tools=required
     )
-    validity_detail = validity_breakdown(result.tool_responses, live_expected)
+    validity_detail = validity_breakdown(scored_responses, live_expected)
 
     # Post-conditions belong to live validity, not to a sixth weighted metric:
     # both answer "did this actually work against the real API", one from the

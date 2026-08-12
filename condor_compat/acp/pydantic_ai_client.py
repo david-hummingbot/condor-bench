@@ -45,6 +45,7 @@ from .client import (
     ToolCallEvent,
     ToolCallUpdate,
     UsageEvent,
+    stringify_tool_output,
 )
 
 log = logging.getLogger(__name__)
@@ -806,12 +807,12 @@ class PydanticAIClient:
                             if hasattr(node, "request") and node.request:
                                 for part in node.request.parts:
                                     if isinstance(part, ToolReturnPart):
-                                        content = part.content
-                                        output_str = (
-                                            content
-                                            if isinstance(content, str)
-                                            else str(content)
-                                        )
+                                        # JSON, not `str()`. A dict stringified with
+                                        # repr ({'server': 'x'}) parses nowhere, so a
+                                        # `live_expected` fields assertion scored 0.5
+                                        # here and 1.0 on the ACP path for the same
+                                        # tool returning the same data.
+                                        output_str = stringify_tool_output(part.content)
                                         yield ToolCallUpdate(
                                             tool_call_id=part.tool_call_id or "",
                                             status="completed",

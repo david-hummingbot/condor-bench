@@ -43,6 +43,11 @@ _INFRA_PATTERNS = (
     re.compile(r"exceeded before any response", re.I),
     re.compile(r"rate[- ]?limit", re.I),
     re.compile(r"^\(error:", re.I | re.M),
+    # An ACP prompt that never ran — the bridge rejected the request or died. The
+    # model produced nothing because it was never asked, so this is infra: judging
+    # the empty transcript would score a configuration problem as a model failure
+    # ("No response produced", composite 0.0) and average it into the matrix.
+    re.compile(r"^ACP prompt failed", re.I | re.M),
 )
 
 

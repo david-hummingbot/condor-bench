@@ -14,16 +14,25 @@ import os
 import signal
 import subprocess
 import time
+from collections import deque
 from typing import Any, AsyncIterator
 
 from .client import (
     ACPEvent, PermissionCallback, PromptDone, TextChunk, ThoughtChunk,
     ToolCallEvent, ToolCallUpdate, Heartbeat, UsageEvent,
     parse_meta_usage, parse_prompt_usage,
+    # Re-exported: the wire shape is shared with the PydanticAI path, and tests
+    # and callers import it from here.
+    unwrap_content_blocks,
 )
 from .jsonrpc import JSONRPCPeer
 
 log = logging.getLogger(__name__)
+
+# How much of the bridge's stderr to keep for error reporting. Enough to hold a
+# pretty-printed JSON-RPC error (the API 400 that broke every prompt in a run spans
+# about a dozen lines) without retaining a whole session's chatter.
+STDERR_TAIL_LINES = 40
 
 ACP_COMMANDS: dict[str, str] = {
     "claude-code": "claude-agent-acp",
@@ -47,6 +56,81 @@ def resolve_acp(agent_key: str) -> tuple[str, dict[str, str]]:
 def is_acp_model(model_key: str) -> bool:
     base = model_key.partition(":")[0]
     return base in ACP_COMMANDS
+
+
+# ── ACP wire translation ───────────────────────────────────────────────────────
+# The ACP wire does not spell a tool call the way the rest of bench reads one. A
+# `tool_call` frame from claude-agent-acp 0.28 looks like:
+#
+#   {"sessionUpdate": "tool_call", "toolCallId": "toolu_…", "title": "ToolSearch",
+#    "kind": "other", "status": "pending", "rawInput": {...}, "content": [],
+#    "_meta": {"claudeCode": {"toolName": "mcp__mcp-hummingbot__get_market_data"}}}
+#
+# and the completing update carries `rawOutput` plus a `content` block list.
+# Reading `input`/`output` — which is what this vendored copy did — yields None on
+# every frame, and the damage is silent rather than loud:
+#
+#   * every tool call recorded with args {} → tool_params scored 0.0 on any case
+#     that pins parameters,
+#   * no tool responses at all → live_validity None (its weight quietly moved to
+#     answer quality), and the judge saw a transcript whose figures had no tool
+#     output behind them, which it is instructed to treat as fabrication. A
+#     correct, tool-grounded answer scored 0.05.
+#
+# condor fixed the input half upstream in `normalize_tool_call` (SEC-093) for the
+# same reason on the danger-gate side; the output half it does not need, because
+# condor only renders tool output while bench scores it.
+def acp_tool_input(payload: dict[str, Any]) -> Any:
+    """A tool call's arguments. ``rawInput`` on the wire, ``input`` in older frames.
+
+    Passed through as it arrives, without coercing a missing value to ``{}``:
+    "no arguments I can read" and "an empty argument set" are different facts, and
+    the param metric should be able to tell them apart.
+    """
+    args = payload.get("rawInput")
+    if args is None:
+        args = payload.get("input")
+    return args
+
+
+def acp_tool_name(payload: dict[str, Any]) -> str:
+    """The tool's real name, not its display title.
+
+    ``_meta.claudeCode.toolName`` is authoritative and fully qualified
+    (``mcp__mcp-hummingbot__get_market_data``, which
+    ``metrics.tool_accuracy.normalize_tool_name`` then reduces to the bare tool).
+    ``title`` is a human-facing label that happens to match for MCP tools and does
+    not for built-ins, so scoring on it would depend on the bridge's rendering.
+    """
+    meta = payload.get("_meta") or {}
+    vendor = meta.get("claudeCode") or {}
+    name = vendor.get("toolName") or payload.get("title") or ""
+    return str(name)
+
+
+def acp_tool_output(payload: dict[str, Any]) -> Any:
+    """A tool result, from whichever field this bridge used.
+
+    ``rawOutput`` is the structured result; ``content`` is the rendered block list
+    that accompanies it. Both appear on the completing ``tool_call_update``, and a
+    frame that carries neither (a mid-call status tick) yields None so the caller
+    skips it instead of recording an empty response.
+
+    Content-block envelopes are unwrapped here, at the one seam every consumer
+    reads through — see :func:`unwrap_content_blocks`.
+    """
+    for key in ("rawOutput", "output"):
+        if payload.get(key) is not None:
+            return unwrap_content_blocks(payload[key]) or payload[key]
+    blocks = payload.get("content")
+    unwrapped = unwrap_content_blocks(blocks)
+    if unwrapped:
+        return unwrapped
+    # Some bridges only report the structured response under the vendor extension.
+    vendor = (payload.get("_meta") or {}).get("claudeCode") or {}
+    if vendor.get("toolResponse") is not None:
+        return vendor["toolResponse"]
+    return None
 
 
 def _descendant_pids(root: int) -> set[int]:
@@ -114,10 +198,16 @@ class ACPClient:
         self._process: asyncio.subprocess.Process | None = None
         self._peer = JSONRPCPeer()
         self._session_id: str | None = None
+        # Populated by start() from the session/new reply.
+        self.session_models: dict[str, Any] = {}
         self._read_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._event_queue: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
         self._current_req_id: int | None = None
+        # Last lines the bridge wrote to stderr. Kept because that is where an ACP
+        # agent explains itself, and logging it at DEBUG meant a 400 that killed
+        # every prompt in a run left no trace anywhere the operator would look.
+        self._stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
         self._peer.register_handler("session/update", self._on_session_update)
         self._peer.register_handler("session/request_permission", self._on_request_permission)
 
@@ -152,6 +242,12 @@ class ACPClient:
             await self.stop()
             raise
         self._session_id = result["sessionId"]
+        # The bridge advertises the models it will accept here. Kept so a caller can
+        # offer them instead of guessing at ids — an unusable model id is not a
+        # cosmetic mistake: claude-agent-acp fails every prompt in the run with a
+        # 400 when the configured model rejects the thinking parameter it sends.
+        models = result.get("models")
+        self.session_models = models if isinstance(models, dict) else {}
 
     async def stop(self) -> None:
         self._peer.cancel_all()
@@ -207,9 +303,15 @@ class ACPClient:
                     break
                 text = line.decode(errors="replace").rstrip()
                 if text:
+                    self._stderr_tail.append(text)
                     log.debug("ACP stderr: %s", text)
         except asyncio.CancelledError:
             return
+
+    def stderr_tail(self, limit: int = STDERR_TAIL_LINES) -> str:
+        """The bridge's most recent stderr, for attaching to a failure."""
+        lines = list(self._stderr_tail)[-limit:]
+        return "\n".join(lines)
 
     async def prompt(self, text: str) -> str:
         chunks: list[str] = []
@@ -249,7 +351,18 @@ class ACPClient:
             if fut.cancelled():
                 self._event_queue.put_nowait(PromptDone(stop_reason="cancelled"))
             elif fut.exception():
-                self._event_queue.put_nowait(PromptDone(stop_reason="error"))
+                # Carry the bridge's message. A `session/prompt` that fails — an API
+                # 400 for an unsupported parameter, say — otherwise reaches the
+                # scorer as an empty response with no error, which reads as "the
+                # model said nothing" instead of "the request never ran".
+                exc = fut.exception()
+                detail = str(exc) or exc.__class__.__name__
+                tail = self.stderr_tail()
+                if tail:
+                    detail = f"{detail}\n--- ACP stderr ---\n{tail}"
+                self._event_queue.put_nowait(
+                    PromptDone(stop_reason="error", error=detail)
+                )
             else:
                 result = fut.result()
                 reason = result.get("stopReason", "end_turn") if isinstance(result, dict) else "end_turn"
@@ -304,17 +417,18 @@ class ACPClient:
         elif kind == "tool_call":
             self._event_queue.put_nowait(ToolCallEvent(
                 tool_call_id=update.get("toolCallId", ""),
-                title=update.get("title", ""),
+                title=acp_tool_name(update),
                 status=update.get("status", "pending"),
                 kind=update.get("kind", "other"),
-                input=update.get("input"),
+                input=acp_tool_input(update),
             ))
         elif kind == "tool_call_update":
             self._event_queue.put_nowait(ToolCallUpdate(
                 tool_call_id=update.get("toolCallId", ""),
                 status=update.get("status"),
-                title=update.get("title"),
-                output=update.get("output"),
+                title=update.get("title") or None,
+                output=acp_tool_output(update),
+                input=acp_tool_input(update),
             ))
         elif kind == "usage_update":
             # claude-agent-acp emits this once per assistant result with the
