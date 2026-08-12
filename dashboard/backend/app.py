@@ -238,6 +238,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             domain=req.domain,
             category=req.category,
             layers=layers,
+            risk_levels=req.risk_levels,
         )
         if not cases:
             raise ValueError("No cases matched the selected filters.")
@@ -624,9 +625,18 @@ async def get_datasets():
     # cannot match anything. With the combinations themselves in hand the form can
     # offer only what exists and count the selection exactly, instead of letting a
     # run be submitted and refused with "No cases matched the selected filters."
-    combos: dict[tuple[str, str, str], int] = {}
+    # Risk joins the key rather than getting its own tally: it cuts across every
+    # other axis (a `tool:leverage` case is destructive, a `tool:servers` one is
+    # read-only), so a separate count would let the form offer "Tools + read_only"
+    # and then report a total that ignored the risk selection.
+    combos: dict[tuple[str, str, str, str], int] = {}
     for case in cases:
-        key = (str(case.type), str(case.domain), str(case.category or ""))
+        key = (
+            str(case.type),
+            str(case.domain),
+            str(case.category or ""),
+            str(case.risk_level),
+        )
         combos[key] = combos.get(key, 0) + 1
 
     return {
@@ -635,8 +645,14 @@ async def get_datasets():
         "domains": _tally(lambda c: c.domain),
         "layer_domains": {k: dict(sorted(v.items())) for k, v in sorted(layer_domains.items())},
         "combos": [
-            {"layer": layer, "domain": domain, "category": category, "count": count}
-            for (layer, domain, category), count in sorted(combos.items())
+            {
+                "layer": layer,
+                "domain": domain,
+                "category": category,
+                "risk_level": risk,
+                "count": count,
+            }
+            for (layer, domain, category, risk), count in sorted(combos.items())
         ],
         "routing_domains": sorted(
             {c.domain for c in cases if is_routing_domain(c.domain)}
@@ -801,6 +817,9 @@ class RunRequest(BaseModel):
     domain: str | None = None
     # Dataset layers: consult | tick | tool | agent. None means all four.
     layers: list[str] | None = None
+    # read_only | mutating | destructive. None means all three — a set, not a
+    # ceiling, so "read_only + destructive" is expressible.
+    risk_levels: list[str] | None = None
     consult_only: bool = False
     tick_only: bool = False
 

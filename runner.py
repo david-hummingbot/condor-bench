@@ -38,6 +38,25 @@ def _resolve_layers(
     return None
 
 
+def _resolve_risk_levels(risk: Optional[str]) -> Optional[list[str]]:
+    """Parse ``--risk read_only,destructive`` into a set of levels, or None for all."""
+    if not risk:
+        return None
+    # Imported here, not at module scope: every bench import in this file is lazy so
+    # `--help` does not pay for loading the datasets and config.
+    from bench.dataset import RISK_LEVELS
+
+    chosen = [level.strip() for level in risk.split(",") if level.strip()]
+    unknown = [level for level in chosen if level not in RISK_LEVELS]
+    if unknown:
+        console.print(
+            f"[red]Unknown risk level(s): {', '.join(unknown)}. "
+            f"Choose from {', '.join(RISK_LEVELS)}.[/red]"
+        )
+        raise typer.Exit(2)
+    return chosen
+
+
 @app.command()
 def baseline(
     overwrite: bool = typer.Option(False, help="Regenerate existing baselines"),
@@ -83,6 +102,11 @@ def test(
     layers: Optional[str] = typer.Option(
         None, help=f"Comma-separated dataset layers ({', '.join(LAYER_CHOICES)})"
     ),
+    risk: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated risk levels (read_only, mutating, destructive). "
+        "A set, not a ceiling — '--risk read_only' is the cheap tool-calling probe.",
+    ),
     consult_only: bool = typer.Option(False, help="Only consult cases"),
     tick_only: bool = typer.Option(False, help="Only tick cases"),
 ) -> None:
@@ -107,6 +131,7 @@ def test(
         domain=domain,
         category=category,
         layers=_resolve_layers(consult_only, tick_only, layers),
+        risk_levels=_resolve_risk_levels(risk),
     )
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
@@ -206,6 +231,11 @@ def sweep(
     layers: Optional[str] = typer.Option(
         None, help=f"Comma-separated dataset layers ({', '.join(LAYER_CHOICES)})"
     ),
+    risk: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated risk levels (read_only, mutating, destructive). "
+        "A set, not a ceiling — '--risk read_only' is the cheap tool-calling probe.",
+    ),
     only: Optional[str] = typer.Option(
         None, help="Comma-separated model keys — sweep just these from the registry"
     ),
@@ -251,6 +281,7 @@ def sweep(
         load_all_cases(),
         domain=domain,
         layers=_resolve_layers(False, False, layers),
+        risk_levels=_resolve_risk_levels(risk),
     )
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")

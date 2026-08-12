@@ -17,6 +17,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   const [layers, setLayers] = useState([])   // empty = all layers
   const [domain, setDomain] = useState('')
   const [category, setCategory] = useState('')
+  const [riskLevels, setRiskLevels] = useState([])  // empty = all risk levels
   const [datasets, setDatasets] = useState(null)
   const [staging, setStaging] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -149,6 +150,16 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
     if (domain && !rows.some(c => c.domain === domain)) setDomain('')
     const cat = category.trim()
     if (cat && !rows.some(c => c.category === cat)) setCategory('')
+    // Same for risk: `tick` has no read_only-only shape to fall back on, so a
+    // stale selection here empties the run just as silently as a stale domain.
+    const keptRisk = riskLevels.filter(r => rows.some(c => c.risk_level === r))
+    if (keptRisk.length !== riskLevels.length) setRiskLevels(keptRisk)
+  }
+
+  const toggleRisk = (id) => {
+    setRiskLevels(riskLevels.includes(id)
+      ? riskLevels.filter(r => r !== id)
+      : [...riskLevels, id])
   }
 
   const handleStart = async () => {
@@ -162,6 +173,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
         layers: layers.length ? layers : null,
         domain: domain || null,
         category: category.trim() || null,
+        risk_levels: riskLevels.length ? riskLevels : null,
       }
       const data = await createRun(body)
       onRunStarted(data.run_id)
@@ -192,10 +204,12 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
     const wantLayers = opts.layers ?? layers
     const wantDomain = opts.domain ?? domain
     const wantCategory = opts.category ?? category.trim()
+    const wantRisk = opts.riskLevels ?? riskLevels
     return combos.filter(c =>
       (!wantLayers.length || wantLayers.includes(c.layer)) &&
       (!wantDomain || c.domain === wantDomain) &&
-      (!wantCategory || c.category === wantCategory)
+      (!wantCategory || c.category === wantCategory) &&
+      (!wantRisk.length || wantRisk.includes(c.risk_level))
     )
   }
   const countOf = (rows) => rows.reduce((n, c) => n + c.count, 0)
@@ -204,7 +218,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   // the category can never empty the domain list you picked from.
   const domainOptions = (() => {
     const seen = new Map()
-    for (const c of matching({ domain: '', category: '' })) {
+    for (const c of matching({ domain: '', category: '', riskLevels: [] })) {
       seen.set(c.domain, (seen.get(c.domain) || 0) + c.count)
     }
     return [...seen.entries()].sort((a, b) => a[0].localeCompare(b[0]))
@@ -212,10 +226,22 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
 
   const categoryOptions = (() => {
     const seen = new Map()
-    for (const c of matching({ category: '' })) {
+    for (const c of matching({ category: '', riskLevels: [] })) {
       if (c.category) seen.set(c.category, (seen.get(c.category) || 0) + c.count)
     }
     return [...seen.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  })()
+
+  // Risk levels available under the other three filters, ignoring the current risk
+  // selection so a chosen level never removes itself from the list.
+  const riskOptions = (() => {
+    const seen = new Map()
+    for (const c of matching({ riskLevels: [] })) {
+      if (c.risk_level) seen.set(c.risk_level, (seen.get(c.risk_level) || 0) + c.count)
+    }
+    return ['read_only', 'mutating', 'destructive']
+      .filter(r => seen.has(r))
+      .map(r => [r, seen.get(r)])
   })()
 
   const selectedCases = datasets ? countOf(matching()) : null
@@ -497,6 +523,33 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
             ))}
           </select>
         </div>
+
+        <div className="field">
+          <label>
+            Risk level {riskLevels.length === 0 && <span className="run-meta">(all)</span>}
+            <span className="run-meta">
+              {' '}— read_only alone is the cheap tool-calling probe
+            </span>
+          </label>
+          <div className="radio-row">
+            {riskOptions.map(([r, n]) => (
+              <button
+                key={r}
+                type="button"
+                className={`radio-btn ${riskLevels.includes(r) ? 'active' : ''}`}
+                onClick={() => toggleRisk(r)}
+                title={
+                  r === 'read_only' ? 'No state change — nothing to undo afterwards'
+                  : r === 'mutating' ? 'Changes condor-side state; teardown runs after each case'
+                  : 'Capital-affecting, and must clear DESTRUCTIVE_FLOOR to be routable'
+                }
+              >
+                {r}
+                <span className="radio-count">{n}</span>
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       <div className="run-summary-bar">
@@ -513,7 +566,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
               impossible filter set is to refuse the run once it has been submitted. */}
           {selectedCases === 0 && (
             <span className="error-text" style={{ marginLeft: 12 }}>
-              no case matches these filters — widen the layers, domain or category
+              no case matches these filters — widen the layers, domain, category or risk level
             </span>
           )}
           {stagingBlocked && (
