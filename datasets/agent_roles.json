@@ -45,6 +45,11 @@
       "role": "expert",
       "notes": "Scoped to 7 tools and holds the only exclusive grant in the roster (manage_amm), so no other domain's evidence covers its core tool."
     },
+    "adaptive_grid_trader": {
+      "role": "strategy",
+      "base": "directional_trader",
+      "notes": "Grid trading, but the loop is directional: multi-timeframe analysis picks LONG/SHORT/TWO_SIDED and re-picks it as conditions move, so the grid is the execution shape rather than the job. Based on directional_trader over market_making_expert on grants too — its 9 tools are a strict subset of the directional base (which declares tools: [] and inherits all 24), while market making covers only 6 of them and adds manage_controllers and manage_bots, which this agent is not granted."
+    },
     "delta_neutral_funding_agent": {
       "role": "strategy",
       "base": "market_making_expert",
