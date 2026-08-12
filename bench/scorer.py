@@ -378,6 +378,46 @@ async def score(
     )
 
 
+def timeout_card(case: Any, model: str, timeout_s: float, baseline_latency_s: float = 0.0):
+    """Scorecard for a case killed by the wall-clock ceiling.
+
+    A timeout used to append *nothing* in the CLI path, so the case simply vanished:
+    two `solana_dex_lp_expert` cases disappeared from a run and took 40% of that
+    domain's evidence with them, with no trace in the summary. Silence is the one thing
+    a benchmark must not do with a case it failed to measure — thin evidence has to look
+    thin.
+
+    Marked `harness_artifact` rather than scored 0.0, which is the same treatment market
+    warmup failures get (see :func:`bench.market_warmup.warmup_failure_card`): the model
+    was never measured, so the row is excluded from the matrix instead of being averaged
+    in as a bad answer.
+    """
+    return ScoreCard(
+        case_id=getattr(case, "id", "?"),
+        model=model,
+        category=getattr(case, "category", "") or "",
+        case_type=getattr(case, "type", "") or "",
+        domain=getattr(case, "domain", "") or "",
+        risk_level=getattr(case, "risk_level", "read_only") or "read_only",
+        answer_quality=None,
+        answer_reason=f"timed out after {timeout_s:.0f}s",
+        tool_accuracy=None,
+        tool_params=None,
+        live_validity=None,
+        latency_score=0.0,
+        composite=0.0,
+        latency_s=timeout_s,
+        baseline_latency_s=baseline_latency_s,
+        expected_tools=list(getattr(case, "expected_tools", []) or []),
+        harness_artifact=(
+            f"case exceeded its {timeout_s:.0f}s ceiling "
+            f"(baseline {baseline_latency_s:.1f}s) — the model was not measured, so this "
+            "row is excluded rather than scored"
+        ),
+        error=f"timeout after {timeout_s:.0f}s",
+    )
+
+
 def _detect_harness_artifact(
     result: BenchmarkResult, expected_tools: list[str] | None = None
 ) -> str | None:

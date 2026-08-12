@@ -287,3 +287,71 @@ def test_a_trailing_full_stop_does_not_fail_a_free_text_pin():
 # ── Kept from the epoch fix, which came out of the same audit ─────────────────
 def test_epochs_are_still_spelled_out_for_the_judge():
     assert "2026-08-11T00:00:00Z" in annotate_epochs({"start_time": 1786406400})["start_time"]
+
+
+# ── 9. The wall-clock ceiling, and the cases it silently deleted ───────────────
+def test_the_ceiling_scales_with_the_case_it_is_protecting():
+    """A flat 180s served neither end of the trade-off it exists for.
+
+    It was calibrated against the sonnet-5 baselines (slowest 89.4s), but an ACP path
+    runs 1.45x slower at the median and 3.55x at the observed max — so the two heaviest
+    LP cases hit the wall and were dropped, costing `solana_dex_lp_expert` 2 of its 5
+    agent cases. Meanwhile `c012` — a bare `manage_skill:list` whose median is under
+    16s, which once ran 609s — was allowed the same 180s, eleven times its own cost.
+    """
+    from config import (
+        CASE_TIMEOUT_MAX_S,
+        CASE_TIMEOUT_MIN_S,
+        case_timeout_s,
+    )
+
+    # The slow LP cases now get room proportional to their own history. Both were
+    # killed at 180s before.
+    assert case_timeout_s(89.4) == pytest.approx(357.6), "the slowest baseline in the set"
+    assert case_timeout_s(48.6) == CASE_TIMEOUT_MIN_S
+    assert case_timeout_s(89.4) > 180.0 and case_timeout_s(48.6) > 180.0
+
+    # And a fast case that hangs is cut off sooner than any flat number tolerant
+    # enough for the slow ones could allow. c012's baseline is ~16s.
+    assert case_timeout_s(16.0) == CASE_TIMEOUT_MIN_S
+    assert CASE_TIMEOUT_MIN_S < 609.0, "c012 must not be allowed to run to 609s again"
+
+    # A case with no baseline yet still gets the floor, never zero.
+    assert case_timeout_s(None) == CASE_TIMEOUT_MIN_S
+    assert case_timeout_s(0) == CASE_TIMEOUT_MIN_S
+    # And nothing runs unbounded.
+    assert case_timeout_s(10_000) == CASE_TIMEOUT_MAX_S
+
+    # The multiple must exceed the worst inflation actually measured on the ACP path,
+    # or a healthy slow case is still cut off.
+    from config import CASE_TIMEOUT_BASELINE_MULTIPLE
+
+    assert CASE_TIMEOUT_BASELINE_MULTIPLE > 3.55
+
+
+def test_a_timed_out_case_is_recorded_not_deleted():
+    """Two cases vanished from a run and took 40% of a domain's evidence with them.
+
+    `runner._run_cases` appended nothing on TimeoutError, so the case left no trace at
+    all. Thin evidence has to look thin — the row is kept and marked, the same treatment
+    a market-warmup failure gets.
+    """
+    from bench.matrix import _exclusion_reason
+    from bench.scorer import timeout_card
+
+    class _Case:
+        id = "agent_solana_dex_lp_expert_003"
+        category = "dex"
+        type = "agent"
+        domain = "solana_dex_lp_expert"
+        risk_level = "read_only"
+        expected_tools = ["explore_dex_pools"]
+
+    card = timeout_card(_Case(), "claude-code:default", 358.0, 89.4).as_dict()
+    assert card["case_id"] == "agent_solana_dex_lp_expert_003"
+    assert card["harness_artifact"], "a timeout must be attributed to the harness"
+    # Excluded from the matrix rather than averaged in as a bad answer.
+    assert _exclusion_reason(card), "the row must not count as model evidence"
+    # answer_quality is None, not 0.0: the model was never measured.
+    assert card["answer_quality"] is None
+    assert "358" in card["answer_reason"]

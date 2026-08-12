@@ -337,4 +337,38 @@ POST_CONDITION_FAIL_CAP = 0.50
 # so excluding it is the honest reading (see bench/matrix.py). That means a
 # too-tight value silently thins the tool axis rather than failing loudly, which
 # is why this is well above the slowest legitimate case rather than near it.
+#
+# Kept as the fallback for a case with no recorded baseline. Prefer
+# :func:`case_timeout_s`, which scales with the case instead.
 CASE_TIMEOUT_S = 180.0
+
+# A flat ceiling has to serve two cases that want opposite numbers, and 180s served
+# neither. It was calibrated against the sonnet-5 baselines, whose slowest case is
+# 89.4s — but an ACP model path runs 1.45x slower at the median and 3.55x at the
+# observed maximum, so the two heaviest LP cases (baselines 89.4s and 48.6s) hit the
+# wall and were dropped, costing `solana_dex_lp_expert` 2 of its 5 agent cases.
+# Meanwhile the runaway it exists to stop — `c012`, a bare `manage_skill:list` with a
+# sub-16s median that once ran 609s — would have been allowed 180s, eleven times its
+# own typical cost.
+#
+# Scaling by the case fixes both ends at once: a slow case gets room proportional to
+# how slow it has always been, and a fast case that hangs is cut off far sooner than a
+# flat number tolerant enough for the slow ones could ever allow.
+CASE_TIMEOUT_BASELINE_MULTIPLE = 4.0
+CASE_TIMEOUT_MIN_S = 240.0
+CASE_TIMEOUT_MAX_S = 600.0
+
+
+def case_timeout_s(baseline_latency_s: float | None) -> float:
+    """Wall-clock ceiling for one case, from its own baseline.
+
+    The multiple is 4.0 — above the 3.55x worst inflation measured on the ACP path, so
+    a healthy slow case is never cut off. The floor covers cases with no baseline yet
+    and keeps the ceiling meaningful for fast ones: `c012` would be killed at 240s
+    rather than running to 609s, which is *tighter* than the flat 180s allowed in
+    practice, because 180s was never enough to be applied to the slow cases at all.
+    """
+    if not baseline_latency_s or baseline_latency_s <= 0:
+        return CASE_TIMEOUT_MIN_S
+    scaled = CASE_TIMEOUT_BASELINE_MULTIPLE * float(baseline_latency_s)
+    return min(CASE_TIMEOUT_MAX_S, max(CASE_TIMEOUT_MIN_S, scaled))
