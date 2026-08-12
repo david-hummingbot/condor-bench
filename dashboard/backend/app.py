@@ -212,10 +212,11 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.cleanup import teardown
     from bench.client import case_input_text, run_case
     from bench.dataset import case_prompt_map, filter_cases, is_mutating, load_all_cases
+    from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
-    from bench.scorer import score_case
-    from config import CASE_TIMEOUT_S, build_run_pin
+    from bench.scorer import score_case, timeout_card
+    from config import build_run_pin, case_timeout_s
 
     state = _active_runs[run_id]
     state["status"] = "running"
@@ -333,35 +334,59 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     sc_dict: dict = {}
                     response = ""
                     try:
-                        result = await asyncio.wait_for(
-                            run_case(case, norm_key), timeout=CASE_TIMEOUT_S
-                        )
-                        baseline = store.load(case.id)
-                        baseline_latency = baseline.latency_s if baseline else result.latency_s
-                        sc = await score_case(case, result, baseline_latency)
-                        sc_dict = sc.as_dict()
-                        sc_dict["question"] = question
-                        response = result.response
-                        scorecards.append(sc)
-                        responses[case.id] = response
-
-                        if is_mutating(case):
-                            report = await teardown(
-                                result,
-                                norm_key,
-                                agent_slug=getattr(case, "agent_slug", None),
+                        warmup = await ensure_markets_for_case(case)
+                        if not warmup.ok:
+                            sc = warmup_failure_card(case, norm_key, warmup)
+                            sc_dict = sc.as_dict()
+                            sc_dict["question"] = question
+                            scorecards.append(sc)
+                        else:
+                            # Baseline first: it sizes the ceiling, so a case gets room
+                            # proportional to how slow it has always been.
+                            baseline = store.load(case.id)
+                            timeout_s = case_timeout_s(
+                                baseline.latency_s if baseline else None
                             )
-                            if not report.clean:
-                                await _emit(run_id, {
-                                    "type": "cleanup",
-                                    "case_id": case.id,
-                                    "model": model_key,
-                                    "report": report.as_dict(),
-                                })
+                            result = await asyncio.wait_for(
+                                run_case(case, norm_key), timeout=timeout_s
+                            )
+                            baseline_latency = (
+                                baseline.latency_s if baseline else result.latency_s
+                            )
+                            sc = await score_case(case, result, baseline_latency)
+                            sc_dict = sc.as_dict()
+                            sc_dict["question"] = question
+                            response = result.response
+                            scorecards.append(sc)
+                            responses[case.id] = response
+
+                            if is_mutating(case):
+                                report = await teardown(
+                                    result,
+                                    norm_key,
+                                    agent_slug=getattr(case, "agent_slug", None),
+                                )
+                                if not report.clean:
+                                    await _emit(run_id, {
+                                        "type": "cleanup",
+                                        "case_id": case.id,
+                                        "model": model_key,
+                                        "report": report.as_dict(),
+                                    })
                     except asyncio.CancelledError:
                         raise
                     except asyncio.TimeoutError:
-                        error = f"timed out after {CASE_TIMEOUT_S:.0f}s"
+                        # Record a card, not just an event: the dashboard already showed
+                        # the error, but the saved run had no row for the case at all, so
+                        # a thinned domain left no trace in the matrix.
+                        base = store.load(case.id)
+                        base_s = base.latency_s if base else 0.0
+                        limit = case_timeout_s(base_s or None)
+                        sc = timeout_card(case, norm_key, limit, base_s)
+                        sc_dict = sc.as_dict()
+                        sc_dict["question"] = question
+                        scorecards.append(sc)
+                        error = f"timed out after {limit:.0f}s"
                     except Exception as exc:
                         error = str(exc)
 
@@ -778,9 +803,14 @@ class SettingsUpdate(BaseModel):
 
 @app.put("/api/settings")
 async def api_put_settings(body: SettingsUpdate):
-    from bench.settings_store import update_settings
+    from bench.settings_store import SettingsError, update_settings
 
-    return update_settings(body.updates)
+    try:
+        return update_settings(body.updates)
+    except SettingsError as exc:
+        # A rejected value is operator error, not a server fault — 400 so the form can
+        # show it next to the field instead of a generic failure.
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/providers")

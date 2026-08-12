@@ -176,15 +176,28 @@ async def _run_cases(cases, model: str, store):
     from bench.cleanup import teardown
     from bench.client import run_case
     from bench.dataset import is_mutating
+    from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.scorer import score_case
-    from config import CASE_TIMEOUT_S, PASS_THRESHOLD
+    from bench.scorer import timeout_card
+    from config import PASS_THRESHOLD, case_timeout_s
 
     scorecards, responses = [], {}
     for case in cases:
         console.print(f"  [dim]{case.id}[/dim] ({case.type})", end=" ")
         try:
-            result = await asyncio.wait_for(run_case(case, model), timeout=CASE_TIMEOUT_S)
+            warmup = await ensure_markets_for_case(case)
+            if not warmup.ok:
+                card = warmup_failure_card(case, model, warmup)
+                scorecards.append(card)
+                console.print(f"→ [yellow]harness skip[/yellow]")
+                console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
+                continue
+
+            # Baseline first: the ceiling is sized from it, so a slow case gets room
+            # proportional to how slow it has always been.
             baseline = store.load(case.id)
+            timeout_s = case_timeout_s(baseline.latency_s if baseline else None)
+            result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
             baseline_latency = baseline.latency_s if baseline else result.latency_s
             card = await score_case(case, result, baseline_latency)
             scorecards.append(card)
@@ -216,7 +229,17 @@ async def _run_cases(cases, model: str, store):
                         f"{row.get('identifier')} — {row.get('error') or row.get('reason', 'manual')}[/yellow]"
                     )
         except asyncio.TimeoutError:
-            console.print(f"[red]TIMEOUT after {CASE_TIMEOUT_S:.0f}s — excluded[/red]")
+            # Record it. Appending nothing made the case vanish from the run entirely,
+            # so a thinned domain looked like a domain nobody had asked about.
+            baseline = store.load(case.id)
+            base_s = baseline.latency_s if baseline else 0.0
+            scorecards.append(
+                timeout_card(case, model, case_timeout_s(base_s or None), base_s)
+            )
+            console.print(
+                f"[red]TIMEOUT after {case_timeout_s(base_s or None):.0f}s — "
+                "recorded as a harness artifact[/red]"
+            )
         except Exception as exc:
             console.print(f"[red]ERROR: {exc}[/red]")
     return scorecards, responses

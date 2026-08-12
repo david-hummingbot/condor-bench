@@ -214,6 +214,21 @@ counts across paths are comparable.
 
 ---
 
+## Market warmup
+
+Before each case, bench warms every `(connector, trading_pair)` pinned in
+`expected_tool_params` (and tick `config`) via
+`POST /market-data/trading-pair/add`, then waits until trading rules list the
+pair and a mid price is available.
+
+XRPL (and similar) can accept `create_executor` while `trading_rules` still lack
+the pair, which surfaces as `Failed to create executor: '<pair>'`. That is
+staging readiness, not a model skill — so warmup lives in the harness
+(`bench/market_warmup.py`), not in the prompt. A warmup failure skips the case
+and records a `harness_artifact`.
+
+---
+
 ## Troubleshooting
 
 **`Server 'bench_staging' is not registered`** — run
@@ -230,6 +245,11 @@ condor's config is the source of truth for URL resolution, deliberately.
 configured Hummingbot API has no accounts (or the wrong instance). Point
 `HUMMINGBOT_API_URL` at an API that has the accounts you intend to exercise;
 the pre-flight checks that at least one account is listed.
+
+**`market warmup failed` harness artifact** — the case's pinned connector/pair
+could not be made ready (add failed, rules never listed the pair, or no mid
+price within the timeout). Check that the connector has credentials and the
+pair exists on staging; do not treat this as a model failure.
 
 **`condor's _shared.py no longer exports build_mcp_servers_for_agent()`** — condor
 moved the helper. Update `bench/mcp_provider.py` to match. Do not vendor a copy;
