@@ -7,9 +7,20 @@
 results/
 !results/.gitkeep
 
-# Baselines are tracked so teams share the same reference
-# baseline/
-# !baseline/*.json
+# Baselines were meant to be tracked "so teams share the same reference", but the
+# rules were never enabled and only .gitkeep was ever committed — so the reference
+# has always been per-machine in practice. Ignoring them makes that honest.
+#
+# It is also the consistent choice: latency_score is
+# min(1, baseline_latency / test_latency) (metrics/latency.py), and `results/` is
+# untracked too, so a matrix is always built from one machine's runs against that
+# same machine's baselines. Nothing cross-machine is being compared for a shared
+# baseline to make comparable. Sharing them would only start to matter if runs
+# themselves became shareable.
+#
+# Contents rather than the directory, for the reason spelled out below.
+baseline/*
+!baseline/.gitkeep
 
 # Suite definitions are tracked so teams share the same cases, but
 # environments are not: each one holds a condor_path pointing into a
