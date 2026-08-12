@@ -93,18 +93,34 @@ of a question about an aggregate.
 - Tools: `manage_servers`.
 
 #### c011 — Configured trading agents
-**Question:** What trading agents do I have set up?
+**Question:** Which trading agents do I have set up, not counting yourself?
 
 **Favorable outcome**
-- Call `manage_trading_agent` (list agents) and summarize agent names/slugs/status.
+- Call `manage_trading_agent` with `action=list_agent_definitions` and summarise the
+  trading agents, excluding the `condor` chat assistant.
 - Tools: `manage_trading_agent`.
+
+"Not counting yourself" is there because the tool answers wider than the old question
+asked. `_list_agent_definitions` walks every `agents/*/AGENT.md`, and `condor` has one —
+so the store returns 9 where the roster holds 8 trading agents plus the assistant. A run
+listed the 8 and left itself out, which is the better answer, and the judge cut quality
+from 1.0 to 0.55 for "silently omitting one agent". Now the sensible reading is the
+expected one.
 
 #### c014 — BTC perpetual funding rate
 **Question:** What's the funding rate on BTC perpetual right now?
 
 **Favorable outcome**
-- Call `get_market_data` (funding rate, on a `_perpetual` connector) and report the rate plainly.
-- Tools: `get_market_data`.
+- Call `get_market_data` with `data_type=funding_rate` on a `_perpetual` connector and
+  report the rate plainly.
+- Tools: `get_market_data`. Params: `data_type=funding_rate`, `connector_name=binance_perpetual`.
+
+Both pins used to be wrong, and this write-up was already right about one of them.
+`funding_info` is not a value `get_market_data` accepts — the signature spells them
+`Literal["prices", "candles", "funding_rate", "order_book"]` — and a funding rate needs
+a `_perpetual` connector, so `binance` could not have served it. A run called
+`funding_rate` on `binance_perpetual`, got the rate back, and lost the whole
+`tool_params` weight to a pin the tool would have rejected.
 
 ## Tick cases (`tick.jsonl`)
 
@@ -189,8 +205,8 @@ commit that changes case ground truth.
 | c008 | `search_history` | `data_type=orders` | — | read_only | — |
 | c010 | `manage_servers` | `action=list` | — | read_only | — |
 | c011 | `manage_trading_agent` | `action=list_agent_definitions` | — | read_only | — |
-| c014 | `get_market_data` | `connector_name=binance`, `data_type=funding_info` | — | read_only | — |
-| agent_condor_005 | `manage_executors` | `action=create`, `trading_pair=BTC-USDT`, `connector_name=binance` | — | destructive | — |
+| c014 | `get_market_data` | `connector_name=binance_perpetual`, `data_type=funding_rate` | — | read_only | — |
+| agent_condor_005 | `manage_executors` | `action=create`, `trading_pair=RLUSD-XRP`, `connector_name=xrpl` | — | destructive | — |
 | agent_condor_routine_001 | `manage_skill`, `manage_routines` | `action=read`, `action=create_routine`, `name=bench_btc_price` | — | mutating | — |
 | agent_condor_routine_003 | `manage_routines` | `action=list` | — | read_only | — |
 | agent_condor_routine_004 | `manage_routines` | `action=run`, `name=market_scanner` | — | mutating | — |
