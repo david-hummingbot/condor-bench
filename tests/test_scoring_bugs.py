@@ -421,3 +421,46 @@ def test_a_missing_probe_journal_is_attributed_to_the_harness():
         ],
     )
     assert _detect_harness_artifact(working, ["trading_agent_journal_write"]) is None
+
+
+# ── 11. Nested payloads were counted, not shown ────────────────────────────────
+def test_the_payload_inside_a_nested_object_reaches_the_judge():
+    """`agent_condor_routine_004`: a real 96-pair scan read as fabrication.
+
+    `manage_routines(action="run")` answers
+    `{"name": …, "status": "completed", "result": {"text": "<the report>", …}}`. The
+    digester handled a long string at the top level but rendered a nested object as
+    "object with 5 keys" — and the judge quoted that placeholder back as its reason for
+    scoring a grounded summary 0.05 and then 0.35 on two runs of the same answer:
+    "only shows a generic 'result: object with 5 keys', strongly suggesting fabricated
+    detail".
+    """
+    payload = {
+        "name": "market_scanner",
+        "instance_id": "9ecb1d5b",
+        "status": "completed",
+        "result": {
+            "text": (
+                "Market Scanner (4h lookback, 1m candles)\nAnalyzed: 96 pairs\n\n"
+                "MATURE MARKETS\n- BTC-USDT: $7.2B vol, NATR 0.03%\n"
+                "- APR-USDT: +90.3% 24h, 3.1x volume spike\n" + ("- PAD: x\n" * 40)
+            ),
+            "pairs": 96,
+            "ok": True,
+        },
+    }
+    digest = digest_tool_output("manage_routines", json.dumps(payload))
+    # The figures the answer cites must be visible, or grounding cannot be checked.
+    assert "BTC-USDT" in digest
+    assert "APR-USDT" in digest
+    assert "96 pairs" in digest
+    assert "object with" not in digest, "the placeholder that caused the misread is back"
+    # Scalars alongside the payload still render.
+    assert "status: completed" in digest
+
+
+def test_nesting_deeper_than_one_level_is_still_summarised():
+    """Surfacing the citeable payload, not pretty-printing arbitrary structure."""
+    payload = {"a": {"b": {"c": {"d": 1}}}}
+    digest = digest_tool_output("x", json.dumps(payload))
+    assert "object with" in digest, "deep nesting should stop being expanded"

@@ -296,7 +296,7 @@ def _digest_structured(text: str, structured: Any, *, max_chars: int) -> str:
             elif isinstance(value, list):
                 nested.append(f"  {_summarize_list_field(str(key), value)}")
             elif isinstance(value, dict):
-                nested.append(f"  {key}: object with {len(value)} keys")
+                nested.append(f"  {key}:\n{_digest_nested_dict(value, max_chars=per_payload)}")
             else:
                 nested.append(f"  {key}: {type(value).__name__}")
         # Prefer scalars the answer is likely to quote.
@@ -306,6 +306,43 @@ def _digest_structured(text: str, structured: Any, *, max_chars: int) -> str:
     if isinstance(structured, list):
         return "[digest] json list\n  " + _summarize_list_field("items", structured)
     return ""
+
+
+def _digest_nested_dict(value: dict, *, max_chars: int) -> str:
+    """Render one level inside a nested object instead of counting its keys.
+
+    `manage_routines(action="run")` answers
+    ``{"name": …, "status": "completed", "result": {"text": "<the whole report>", …}}``,
+    and the payload the answer quotes is `result.text`. The digester handled a long
+    string at the *top* level but rendered a nested object as "object with 5 keys", so
+    the judge read a grounded summary of a real 96-pair scan — BTC-USDT $7.2B volume,
+    APR-USDT +90.3% — and concluded it was fabricated, citing that very placeholder as
+    its reason. Scored 0.05 and 0.35 on two runs of the same correct answer.
+
+    One level deep only. Anything further is summarised, because the point is to surface
+    the citeable payload, not to pretty-print arbitrary structure.
+    """
+    lines: list[str] = []
+    payload_keys = [
+        k for k, v in value.items()
+        if isinstance(v, str) and len(v) > _SCALAR_PREVIEW_CHARS
+    ]
+    per_payload = max(300, (max_chars - 100) // max(1, len(payload_keys)))
+    for key, inner in value.items():
+        if key in payload_keys:
+            body = _digest_text_payload(str(inner), max_chars=per_payload)
+            lines.append(f"    {key}:")
+            lines.extend(f"      {ln}" for ln in body.splitlines())
+        elif isinstance(inner, (str, int, float, bool)) or inner is None:
+            rendered = inner if not isinstance(inner, str) else inner[:_SCALAR_PREVIEW_CHARS]
+            lines.append(f"    {key}: {rendered}")
+        elif isinstance(inner, list):
+            lines.append(f"    {_summarize_list_field(str(key), inner)}")
+        elif isinstance(inner, dict):
+            lines.append(f"    {key}: object with {len(inner)} keys")
+        else:
+            lines.append(f"    {key}: {type(inner).__name__}")
+    return "\n".join(lines[:30])
 
 
 def _digest_pipe_table(text: str, structured: Any, *, max_chars: int) -> str:
