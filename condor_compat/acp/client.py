@@ -9,6 +9,8 @@ Source: https://github.com/hummingbot/condor
 
 from __future__ import annotations
 
+import json
+
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -21,6 +23,62 @@ class TextChunk:
 @dataclass
 class ThoughtChunk:
     text: str
+
+
+def unwrap_content_blocks(value: Any) -> str | None:
+    """The text inside an MCP content-block list, or None if that's not what it is.
+
+    Condor's MCP tools answer with the block form rather than a bare payload::
+
+        [{"type": "text", "text": "{\\"server\\": \\"bench_staging\\", …}"}]
+
+    Left wrapped, everything downstream sees the envelope instead of the result.
+    The judge was shown ``[digest] json list / items: 1 items (e.g. keys: type,
+    text)`` — literally no content — and then asked whether the answer was grounded
+    in it, so a verbatim-correct answer was marked down as "partially fabricated"
+    (c006 scored 0.55 with tools, params and validity all 1.0). ``live_expected``
+    ``fields`` assertions have the same problem: they look for a key that is one
+    level inside the envelope.
+
+    Both block shapes seen on the wire are handled: ``{"type": "text", …}`` and the
+    nested ``{"type": "content", "content": {"type": "text", …}}``.
+    """
+    if not isinstance(value, list) or not value:
+        return None
+    texts: list[str] = []
+    for block in value:
+        if not isinstance(block, dict):
+            return None
+        inner = block.get("content")
+        if isinstance(inner, dict) and inner.get("type") == "text":
+            texts.append(str(inner.get("text", "")))
+        elif block.get("type") == "text":
+            texts.append(str(block.get("text", "")))
+        else:
+            return None  # not a content-block list; leave it alone
+    joined = "\n".join(t for t in texts if t)
+    return joined or None
+
+
+def stringify_tool_output(content: Any) -> str:
+    """One wire shape for a tool result, whichever client captured it.
+
+    The two transports disagreed about structured payloads. ACP delivers JSON; the
+    PydanticAI path ran `str(content)` over a dict, producing a Python repr
+    (``{'server': 'bench_staging'}``) that no JSON parser accepts. Everything that
+    reads *into* a payload then behaved differently by transport — a
+    ``live_expected`` ``fields`` assertion scored 1.0 on ACP and 0.5 on PydanticAI
+    for the same tool returning the same data.
+    """
+    if isinstance(content, str):
+        return content
+    unwrapped = unwrap_content_blocks(content)
+    if unwrapped is not None:
+        return unwrapped
+    try:
+        return json.dumps(content, default=str)
+    except (TypeError, ValueError):
+        return str(content)
 
 
 @dataclass
@@ -38,11 +96,24 @@ class ToolCallUpdate:
     status: str | None = None
     title: str | None = None
     output: str | None = None
+    # Arguments, when the update is what carries them. Diverges from condor's copy
+    # on purpose: claude-agent-acp announces a call with `rawInput: {}` and fills the
+    # arguments in on a *later* tool_call_update, so a consumer that only reads the
+    # opening frame records every call with no arguments. condor renders tool calls
+    # and does not mind; bench scores their parameters, so it has to see them.
+    input: dict | None = None
 
 
 @dataclass
 class PromptDone:
     stop_reason: str
+    # Why the prompt failed, when it did. Diverges from condor's copy on purpose:
+    # condor shows the user a chat that visibly went wrong, so a stop_reason is
+    # enough. bench *scores* the turn, and a failed prompt that arrives as nothing
+    # but stop_reason="error" is indistinguishable from a model that chose to say
+    # nothing — it was recorded as an empty answer, judged "No response produced",
+    # and blamed on the model. The bridge's own message lands here instead.
+    error: str | None = None
 
 
 @dataclass

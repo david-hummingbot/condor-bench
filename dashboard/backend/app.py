@@ -10,6 +10,8 @@ Endpoints:
   GET  /api/runs              list completed + active runs
   GET  /api/runs/{id}         get completed run detail
   GET  /api/runs/{id}/stream  SSE live progress
+  POST /api/runs/{id}/pause   stop after the in-flight case (for 429 backoff)
+  POST /api/runs/{id}/resume  continue a paused run
   DELETE /api/runs/{id}       cancel active run
   GET  /api/matrix            model × domain/tool matrix (rebuilt on request)
   GET  /api/routing           routing recommendations
@@ -48,10 +50,17 @@ _active_runs: dict[str, dict[str, Any]] = {}
 _custom_runs: dict[str, dict[str, Any]] = {}
 
 PROVIDERS = [
+    # ACP agents: the model is chosen inside the CLI, so bench can only name one via
+    # the `provider:model` suffix. `fetch_acp_models` tells the UI it can ask the
+    # bridge which ids it accepts — worth doing rather than leaving it implicit,
+    # because the locally configured model can reject the request the bridge builds
+    # and then every prompt in the run fails with an API 400 and no output.
     {"id": "claude-code", "label": "Claude Code", "kind": "agent", "bare_key": True,
-     "needs_api_key": False, "supports_url": False, "models": []},
+     "needs_api_key": False, "supports_url": False, "fetch_acp_models": True,
+     "models": []},
     {"id": "gemini", "label": "Gemini CLI", "kind": "agent", "bare_key": True,
-     "needs_api_key": False, "supports_url": False, "models": []},
+     "needs_api_key": False, "supports_url": False, "fetch_acp_models": True,
+     "models": []},
     {"id": "anthropic", "label": "Anthropic", "kind": "cloud",
      "needs_api_key": True, "supports_url": False,
      "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
@@ -151,6 +160,50 @@ async def _emit(run_id: str, event: dict) -> None:
         await q.put(event)
 
 
+# A paused run still owns the staging target and its accumulated scorecards, so it
+# counts as active: starting a second run alongside it would interleave two models
+# against one condor instance, which is the thing the one-run-at-a-time guard exists
+# to prevent. It also has to keep showing up in /api/runs, or the UI offers no way
+# back to the run holding the lock.
+_ACTIVE_STATUSES = ("starting", "running", "paused")
+
+
+async def _await_resume(run_id: str, state: dict) -> None:
+    """Block at a case boundary while the run is paused.
+
+    Called *between* cases, never mid-case: a pause that abandoned an in-flight
+    call would leave a mutating case half-applied with no teardown, which is the
+    one thing cancel already has to be careful about. Waiting here means the pause
+    costs at most one more case, and the run resumes on the same connection.
+
+    Pausing is what a 429 actually calls for — the provider is asking for fewer
+    requests per minute, and cancelling would throw away every case already paid
+    for.
+    """
+    pause_event = state.get("pause_event")
+    if pause_event is None or not pause_event.is_set():
+        return
+
+    state["status"] = "paused"
+    await _emit(run_id, {"type": "run_paused", "case_id": state.get("next_case")})
+
+    while pause_event.is_set() and not state.get("cancelling"):
+        # Polled rather than awaited on a second event so that cancelling a paused
+        # run stays instant: task.cancel() lands on this sleep.
+        await asyncio.sleep(0.25)
+
+    # `cancel_run` clears the pause flag so the cancellation can land, which looks
+    # exactly like a resume from in here. Announcing one would flash the run back to
+    # "running" a beat before it reports "cancelled"; the `cancelling` marker is what
+    # tells the two apart. Leave the status at "paused" and let the caller's
+    # CancelledError handler set the final state.
+    if state.get("cancelling"):
+        return
+
+    state["status"] = "running"
+    await _emit(run_id, {"type": "run_resumed", "case_id": state.get("next_case")})
+
+
 async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.baseline import BaselineStore
     from bench.cleanup import teardown
@@ -159,7 +212,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.scorer import score_case
-    from config import build_run_pin, staging_config
+    from config import CASE_TIMEOUT_S, build_run_pin
 
     state = _active_runs[run_id]
     state["status"] = "running"
@@ -169,13 +222,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
         # on the wrong API must not start at all.
         from bench.staging_health import a_assert_ready
 
-        await a_assert_ready(mutating=False)
-
-        # Without BENCH_ALLOW_MUTATING only read-only cases run. Reported, because
-        # it changes which domains end up with enough evidence.
-        max_risk = None
-        if not staging_config()["allow_mutating"]:
-            max_risk = "read_only"
+        await a_assert_ready()
 
         all_cases = load_all_cases()
         layers = None
@@ -191,7 +238,6 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             domain=req.domain,
             category=req.category,
             layers=layers,
-            max_risk=max_risk,
         )
         if not cases:
             raise ValueError("No cases matched the selected filters.")
@@ -206,8 +252,6 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             "models": len(req.models),
             "cases_per_model": len(cases),
             "target_banner": target_banner(),
-            "risk_ceiling": max_risk,
-            "skipped_by_risk": len(all_cases) - len(cases) if max_risk else 0,
         })
 
         done_count = 0
@@ -227,6 +271,11 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     os.environ[k] = v
 
                 for case in cases:
+                    # Gate before the case starts, so a pause requested mid-case
+                    # takes effect once that case has finished and been cleaned up.
+                    state["next_case"] = case.id
+                    await _await_resume(run_id, state)
+
                     state["current_case"] = case.id
                     question = case_input_text(case)
                     await _emit(run_id, {
@@ -245,7 +294,9 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     sc_dict: dict = {}
                     response = ""
                     try:
-                        result = await run_case(case, norm_key)
+                        result = await asyncio.wait_for(
+                            run_case(case, norm_key), timeout=CASE_TIMEOUT_S
+                        )
                         baseline = store.load(case.id)
                         baseline_latency = baseline.latency_s if baseline else result.latency_s
                         sc = await score_case(case, result, baseline_latency)
@@ -270,6 +321,8 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                                 })
                     except asyncio.CancelledError:
                         raise
+                    except asyncio.TimeoutError:
+                        error = f"timed out after {CASE_TIMEOUT_S:.0f}s"
                     except Exception as exc:
                         error = str(exc)
 
@@ -292,7 +345,6 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                         run_type="adhoc",
                         case_ids=[c.id for c in cases],
                         models=[norm_key],
-                        risk_ceiling=max_risk,
                         shared_loaded=True,
                     )
                     run_dir = save_run(
@@ -356,7 +408,7 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
         # pre-flight a benchmark run does.
         from bench.staging_health import a_assert_ready
 
-        await a_assert_ready(mutating=False)
+        await a_assert_ready()
 
         await _emit_custom(run_id, {"type": "started", "total": len(req.models)})
         store = BaselineStore()
@@ -482,7 +534,17 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.get("/api/config")
 async def get_config():
     from bench.mcp_provider import target_banner
-    from config import condor_path, staging_config
+    from config import (
+        DESTRUCTIVE_FLOOR,
+        DOMAIN_PASS_RATE,
+        MIN_TOOL_CASES,
+        PASS_THRESHOLD,
+        POST_CONDITION_FAIL_CAP,
+        SCORE_WEIGHTS,
+        TOOL_PASS_RATE,
+        condor_path,
+        staging_config,
+    )
 
     staging = staging_config()
     return {
@@ -492,7 +554,18 @@ async def get_config():
         "staging": {
             "api_url": staging["api_url"],
             "server_name": staging["server_name"],
-            "allow_mutating": staging["allow_mutating"],
+        },
+        # Served rather than hardcoded in the UI: a weights change in config.py has
+        # to move the labels the dashboard prints, or the breakdown it shows stops
+        # describing the composite it is breaking down.
+        "scoring": {
+            "weights": SCORE_WEIGHTS,
+            "pass_threshold": PASS_THRESHOLD,
+            "domain_pass_rate": DOMAIN_PASS_RATE,
+            "tool_pass_rate": TOOL_PASS_RATE,
+            "min_tool_cases": MIN_TOOL_CASES,
+            "destructive_floor": DESTRUCTIVE_FLOOR,
+            "post_condition_fail_cap": POST_CONDITION_FAIL_CAP,
         },
     }
 
@@ -509,17 +582,14 @@ async def get_staging_health():
         # A crash in the checker itself must not read as "staging is fine".
         return {
             "ok": False,
-            "mutating_ok": False,
             "api_url": None,
             "server_name": None,
-            "allow_mutating": False,
             "checks": [
                 {
                     "name": "preflight",
                     "ok": False,
                     "detail": f"pre-flight itself failed: {exc}",
                     "blocking": True,
-                    "mutating_only": False,
                 }
             ],
         }
@@ -538,10 +608,36 @@ async def get_datasets():
             out[str(key(case))] = out.get(str(key(case)), 0) + 1
         return dict(sorted(out.items()))
 
+    # layer × domain, so the run form can size a filter that names both. Summing
+    # one axis and ignoring the other is how "3 models × 8 cases" became a number
+    # unrelated to what the run actually executed.
+    layer_domains: dict[str, dict[str, int]] = {}
+    for case in cases:
+        bucket = layer_domains.setdefault(str(case.type), {})
+        bucket[str(case.domain)] = bucket.get(str(case.domain), 0) + 1
+
+    # Every distinct (layer, domain, category) with its count — at most one entry
+    # per case, so this is small. It exists because the three filters AND together
+    # and the axes barely overlap: a Tool case's domain is always a `tool:` bucket
+    # and its category is always "tool", so offering the routing domains and the
+    # full category list alongside a Tools selection proposes combinations that
+    # cannot match anything. With the combinations themselves in hand the form can
+    # offer only what exists and count the selection exactly, instead of letting a
+    # run be submitted and refused with "No cases matched the selected filters."
+    combos: dict[tuple[str, str, str], int] = {}
+    for case in cases:
+        key = (str(case.type), str(case.domain), str(case.category or ""))
+        combos[key] = combos.get(key, 0) + 1
+
     return {
         "total": len(cases),
         "layers": _tally(lambda c: c.type),
         "domains": _tally(lambda c: c.domain),
+        "layer_domains": {k: dict(sorted(v.items())) for k, v in sorted(layer_domains.items())},
+        "combos": [
+            {"layer": layer, "domain": domain, "category": category, "count": count}
+            for (layer, domain, category), count in sorted(combos.items())
+        ],
         "routing_domains": sorted(
             {c.domain for c in cases if is_routing_domain(c.domain)}
         ),
@@ -577,15 +673,26 @@ async def get_matrix(rebuild: bool = True):
 async def get_routing(
     min_pass_rate: float = 0.80,
     min_cases: int = 3,
+    min_tool_pass_rate: float | None = None,
+    min_tool_cases: int | None = None,
     prefer_lower_tokens: bool = False,
 ):
-    """Routing recommendations, recomputed with the caller's criteria."""
+    """Routing recommendations, recomputed with the caller's criteria.
+
+    The tool axis has its own, lower bar — see ``config.TOOL_PASS_RATE``. Both
+    thresholds come back in ``criteria`` so the UI can label which is which.
+    """
     from bench.matrix import save_matrix
     from bench.routing import generate, save_routing
+    from config import MIN_TOOL_CASES, TOOL_PASS_RATE
 
     matrix_data, routing = generate(
         min_pass_rate=min_pass_rate,
         min_cases=min_cases,
+        min_tool_pass_rate=(
+            TOOL_PASS_RATE if min_tool_pass_rate is None else min_tool_pass_rate
+        ),
+        min_tool_cases=MIN_TOOL_CASES if min_tool_cases is None else min_tool_cases,
         prefer_lower_tokens=prefer_lower_tokens,
     )
     if not matrix_data["models"]:
@@ -624,6 +731,43 @@ async def api_put_settings(body: SettingsUpdate):
 @app.get("/api/providers")
 async def get_providers():
     return {"providers": PROVIDERS}
+
+
+@app.get("/api/acp-models")
+async def get_acp_models(provider: str = "claude-code"):
+    """Ask an ACP bridge which model ids it will accept.
+
+    Doubles as a health check for the ACP path: if this fails, no run against that
+    agent can work, and the error carries the bridge's own stderr instead of the
+    empty responses the failure used to produce.
+    """
+    from bench.client import acp_available_models
+
+    try:
+        models = await asyncio.wait_for(acp_available_models(provider), timeout=60)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            504, f"`{provider}` did not answer within 60s — is the ACP bridge installed?"
+        ) from None
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    rows = models.get("availableModels") or []
+    return {
+        "provider": provider,
+        "models": [
+            {
+                "id": str(r.get("modelId")),
+                "name": str(r.get("name") or r.get("modelId")),
+                "description": str(r.get("description") or ""),
+            }
+            for r in rows
+            if isinstance(r, dict) and r.get("modelId")
+        ],
+        # What a run with a bare `claude-code` key would use — the CLI's own
+        # configured model, which is not necessarily one bench should recommend.
+        "current": models.get("currentModelId"),
+    }
 
 
 @app.get("/api/provider-models")
@@ -674,10 +818,12 @@ class CustomPromptRequest(BaseModel):
 
 @app.post("/api/runs")
 async def create_run(req: RunRequest):
-    # One run at a time
+    # One run at a time (a paused run still holds the target — see _ACTIVE_STATUSES)
     for state in _active_runs.values():
-        if state["status"] in ("starting", "running"):
-            raise HTTPException(409, "A benchmark is already running. Cancel it first.")
+        if state["status"] in _ACTIVE_STATUSES:
+            raise HTTPException(
+                409, f"A benchmark is already {state['status']}. Cancel it first."
+            )
 
     run_id = uuid.uuid4().hex[:8]
     _active_runs[run_id] = {
@@ -688,8 +834,10 @@ async def create_run(req: RunRequest):
         "task": None,
         "total": 0,
         "current_case": None,
+        "next_case": None,
         "started_at": time.time(),
         "models": [m.model_key for m in req.models],
+        "pause_event": asyncio.Event(),
     }
     task = asyncio.create_task(_run_benchmark(run_id, req))
     _active_runs[run_id]["task"] = task
@@ -701,13 +849,52 @@ async def cancel_run(run_id: str):
     state = _active_runs.get(run_id)
     if not state:
         raise HTTPException(404, "Run not found")
+    state["cancelling"] = True
     cancel_event = state.get("cancel_event")
     if cancel_event is not None:
         cancel_event.set()
+    # A paused run parks in a sleep loop; clearing the flag lets the cancellation
+    # land immediately instead of after a resume that will never come. `cancelling`
+    # is set first so the gate reads this as a cancel rather than as a resume.
+    pause_event = state.get("pause_event")
+    if pause_event is not None:
+        pause_event.clear()
     task = state.get("task")
     if task and not task.done():
         task.cancel()
     return {"status": "cancelling"}
+
+
+@app.post("/api/runs/{run_id}/pause")
+async def pause_run(run_id: str):
+    """Ask the run to stop at the next case boundary.
+
+    Returns as soon as the request is recorded — the run is still `running` until
+    the in-flight case finishes, at which point it emits `run_paused`. Callers that
+    need the settled state should watch the event stream rather than this response.
+    """
+    state = _active_runs.get(run_id)
+    if not state:
+        raise HTTPException(404, "Run not found")
+    if state["status"] not in ("starting", "running", "paused"):
+        raise HTTPException(409, f"Run is {state['status']} — nothing to pause.")
+    pause_event = state.get("pause_event")
+    if pause_event is None:
+        raise HTTPException(409, "This run does not support pausing.")
+    pause_event.set()
+    return {"status": state["status"], "pause_requested": True}
+
+
+@app.post("/api/runs/{run_id}/resume")
+async def resume_run(run_id: str):
+    state = _active_runs.get(run_id)
+    if not state:
+        raise HTTPException(404, "Run not found")
+    pause_event = state.get("pause_event")
+    if pause_event is None:
+        raise HTTPException(409, "This run does not support pausing.")
+    pause_event.clear()
+    return {"status": state["status"], "pause_requested": False}
 
 
 @app.get("/api/runs/{run_id}/stream")
@@ -762,14 +949,19 @@ async def list_runs():
 
     active = []
     for rid, state in _active_runs.items():
-        if state["status"] in ("starting", "running"):
+        if state["status"] in _ACTIVE_STATUSES:
+            # `.get` on models: a suite run's state carries `suite_id` and takes its
+            # model list from the suite, so it never sets this key — and subscripting
+            # it made this whole endpoint 500 whenever a suite run was in flight,
+            # which is exactly when the UI needs to find its way back to the run.
             active.append({
                 "run_id": rid,
                 "status": state["status"],
-                "models": state["models"],
-                "total": state["total"],
+                "models": state.get("models", []),
+                "total": state.get("total", 0),
                 "active": True,
-                "started_at": state["started_at"],
+                "started_at": state.get("started_at"),
+                "suite_id": state.get("suite_id"),
             })
     for rid, state in _custom_runs.items():
         if state["status"] in ("starting", "running"):
@@ -1075,13 +1267,21 @@ async def api_import_suite_cases(suite_id: str, body: dict):
     if expected is None:
         raise HTTPException(400, "version is required")
     try:
+        requested = body.get("case_ids") or []
         imported = import_library_cases(
             suite_id,
-            case_ids=body.get("case_ids"),
+            case_ids=requested,
             layers=body.get("layers"),
             expected_version=int(expected),
         )
-        return {"imported": imported, "count": len(imported)}
+        # `import_library_cases` walks the library and keeps what was asked for, so
+        # an id that no longer exists is simply never reached — it only raises when
+        # *nothing* matched. Asking for a trimmed case alongside a live one therefore
+        # succeeded quietly, having imported one of the two. Name the misses so a
+        # stale id reads as a mistake rather than as a completed import.
+        found = {r.get("source_case_id") for r in imported}
+        unknown = [cid for cid in requested if cid not in found]
+        return {"imported": imported, "count": len(imported), "unknown_case_ids": unknown}
     except SuiteStoreError as exc:
         raise _suite_http_error(exc) from exc
 
@@ -1112,8 +1312,10 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
     from bench.suites import SuiteStoreError, get_suite
 
     for state in _active_runs.values():
-        if state["status"] in ("starting", "running"):
-            raise HTTPException(409, "A benchmark is already running. Cancel it first.")
+        if state["status"] in _ACTIVE_STATUSES:
+            raise HTTPException(
+                409, f"A benchmark is already {state['status']}. Cancel it first."
+            )
 
     try:
         get_suite(suite_id)
@@ -1122,6 +1324,7 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
 
     run_id = uuid.uuid4().hex[:8]
     cancel_event = asyncio.Event()
+    pause_event = asyncio.Event()
     _active_runs[run_id] = {
         "run_id": run_id,
         "status": "starting",
@@ -1130,9 +1333,14 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
         "task": None,
         "total": 0,
         "current_case": None,
+        "next_case": None,
         "started_at": time.time(),
         "suite_id": suite_id,
         "cancel_event": cancel_event,
+        # Suite runs fan out to subprocess workers, so the finest boundary the
+        # parent can hold is between members, not between cases. Pausing a suite
+        # run therefore waits out the whole current model × environment member.
+        "pause_event": pause_event,
     }
 
     async def _go():
@@ -1156,6 +1364,7 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
                 environment_ids=req.environment_ids,
                 models=model_dicts,
                 cancel_event=cancel_event,
+                wait_if_paused=lambda: _await_resume(run_id, _active_runs[run_id]),
             )
             state["status"] = "completed"
         except asyncio.CancelledError:

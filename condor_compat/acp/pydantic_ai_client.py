@@ -45,6 +45,7 @@ from .client import (
     ToolCallEvent,
     ToolCallUpdate,
     UsageEvent,
+    stringify_tool_output,
 )
 
 log = logging.getLogger(__name__)
@@ -377,6 +378,10 @@ class PydanticAIClient:
         # When set, the agent only sees tools whose name is in this allowlist
         # (used by domain-expert consults to scope an agent to one domain).
         self.allowed_tools = set(allowed_tools) if allowed_tools else None
+        # Populated by _prepare_tools on the first model request: the tool names
+        # actually offered, after the allowlist and the count cap. None until then,
+        # which is distinct from "offered nothing".
+        self.offered_tools: list[str] | None = None
         # Auto-detect filter mode based on model if not explicitly set
         self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
@@ -688,7 +693,15 @@ class PydanticAIClient:
                 limit,
                 self.model_name,
             )
-        return tool_defs[:limit]
+        tool_defs = tool_defs[:limit]
+        # Bench-only: record what the model was actually offered, after both the
+        # allowlist and the count cap. Scoring needs the real list, not the
+        # intended one — a case whose expected_tools were cut by the cap is a
+        # harness artifact, and only this point in the call knows that happened.
+        self.offered_tools = [
+            str(getattr(td, "name", "")).rsplit("__", 1)[-1] for td in tool_defs
+        ]
+        return tool_defs
 
     async def _run_mcp_lifecycle(self) -> None:
         """Background task that holds the MCP server context open."""
@@ -794,12 +807,12 @@ class PydanticAIClient:
                             if hasattr(node, "request") and node.request:
                                 for part in node.request.parts:
                                     if isinstance(part, ToolReturnPart):
-                                        content = part.content
-                                        output_str = (
-                                            content
-                                            if isinstance(content, str)
-                                            else str(content)
-                                        )
+                                        # JSON, not `str()`. A dict stringified with
+                                        # repr ({'server': 'x'}) parses nowhere, so a
+                                        # `live_expected` fields assertion scored 0.5
+                                        # here and 1.0 on the ACP path for the same
+                                        # tool returning the same data.
+                                        output_str = stringify_tool_output(part.content)
                                         yield ToolCallUpdate(
                                             tool_call_id=part.tool_call_id or "",
                                             status="completed",

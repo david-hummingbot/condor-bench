@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,13 +42,57 @@ _CREATE_ACTIONS = {
     "manage_controllers": {"create", "save"},
 }
 
+# Tools that *set state* rather than create a named thing. They have no `action`
+# argument, so _CREATE_ACTIONS cannot see them and _UNDO's (action, identifier)
+# shape cannot reverse them. Their teardown is a second call to the same tool with a
+# baseline value, carrying through whichever scoping args the original used.
+#
+# Leverage is the case that matters: it is real account state with no delete, so
+# without this a sweep ratchets leverage upward across models and never comes back.
+_STATE_SETTERS: dict[str, dict[str, Any]] = {
+    "set_account_position_mode_and_leverage": {
+        "leverage": 1,
+        "position_mode": "ONEWAY",
+    },
+}
+
+# Args carried from the original call into the reset, so it lands on the same
+# account / connector / pair rather than resetting something else.
+_STATE_SETTER_SCOPE = ("account_name", "connector_name", "trading_pair")
+
 _UNDO = {
     "manage_executors": ("manage_executors", "stop"),
-    "manage_routines": ("manage_routines", "delete"),
+    # condor's action is `delete_routine`; `delete` is not one of its actions and
+    # the tool answers with an error *as content*, which teardown used to record as
+    # a successful removal. That is how `bench_btc_price` survived into the next
+    # case's "list all routines" answer with a clean cleanup report behind it.
+    "manage_routines": ("manage_routines", "delete_routine"),
     "manage_skill": ("manage_skill", "delete"),
     "manage_memory": ("manage_memory", "delete"),
     "manage_notes": ("manage_notes", "delete"),
     "manage_trading_agent": ("manage_trading_agent", "delete_strategy"),
+}
+
+# Some tools create more than one kind of thing, and the undo differs per kind.
+# `manage_trading_agent` is the case that matters: `create_agent` makes an AGENT.md
+# identity removed with `delete_agent(agent_slug=…)`, while `create_strategy` makes a
+# playbook removed with `delete_strategy(strategy_id=…)`. Keyed on the tool alone,
+# every agent this benchmark created was "cleaned up" by deleting a strategy that
+# did not exist — which is why `bench_dca_sol` is still in the condor checkout.
+#
+# (tool, create action) -> (undo action, the argument that names the resource,
+#                           keys to read the identifier from, response first)
+_UNDO_BY_CREATE: dict[tuple[str, str], tuple[str, str, tuple[str, ...]]] = {
+    ("manage_trading_agent", "create_agent"): (
+        "delete_agent",
+        "agent_slug",
+        ("agent_slug", "slug"),
+    ),
+    ("manage_trading_agent", "create_strategy"): (
+        "delete_strategy",
+        "strategy_id",
+        ("strategy_id", "id"),
+    ),
 }
 
 # Tools whose creations this module will not attempt to reverse. A deployed bot
@@ -110,6 +155,24 @@ def created_resources(result: Any) -> list[CreatedResource]:
     found: list[CreatedResource] = []
     for call in getattr(result, "tool_calls", []) or []:
         tool = normalize_tool_name(str(call.get("tool", "")))
+        if tool in _STATE_SETTERS:
+            setter_args = call.get("args") or {}
+            if isinstance(setter_args, dict):
+                found.append(
+                    CreatedResource(
+                        tool=tool,
+                        action="set",
+                        # The pair (or the connector when no pair was given) is what
+                        # the reset has to target; there is no created id here.
+                        identifier=str(
+                            setter_args.get("trading_pair")
+                            or setter_args.get("connector_name")
+                            or "account"
+                        ),
+                        args=setter_args,
+                    )
+                )
+            continue
         creating = _CREATE_ACTIONS.get(tool)
         if not creating:
             continue
@@ -121,7 +184,9 @@ def created_resources(result: Any) -> list[CreatedResource]:
         # require the action to be stated rather than inferring creation.
         if action not in creating:
             continue
-        identifier = _identifier(tool, args, responses_by_id.get(call.get("tool_call_id")))
+        identifier = _identifier(
+            tool, args, responses_by_id.get(call.get("tool_call_id")), action
+        )
         found.append(
             CreatedResource(
                 tool=tool,
@@ -134,12 +199,26 @@ def created_resources(result: Any) -> list[CreatedResource]:
     return found
 
 
-def _identifier(tool: str, args: dict, response: Any) -> str | None:
+def _identifier(tool: str, args: dict, response: Any, action: str = "") -> str | None:
+    """What to name in the undo call.
+
+    Creations whose undo needs a server-assigned key look there *first*. An agent is
+    created with a display name ("Bench DCA SOL") and deleted by the slug the tool
+    returns ("bench_dca_sol"); reading the generic key order would have picked the
+    display name and deleted nothing.
+    """
+    parsed = _as_json(response)
+    preferred = _UNDO_BY_CREATE.get((tool, action), (None, None, ()))[2]
+    for key in preferred:
+        if isinstance(parsed, dict) and parsed.get(key):
+            return str(parsed[key])
+        if args.get(key):
+            return str(args[key])
+
     for key in ("executor_id", "strategy_id", "agent_id", "bot_name", "name", "key", "config_name"):
         value = args.get(key)
         if value:
             return str(value)
-    parsed = _as_json(response)
     if isinstance(parsed, dict):
         for key in ("executor_id", "strategy_id", "agent_id", "id", "name"):
             value = parsed.get(key)
@@ -157,6 +236,39 @@ def _as_json(payload: Any) -> Any:
         except json.JSONDecodeError:
             return None
     return None
+
+
+def tool_error(outcome: Any) -> str | None:
+    """The refusal in an MCP result, or None when the call really did the work.
+
+    MCP hands a rejected call back as an ordinary result with ``isError`` set and
+    the reason in its content — no exception is raised. Teardown treated anything
+    that did not throw as a successful removal, so calling a *non-existent* undo
+    action (``manage_routines(action="delete")``, which condor spells
+    ``delete_routine``) was logged as "removed" for as long as it has been wrong.
+    Nothing anywhere said otherwise: the report was clean and the routine stayed.
+    """
+    if outcome is None:
+        return None
+    if getattr(outcome, "isError", False):
+        return _outcome_text(outcome) or "tool reported an error"
+    text = _outcome_text(outcome)
+    # FastMCP servers also answer with a plain string for an unknown action.
+    if text and re.match(r"\s*(unknown|invalid|unsupported)\s+action\b", text, re.I):
+        return text.strip()[:200]
+    return None
+
+
+def _outcome_text(outcome: Any) -> str:
+    content = getattr(outcome, "content", None)
+    if content is None:
+        return str(outcome) if not isinstance(outcome, (dict, list)) else ""
+    parts: list[str] = []
+    for block in content if isinstance(content, list) else [content]:
+        text = getattr(block, "text", None)
+        if text:
+            parts.append(str(text))
+    return "\n".join(parts)
 
 
 async def teardown(
@@ -188,17 +300,23 @@ async def teardown(
         return report
 
     for resource in reversible:
-        undo = _UNDO.get(resource.tool)
+        by_create = _UNDO_BY_CREATE.get((resource.tool, resource.action))
+        undo = (resource.tool, by_create[0]) if by_create else _UNDO.get(resource.tool)
+        if undo is None and resource.tool in _STATE_SETTERS:
+            undo = (resource.tool, "set")
         if undo is None:
             report.manual.append({**resource.as_dict(), "reason": "no undo action defined"})
             continue
         try:
-            await _call_tool(
+            outcome = await _call_tool(
                 undo[0],
                 _undo_args(resource, undo[1]),
                 agent_slug=agent_slug,
                 model=model,
             )
+            refusal = tool_error(outcome)
+            if refusal:
+                raise RuntimeError(refusal)
             report.removed.append(resource.as_dict())
         except Exception as exc:
             log.warning(
@@ -214,7 +332,20 @@ async def teardown(
 
 
 def _undo_args(resource: CreatedResource, undo_action: str) -> dict[str, Any]:
+    if resource.tool in _STATE_SETTERS:
+        # A reset, not a delete: baseline values plus the original scoping args. No
+        # `action` key — the tool does not take one.
+        args = dict(_STATE_SETTERS[resource.tool])
+        for key in _STATE_SETTER_SCOPE:
+            if resource.args.get(key):
+                args[key] = resource.args[key]
+        return args
+
     args: dict[str, Any] = {"action": undo_action}
+    by_create = _UNDO_BY_CREATE.get((resource.tool, resource.action))
+    if by_create:
+        args[by_create[1]] = resource.identifier
+        return args
     if resource.tool == "manage_executors":
         args["executor_id"] = resource.identifier
         # Stopping an executor without this flag can close the position, which is

@@ -359,9 +359,18 @@ def test_per_tool_verdicts_use_expected_tools(tmp_path, registry):
     assert matrix["tools"]["get_market_data"]["ollama:mid:14b"]["pass_rate"] == 1.0
     assert matrix["tools"]["manage_routines"]["ollama:mid:14b"]["pass_rate"] == 0.0
 
+    # One case per tool is below MIN_TOOL_CASES, so neither gets a verdict — the
+    # matrix rows are still correct, the router just refuses to call them.
     routing = recommend(matrix, models_path=registry)
-    assert "get_market_data" in routing["tool_gaps"]["smallest_passing"]
-    assert "manage_routines" in routing["tool_gaps"]["unhandled"]
+    gaps = routing["tool_gaps"]
+    assert "get_market_data" in gaps["thin"]
+    assert "manage_routines" in gaps["thin"]
+    assert not gaps["smallest_passing"] and not gaps["unhandled"]
+
+    # With the guard relaxed to 1, the verdicts come back as before.
+    relaxed = recommend(matrix, models_path=registry, min_tool_cases=1)
+    assert "get_market_data" in relaxed["tool_gaps"]["smallest_passing"]
+    assert "manage_routines" in relaxed["tool_gaps"]["unhandled"]
 
 
 def test_domain_is_backfilled_for_runs_saved_before_the_field_existed(tmp_path, registry):
@@ -470,6 +479,64 @@ def test_config_keys_name_agents_condor_actually_ships():
     )
 
 
+def test_every_shipped_agent_has_a_routing_domain():
+    """The reverse direction: an agent condor ships that bench cannot route.
+
+    Checking only for stale keys let three agents (xrpl_market_maker,
+    smart_money_flow, meteora_launch_lp) ship upstream unnoticed. A shipped agent
+    with no domain is invisible to the Router — not reported as a gap, just
+    absent — so the dataset never gets cases for it and nobody notices the
+    recommendation is missing.
+
+    An ``AGENT.md`` is the discriminator: ``_defaults`` and ``_shared`` are
+    condor's fallback config and shared includes, not routable agents, and
+    legitimately have none.
+    """
+    from bench.routing import CONDOR_CONFIG_KEYS
+    from config import condor_path
+
+    repo = condor_path()
+    if repo is None or not (repo / "agents").is_dir():
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+
+    from bench.dataset import load_agent_roles
+
+    # Classification lives in datasets/agent_roles.json. An agent absent from it is
+    # *unclassified*, which fails here on purpose: users will ship their own agents,
+    # and the expert/strategy call should be made deliberately once rather than
+    # defaulted silently in either direction. A pattern match would have quietly
+    # swallowed every future agent.
+    roles = load_agent_roles()
+    shipped_with_prompt = sorted(
+        p.name
+        for p in (repo / "agents").iterdir()
+        if p.is_dir() and (p / "AGENT.md").is_file()
+    )
+    unclassified = [a for a in shipped_with_prompt if a not in roles]
+
+    assert not unclassified, (
+        f"condor ships agents bench has not classified: {unclassified}. Add each to "
+        "datasets/agent_roles.json:\n"
+        '  "role": "expert"   -> bench sizes a model for it; it gets a routing '
+        "domain and a config key\n"
+        '  "role": "strategy" -> a specialisation of another agent; name its "base". '
+        "No routing domain; tool competence is its evidence.\n"
+        "Leaving it out is not neutral — the Router would simply never mention it."
+    )
+
+    # And every expert must actually have resolved into a config key.
+    routed = {
+        key.split("/")[1]
+        for key in CONDOR_CONFIG_KEYS.values()
+        if key.startswith("agents/")
+    }
+    experts = [a for a in shipped_with_prompt if roles.get(a, {}).get("role") == "expert"]
+    missing_key = sorted(a for a in experts if a not in routed)
+    assert not missing_key, (
+        f"agents classified as experts produced no config key: {missing_key}"
+    )
+
+
 def test_domain_deleted_from_the_datasets_is_stale_not_unmet(tmp_path, registry):
     """A domain only older results carry can't be routed — and isn't a gap to close.
 
@@ -505,3 +572,142 @@ def test_a_live_domain_is_still_reported_as_unmet(tmp_path, registry):
     )
     assert live in routing["unmet_domains"]
     assert live not in routing["stale_domains"]
+
+
+# ── per-tool bar (separate from the domain bar) ─────────────────────────────────
+def _tool_cells(scored: int, passing: int) -> list[dict]:
+    """Cases for one tool: `passing` of `scored` clear PASS_THRESHOLD."""
+    return [
+        case(f"tc{i}", "general_consult", 0.95 if i < passing else 0.10,
+             expected_tools=["manage_routines"])
+        for i in range(scored)
+    ]
+
+
+def test_two_of_three_handles_a_tool_but_not_a_domain(tmp_path, registry):
+    """The whole reason the tool axis has its own bar.
+
+    2/3 = 67% clears the tool bar and fails the 80% domain bar. Under the old code
+    both used 0.80, so a single unlucky case marked the tool unhandled.
+    """
+    results = tmp_path / "results"
+    write_run(results, "ollama:mid:14b", _tool_cells(3, 2))
+
+    from bench.routing import generate
+
+    _, routing = generate(results_dir=results, models_path=registry)
+    gaps = routing["tool_gaps"]
+    assert "manage_routines" in gaps["smallest_passing"], gaps
+    assert "manage_routines" not in gaps["unhandled"]
+
+    # Same evidence, judged at the domain bar: not handled.
+    _, strict = generate(
+        results_dir=results, models_path=registry, min_tool_pass_rate=0.80
+    )
+    assert "manage_routines" in strict["tool_gaps"]["unhandled"]
+
+
+def test_a_single_case_is_reported_thin_not_as_a_verdict(tmp_path, registry):
+    """One passing case used to be enough to name a smallest_passing model."""
+    results = tmp_path / "results"
+    write_run(results, "ollama:mid:14b", _tool_cells(1, 1))
+
+    from bench.routing import generate
+
+    _, routing = generate(results_dir=results, models_path=registry)
+    gaps = routing["tool_gaps"]
+    assert "manage_routines" not in gaps["smallest_passing"]
+    assert "manage_routines" not in gaps["unhandled"]
+    assert gaps["thin"]["manage_routines"]["best_scored"] == 1
+    assert gaps["thin"]["manage_routines"]["needs"] == 3
+
+
+def test_enough_cases_and_all_failing_is_unhandled(tmp_path, registry):
+    results = tmp_path / "results"
+    write_run(results, "ollama:mid:14b", _tool_cells(3, 0))
+
+    from bench.routing import generate
+
+    _, routing = generate(results_dir=results, models_path=registry)
+    assert "manage_routines" in routing["tool_gaps"]["unhandled"]
+
+
+def test_both_thresholds_are_reported_so_the_ui_can_label_them(tmp_path, registry):
+    """A 67% tool row next to an 80% domain row must be self-describing."""
+    results = tmp_path / "results"
+    write_run(results, "ollama:mid:14b", _tool_cells(3, 3))
+
+    from bench.routing import generate
+    from config import MIN_TOOL_CASES, TOOL_PASS_RATE
+
+    _, routing = generate(results_dir=results, models_path=registry)
+    crit = routing["criteria"]
+    assert crit["min_tool_pass_rate"] == TOOL_PASS_RATE
+    assert crit["min_tool_cases"] == MIN_TOOL_CASES
+    assert crit["min_pass_rate"] != crit["min_tool_pass_rate"], (
+        "the two bars must differ, otherwise the separate tool axis is pointless"
+    )
+    assert routing["tool_gaps"]["criteria"]["min_tool_pass_rate"] == TOOL_PASS_RATE
+
+
+def test_tool_bar_stays_below_the_domain_bar():
+    """Guards the arithmetic: at 0.80 no affordable sample size tolerates a miss."""
+    from config import DOMAIN_PASS_RATE, MIN_TOOL_CASES, TOOL_PASS_RATE
+
+    assert TOOL_PASS_RATE < DOMAIN_PASS_RATE
+    # The point of MIN_TOOL_CASES is that one failure can still pass.
+    assert (MIN_TOOL_CASES - 1) / MIN_TOOL_CASES >= TOOL_PASS_RATE, (
+        f"{MIN_TOOL_CASES - 1}/{MIN_TOOL_CASES} must clear {TOOL_PASS_RATE} — "
+        "otherwise the guard buys no tolerance and the sample size is theatre"
+    )
+
+
+def test_strategies_are_not_routing_domains():
+    """A strategy slug must not produce a recommendation of its own.
+
+    AgentCase.domain returns the agent_slug, so a case slugged to a strategy would
+    otherwise create a routing domain with no config key — a recommendation that
+    reads as actionable and applies nowhere.
+    """
+    from bench.dataset import is_routing_domain, strategy_agents
+    from bench.routing import CONDOR_CONFIG_KEYS
+
+    for slug in strategy_agents():
+        assert not is_routing_domain(slug), f"{slug} is still routable"
+        assert slug not in CONDOR_CONFIG_KEYS, f"{slug} still has a config key"
+
+
+def test_no_dataset_case_is_slugged_to_a_strategy():
+    """Such a case would run, score, and land in a domain nobody reads."""
+    from bench.dataset import load_all_cases, strategy_agents
+
+    stranded = sorted(
+        c.id
+        for c in load_all_cases()
+        if getattr(c, "agent_slug", None) in strategy_agents()
+    )
+    assert not stranded, (
+        f"cases are slugged to strategies: {stranded}. Their domain is excluded from "
+        "routing, so they cost a live run and inform nothing. Re-slug them to the "
+        "base specialist, convert them to tool cases, or delete them."
+    )
+
+
+def test_every_strategy_names_the_base_it_derives_from():
+    """"strategy" without a base is an assertion with no reasoning attached.
+
+    The base is what makes the classification checkable: an XRPL market maker is
+    market_making_expert pointed at one connector, so its evidence is that domain's.
+    Without it, "strategy" is just a way to make an agent disappear from the Router.
+    """
+    from bench.dataset import expert_agents, load_agent_roles, strategy_agents
+
+    roles = load_agent_roles()
+    experts = expert_agents()
+    for slug in sorted(strategy_agents()):
+        base = (roles.get(slug) or {}).get("base")
+        assert base, f"{slug} is role: strategy but names no base"
+        assert base in experts, (
+            f"{slug} derives from {base!r}, which is not an expert. A strategy must "
+            "inherit from something bench actually sizes a model for."
+        )

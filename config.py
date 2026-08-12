@@ -7,6 +7,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 
+# Load .env here, at the one module every entry point imports before reading an env
+# var. Without it CONDOR_PATH is unset for anything that is not runner.py or the
+# dashboard, and condor_path() silently falls back to a sibling ../condor — which on
+# a machine with two clones is a different, usually older checkout.
+#
+# This has now caused three separate wrong answers: a maintenance script that would
+# have deleted from the wrong checkout, and two analyses that reported an agent as
+# having no tool grant because the fallback clone predates it. It also removes an
+# accidental dependency — under pytest the only reason .env was loaded at all is that
+# importing deepeval calls load_dotenv() as a side effect, so dropping an unrelated
+# test dependency would have silently changed which condor every drift check read.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
+except ImportError:  # pragma: no cover — dotenv is a declared dependency
+    pass
+
 DATASETS_DIR = ROOT / "datasets"
 BASELINE_DIR = ROOT / "baseline"
 RESULTS_DIR = ROOT / "results"
@@ -139,7 +157,6 @@ def build_run_pin(
     run_group_id: str | None = None,
     case_ids: list[str] | None = None,
     models: list[str] | None = None,
-    risk_ceiling: str | None = None,
     include_in_matrix: bool = False,
     shared_loaded: bool = False,
 ) -> dict[str, object]:
@@ -158,7 +175,6 @@ def build_run_pin(
         and commit != "unknown"
         and surface_commit != commit
     )
-    staging = staging_config()
     pin: dict[str, object] = {
         "run_type": run_type,
         "suite_id": suite_id,
@@ -177,8 +193,6 @@ def build_run_pin(
         },
         "case_ids": list(case_ids or []),
         "models": list(models or []),
-        "risk_ceiling": risk_ceiling,
-        "allow_mutating": bool(staging["allow_mutating"]),
     }
     return pin
 
@@ -245,15 +259,7 @@ def staging_config() -> dict[str, object]:
         "server_name": os.environ.get("BENCH_SERVER_NAME") or BENCH_SERVER_NAME,
         "chat_id": int(os.environ.get("BENCH_CHAT_ID") or BENCH_CHAT_ID),
         "user_id": int(os.environ.get("BENCH_USER_ID") or BENCH_USER_ID),
-        "allow_mutating": _env_flag("BENCH_ALLOW_MUTATING", False),
     }
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 # ── Composite score weights ────────────────────────────────────────────────────
@@ -277,6 +283,50 @@ PASS_THRESHOLD = 0.70
 # A model "passes a domain" at this pass rate (see bench/routing.py).
 DOMAIN_PASS_RATE = 0.80
 
+# A model "handles a tool" at this pass rate — deliberately lower than the domain
+# bar, and not a fudge. The two answer different questions: a domain verdict is
+# "can this model own this job", a tool verdict is "can it drive this tool at all".
+#
+# The number is also forced by arithmetic. At 0.80 the sample sizes a per-tool axis
+# can afford (2-4 cases) all require a *perfect* score — 2/3 and 3/4 both fall
+# below it — so one unlucky case reads as "no model handles this tool". 0.65 lets
+# 2/3 pass, which is the point of asking for three cases instead of two.
+#
+# It is 0.65 and not 0.67 because 2/3 is 0.6666…, so a 0.67 bar would reject the
+# exact outcome this bar exists to allow. Raising it back to 0.80 only makes sense
+# alongside MIN_TOOL_CASES >= 5, the first size where one miss still passes.
+TOOL_PASS_RATE = 0.65
+
+# Scored cases a model needs before a per-tool verdict counts as evidence. Below
+# this the tool is reported as thin rather than as handled or unhandled: a single
+# case is a coin flip wearing a verdict's clothes.
+MIN_TOOL_CASES = 3
+
 # Destructive cases get a higher floor: a model that passes a domain on average
 # but botches an irreversible action is not a routing candidate.
 DESTRUCTIVE_FLOOR = 0.70
+
+# A case that declares post_conditions is asserting an end state — the routine
+# exists, the memory is stored. If that state never materialised the case did not
+# achieve its purpose, whatever it said in prose, so its composite is capped here
+# and it cannot pass.
+#
+# Folding post-conditions into live_validity alone was not enough: that metric
+# carries 0.10, so a failed build cost 0.05 of composite against a 0.70 threshold
+# and still passed. The cap is what makes the assertion mean something.
+#
+# Note this has to move the *composite*: bench/matrix.py recomputes pass from
+# `composite >= PASS_THRESHOLD` rather than reading ScoreCard.passed, so a flag on
+# the scorecard would never reach a domain pass rate.
+POST_CONDITION_FAIL_CAP = 0.50
+
+# Wall-clock ceiling for a single case, in seconds. Runs are serial, so one case
+# that never returns stalls the whole sweep behind it — `c012` ("what skills do
+# you have?", a bare `manage_skill:list`) once took 609s, 23% of a 45-minute
+# suite, for a lookup whose median is under 16s.
+#
+# A timeout is scored as an infra failure, not as a 0: the model was not measured,
+# so excluding it is the honest reading (see bench/matrix.py). That means a
+# too-tight value silently thins the tool axis rather than failing loudly, which
+# is why this is well above the slowest legitimate case rather than near it.
+CASE_TIMEOUT_S = 180.0

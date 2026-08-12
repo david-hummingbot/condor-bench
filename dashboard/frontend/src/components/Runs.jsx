@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { getRun } from '../api.js'
-import { fmtLatency, fmtScore, fmtTime, scoreColor, shortModel } from '../utils.js'
+import { fmtLatency, fmtScore, fmtTime, scoreColor, shortModel, weightSummary } from '../utils.js'
 import CaseTable from './CaseTable.jsx'
 import PageHeader from './PageHeader.jsx'
 import EmptyState from './EmptyState.jsx'
 
-export default function Runs({ runs, onRefresh, onNavigate }) {
+export default function Runs({ runs, onRefresh, onNavigate, config }) {
   const [selected, setSelected] = useState(null)
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -119,7 +119,8 @@ export default function Runs({ runs, onRefresh, onNavigate }) {
                       {detail.summary.prompt_question}
                     </div>
                   )}
-                  <SummaryMetrics s={detail.summary} />
+                  <SummaryMetrics s={detail.summary} weights={config?.scoring?.weights} />
+                  <RunFlags s={detail.summary} />
                 </div>
                 <div className="card">
                   <div className="card-title">Cases ({detail.cases?.length ?? 0})</div>
@@ -134,28 +135,80 @@ export default function Runs({ runs, onRefresh, onNavigate }) {
   )
 }
 
-function SummaryMetrics({ s }) {
+/**
+ * Every weighted component of the composite, not a subset.
+ *
+ * Params and live validity carry 0.25 of the composite between them, so a
+ * breakdown that stopped at quality/tools/latency left a quarter of the score
+ * unaccounted for — a run could sit well below its quality average with nothing
+ * on the card explaining why.
+ */
+function SummaryMetrics({ s, weights }) {
   if (!s) return null
+  const summary = weightSummary(weights)
   return (
-    <div className="metrics-grid">
-      {[
-        { label: 'Composite', value: s.composite_avg },
-        { label: 'Answer quality', value: s.answer_quality_avg },
-        { label: 'Tool accuracy', value: s.tool_accuracy_avg },
-        { label: 'Latency score', value: s.latency_score_avg },
-        { label: 'Avg latency', value: null, text: fmtLatency(s.latency_s_avg) },
-        { label: 'Cases scored', value: null, text: String(s.cases_scored ?? '—') },
-      ].map(m => (
-        <div key={m.label} className="metric-card">
-          <div
-            className="metric-value"
-            style={{ color: m.value != null ? scoreColor(m.value) : 'var(--text)' }}
-          >
-            {m.text ?? fmtScore(m.value)}
+    <>
+      <div className="metrics-grid">
+        {[
+          { label: 'Composite', value: s.composite_avg },
+          { label: 'Answer quality', value: s.answer_quality_avg },
+          { label: 'Tool accuracy', value: s.tool_accuracy_avg },
+          { label: 'Tool params', value: s.tool_params_avg },
+          { label: 'Live validity', value: s.live_validity_avg },
+          { label: 'Latency score', value: s.latency_score_avg },
+          { label: 'Avg latency', value: null, text: fmtLatency(s.latency_s_avg) },
+          { label: 'Cases scored', value: null, text: String(s.cases_scored ?? '—') },
+        ].map(m => (
+          <div key={m.label} className="metric-card">
+            <div
+              className="metric-value"
+              style={{ color: m.value != null ? scoreColor(m.value) : 'var(--text)' }}
+            >
+              {m.text ?? fmtScore(m.value)}
+            </div>
+            <div className="metric-label">{m.label}</div>
           </div>
-          <div className="metric-label">{m.label}</div>
+        ))}
+      </div>
+      {summary && (
+        <div className="run-meta" style={{ marginTop: 10 }}>
+          Composite = {summary}. A component with no ground truth for a case scores
+          nothing and its weight moves to answer quality — that is why a “—” here does
+          not drag the composite down.
         </div>
-      ))}
+      )}
+    </>
+  )
+}
+
+/**
+ * Run-level counts the scorer now reports: rows blamed on the harness (excluded from
+ * routing) and rows whose asserted end state never materialised (capped, so they
+ * cannot pass). Per-case flags already exist in the table; without the roll-up you
+ * have to open every row to find out whether the run had any.
+ */
+function RunFlags({ s }) {
+  const artifacts = s?.harness_artifacts || 0
+  const unbuilt = s?.post_condition_failures || 0
+  const infra = s?.infra_excluded || 0
+  if (!artifacts && !unbuilt && !infra) return null
+  return (
+    <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      {infra > 0 && (
+        <span className="router-flag" title="Infrastructure failures — excluded from the averages rather than scored zero">
+          {infra} infra excluded
+        </span>
+      )}
+      {artifacts > 0 && (
+        <span className="router-flag" title={(s.harness_artifact_cases || []).map(c => `${c.case_id}: ${c.reason}`).join('\n')}>
+          {artifacts} harness artifact{artifacts !== 1 ? 's' : ''}
+        </span>
+      )}
+      {unbuilt > 0 && (
+        <span className="router-flag" title={(s.post_condition_failure_cases || []).map(c => `${c.case_id}: ${c.reason}`).join('\n')}>
+          {unbuilt} post-condition failure{unbuilt !== 1 ? 's' : ''}
+        </span>
+      )}
     </div>
   )
 }

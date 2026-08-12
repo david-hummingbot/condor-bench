@@ -73,6 +73,14 @@ export default function Matrix() {
           The small number is how many cases were scored — a cell resting on two cases is
           weaker evidence than one resting on eight. Infra failures and harness artifacts are
           excluded, not scored zero.
+          {axis === 'tools' && (
+            <>
+              {' '}Per-tool rows are judged by the Router on a <strong>lower bar than
+              domains</strong> (see Router → Per-tool minimum): driving a tool is a coarser
+              question than owning a domain, so the percentages here are not comparable to
+              the domain axis.
+            </>
+          )}
         </div>
       </div>
 

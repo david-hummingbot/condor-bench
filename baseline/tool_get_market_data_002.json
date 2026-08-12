@@ -1,0 +1,6 @@
+{
+  "case_id": "tool_get_market_data_002",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 9.44,
+  "timestamp": "2026-08-12T06:14:45.738286+00:00"
+}

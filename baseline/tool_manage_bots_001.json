@@ -1,0 +1,6 @@
+{
+  "case_id": "tool_manage_bots_001",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 5.363,
+  "timestamp": "2026-08-12T06:15:48.423580+00:00"
+}

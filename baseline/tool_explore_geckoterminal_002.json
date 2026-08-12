@@ -1,0 +1,6 @@
+{
+  "case_id": "tool_explore_geckoterminal_002",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 11.043,
+  "timestamp": "2026-08-12T06:21:50.632357+00:00"
+}

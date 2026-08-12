@@ -26,6 +26,10 @@ dependencies = [
     "pandas>=2.0",
     "plotly>=5.0",
     "python-dotenv>=1.0",
+    # Reads the YAML frontmatter of condor's AGENT.md files for each agent's tool
+    # grant. Was only transitively available before, which is the kind of thing
+    # that breaks when an unrelated dependency drops it.
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

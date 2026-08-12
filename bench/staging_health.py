@@ -8,11 +8,16 @@ hummingbot-api. A benchmark that quietly lands there would place orders against
 live capital while reporting tool scores.
 
 So this module refuses to run rather than guessing. Every check returns a
-verdict; ``assert_ready()`` raises unless the ones marked blocking pass, and
-mutating cases need a strictly stronger set than read-only ones.
+verdict and ``assert_ready()`` raises unless the ones marked blocking pass.
 
     from bench.staging_health import assert_ready
-    assert_ready(mutating=False)     # raises StagingUnhealthy on any blocking failure
+    assert_ready()     # raises StagingUnhealthy on any blocking failure
+
+Isolation is the API instance's job, not a flag here: point
+``HUMMINGBOT_API_URL`` at an instance carrying only test connectors. What this
+module guarantees is that bench is provably talking to *that* instance — see the
+``mcp_url_matches`` check, which is the reason the rest of the guard rails can be
+this thin.
 """
 
 from __future__ import annotations
@@ -42,48 +47,33 @@ class Check:
     ok: bool
     detail: str
     blocking: bool = True
-    # Blocking only when the run may mutate staging state.
-    mutating_only: bool = False
 
 
 @dataclass
 class HealthReport:
     api_url: str | None
     server_name: str | None
-    allow_mutating: bool
     checks: list[Check] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        """All read-only-blocking checks passed."""
-        return all(c.ok for c in self.checks if c.blocking and not c.mutating_only)
-
-    @property
-    def mutating_ok(self) -> bool:
-        """Every blocking check passed, including the mutating-only ones."""
+        """Every blocking check passed."""
         return all(c.ok for c in self.checks if c.blocking)
 
-    def failures(self, *, mutating: bool = False) -> list[Check]:
-        return [
-            c
-            for c in self.checks
-            if c.blocking and not c.ok and (mutating or not c.mutating_only)
-        ]
+    def failures(self) -> list[Check]:
+        return [c for c in self.checks if c.blocking and not c.ok]
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "api_url": self.api_url,
             "server_name": self.server_name,
-            "allow_mutating": self.allow_mutating,
             "ok": self.ok,
-            "mutating_ok": self.mutating_ok,
             "checks": [
                 {
                     "name": c.name,
                     "ok": c.ok,
                     "detail": c.detail,
                     "blocking": c.blocking,
-                    "mutating_only": c.mutating_only,
                 }
                 for c in self.checks
             ],
@@ -96,7 +86,6 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
     report = HealthReport(
         api_url=None,
         server_name=str(staging["server_name"]),
-        allow_mutating=bool(staging["allow_mutating"]),
     )
 
     # 1. condor checkout — the MCP wiring comes from its _shared.py
@@ -199,9 +188,9 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
     )
     report.checks.append(Check("api_reachable", reachable, detail))
 
-    # 6. Mutating runs need at least one account on the API. We do not pin a
-    #    specific account name — point HUMMINGBOT_API_URL at an instance that
-    #    only has dummy/paper credentials when you want isolation.
+    # 6. At least one account on the API. We do not pin a specific account name —
+    #    point HUMMINGBOT_API_URL at an instance that only has test connectors when
+    #    you want isolation.
     if accounts is None:
         report.checks.append(
             Check(
@@ -218,14 +207,14 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
                 len(accounts) > 0,
                 f"{len(accounts)} account(s) on API"
                 if accounts
-                else "API reachable but has no accounts — mutating cases will fail",
+                else "API reachable but has no accounts — every case that trades "
+                "will fail",
                 blocking=True,
-                mutating_only=True,
             )
         )
 
-    # 7. Orphaned executors from a prior run. Blocking for mutating runs only:
-    #    read-only cases tolerate leftovers, mutating cleanup does not — a
+    # 7. Orphaned executors from a prior run. Blocking for every run: any case may
+    #    create an executor, and teardown then runs against this instance — a
     #    teardown that stops "everything running" would kill unrelated positions.
     orphans = await _probe_active_executors(
         resolved, str(staging["username"]), str(staging["password"]), timeout
@@ -247,24 +236,9 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
                 "no active executors"
                 if not orphans
                 else f"{len(orphans)} active executor(s) predate this run "
-                f"({', '.join(orphans[:5])}) — clean up before a mutating run so "
-                "teardown can't stop something it didn't create",
+                f"({', '.join(orphans[:5])}) — clean up first so teardown can't "
+                "stop something it didn't create",
                 blocking=True,
-                mutating_only=True,
-            )
-        )
-
-    # 8. Mutating gate: only meaningful once everything above passes
-    if bool(staging["allow_mutating"]):
-        report.checks.append(
-            Check(
-                "mutating_gate",
-                report.mutating_ok,
-                "BENCH_ALLOW_MUTATING=true and all staging checks passed"
-                if report.mutating_ok
-                else "BENCH_ALLOW_MUTATING=true but staging checks failed — "
-                "mutating cases stay blocked",
-                blocking=False,
             )
         )
 
@@ -343,8 +317,8 @@ async def _probe_active_executors(
     makes that gap surface as an unnamed entry instead of passing the check.
 
     Returning ``None`` (unknown) rather than ``[]`` matters: the caller reports
-    unknown as a non-blocking failure, where a wrongly-empty list would let a
-    mutating run start against a target holding someone else's positions.
+    unknown as a non-blocking failure, where a wrongly-empty list would let a run
+    start against a target holding someone else's positions.
     """
     auth = httpx.BasicAuth(username, password) if username else None
     try:
@@ -409,33 +383,25 @@ async def _running_executor_ids(client: httpx.AsyncClient, url: str) -> list[str
     return ids
 
 
-def assert_ready(*, mutating: bool = False, timeout: float = 10.0) -> HealthReport:
+def assert_ready(*, timeout: float = 10.0) -> HealthReport:
     """Run the pre-flight and raise ``StagingUnhealthy`` unless it passes.
 
-    ``mutating=True`` additionally requires ``BENCH_ALLOW_MUTATING`` and the
-    mutating-only checks. Call this before the first case of a run, and again per
-    mutating case (cheap: only the sync checks re-resolve).
+    Call this before the first case of a run.
     """
     report = asyncio.run(check_staging(timeout=timeout))
-    _raise_unless_ready(report, mutating=mutating)
+    _raise_unless_ready(report)
     return report
 
 
-async def a_assert_ready(*, mutating: bool = False, timeout: float = 10.0) -> HealthReport:
+async def a_assert_ready(*, timeout: float = 10.0) -> HealthReport:
     """Async form of :func:`assert_ready`, for use inside a running loop."""
     report = await check_staging(timeout=timeout)
-    _raise_unless_ready(report, mutating=mutating)
+    _raise_unless_ready(report)
     return report
 
 
-def _raise_unless_ready(report: HealthReport, *, mutating: bool) -> None:
-    if mutating and not report.allow_mutating:
-        raise StagingUnhealthy(
-            "This case mutates staging state but BENCH_ALLOW_MUTATING is not true. "
-            "Set it only after the pre-flight URL check passes against staging."
-        )
-
-    failures = report.failures(mutating=mutating)
+def _raise_unless_ready(report: HealthReport) -> None:
+    failures = report.failures()
     if failures:
         lines = "\n".join(f"  ✗ {c.name}: {c.detail}" for c in failures)
         raise StagingUnhealthy(
@@ -452,6 +418,5 @@ def format_report(report: HealthReport) -> str:
     lines = [head]
     for c in report.checks:
         mark = "✓" if c.ok else ("✗" if c.blocking else "•")
-        scope = " (mutating only)" if c.mutating_only else ""
-        lines.append(f"  {mark} {c.name}{scope}: {c.detail}")
+        lines.append(f"  {mark} {c.name}: {c.detail}")
     return "\n".join(lines)

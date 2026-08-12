@@ -215,7 +215,7 @@ export default function ModelRouter() {
             </div>
           )}
 
-          <ToolGaps gaps={routing.tool_gaps} />
+          <ToolGaps gaps={routing.tool_gaps} domainPassRate={minPassRate} />
 
           {routing.unranked_models?.length > 0 && (
             <div className="card">
@@ -246,13 +246,17 @@ export default function ModelRouter() {
 
           <div className="card">
             <div className="card-title">Criteria used</div>
+            {/* Only thresholds the backend actually reports. A "Mode" chip lived here
+                until the mock execution path was removed; with nothing left to read it
+                printed a hardcoded "any" on every run. */}
             <div className="score-chips">
               <Chip label="Min pass rate" value={fmtPct(routing.criteria?.min_pass_rate)} />
               <Chip label="Min cases" value={String(routing.criteria?.min_cases)} />
               <Chip label="Case pass bar" value={String(routing.criteria?.pass_threshold)} />
               <Chip label="Destructive floor" value={String(routing.criteria?.destructive_floor)} />
+              <Chip label="Tool bar" value={fmtPct(routing.criteria?.min_tool_pass_rate)} />
+              <Chip label="Min tool cases" value={String(routing.criteria?.min_tool_cases)} />
               <Chip label="Prefer lower tokens" value={routing.routing_options?.prefer_lower_tokens ? 'on' : 'off'} />
-              <Chip label="Mode" value={routing.mode || 'any'} />
             </div>
           </div>
         </>
@@ -261,18 +265,39 @@ export default function ModelRouter() {
   )
 }
 
-function ToolGaps({ gaps }) {
+function ToolGaps({ gaps, domainPassRate }) {
   if (!gaps) return null
   const smallest = gaps.smallest_passing || {}
   const unhandled = gaps.unhandled || []
-  if (!Object.keys(smallest).length && !unhandled.length) return null
+  const thin = gaps.thin || {}
+  const bar = gaps.criteria?.min_tool_pass_rate
+  const minCases = gaps.criteria?.min_tool_cases
+  if (!Object.keys(smallest).length && !unhandled.length && !Object.keys(thin).length) {
+    return null
+  }
   return (
     <div className="card">
-      <div className="card-title">Per-tool minimum</div>
+      <div className="card-head">
+        <div className="card-title">Per-tool minimum</div>
+        {bar != null && (
+          <span className="threshold-tag" title="The tool axis is judged on its own bar">
+            tool bar {fmtPct(bar)}
+          </span>
+        )}
+      </div>
+      {bar != null && (
+        <div className="matrix-note" style={{ marginTop: -8, marginBottom: 14 }}>
+          These rows clear <strong>{fmtPct(bar)}</strong> on at least{' '}
+          <strong>{minCases}</strong> scored cases — <em>not</em> the{' '}
+          {fmtPct(domainPassRate)} domain bar above. A tool verdict asks whether the model
+          can drive the tool at all; a domain verdict asks whether it can own the job. Don't
+          read the two percentages against each other.
+        </div>
+      )}
       {unhandled.length > 0 && (
         <div className="error-text" style={{ marginBottom: 12 }}>
-          No model passes: {unhandled.join(', ')} — keep these on a cloud model, or fix the
-          case if it is the case that's wrong.
+          No model reaches {fmtPct(bar)}: {unhandled.join(', ')} — keep these on a cloud
+          model, or fix the case if it is the case that's wrong.
         </div>
       )}
       <div className="tool-min-grid">
@@ -280,10 +305,32 @@ function ToolGaps({ gaps }) {
           <div key={tool} className="tool-min-cell">
             <div className="tool-min-name">{tool}</div>
             <div className="tool-min-model">{v.model}</div>
-            <div className="run-meta">{fmtSize(v.params_b)} · {fmtPct(v.pass_rate)}</div>
+            <div className="run-meta">
+              {fmtSize(v.params_b)} · {fmtPct(v.pass_rate)} · {v.scored} case{v.scored !== 1 ? 's' : ''}
+            </div>
           </div>
         ))}
       </div>
+      {Object.keys(thin).length > 0 && (
+        <>
+          <div className="card-section-title">Too thin to call</div>
+          <div className="matrix-note" style={{ marginTop: -6, marginBottom: 10 }}>
+            Measured, but no model reached {minCases} scored cases — reported rather than
+            counted either way, because one case is not a verdict.
+          </div>
+          <div className="tool-min-grid">
+            {Object.entries(thin).map(([tool, v]) => (
+              <div key={tool} className="tool-min-cell thin">
+                <div className="tool-min-name">{tool}</div>
+                <div className="run-meta">
+                  best {v.best_scored}/{v.needs} cases · {v.models_measured} model
+                  {v.models_measured !== 1 ? 's' : ''} measured
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   )
 }

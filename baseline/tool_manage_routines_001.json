@@ -1,0 +1,6 @@
+{
+  "case_id": "tool_manage_routines_001",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 12.057,
+  "timestamp": "2026-08-12T06:17:33.314368+00:00"
+}

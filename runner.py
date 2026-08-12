@@ -38,23 +38,6 @@ def _resolve_layers(
     return None
 
 
-def _max_risk() -> tuple[str | None, str | None]:
-    """Risk ceiling for this run, plus a note when cases are being dropped.
-
-    Without ``BENCH_ALLOW_MUTATING`` a run is limited to read-only cases. That is
-    not a silent filter: it changes which domains have enough evidence to earn a
-    routing recommendation, so the caller is told.
-    """
-    from config import staging_config
-
-    if staging_config()["allow_mutating"]:
-        return None, None
-    return (
-        "read_only",
-        "BENCH_ALLOW_MUTATING unset — running read-only cases only",
-    )
-
-
 @app.command()
 def baseline(
     overwrite: bool = typer.Option(False, help="Regenerate existing baselines"),
@@ -87,12 +70,7 @@ def staging_check() -> None:
     report = asyncio.run(check_staging())
     console.print(format_report(report))
     if not report.ok:
-        console.print("\n[red]Blocking checks failed — live runs are refused.[/red]")
-        raise typer.Exit(1)
-    if report.allow_mutating and not report.mutating_ok:
-        console.print(
-            "\n[yellow]Read-only runs are allowed; mutating cases stay blocked.[/yellow]"
-        )
+        console.print("\n[red]Blocking checks failed — runs are refused.[/red]")
         raise typer.Exit(1)
     console.print("\n[green]Staging pre-flight passed.[/green]")
 
@@ -119,24 +97,20 @@ def test(
     from config import PASS_THRESHOLD, build_run_pin
 
     try:
-        assert_ready(mutating=False)
+        assert_ready()
     except StagingUnhealthy as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
-    max_risk, risk_note = _max_risk()
     cases = filter_cases(
         load_all_cases(),
         domain=domain,
         category=category,
         layers=_resolve_layers(consult_only, tick_only, layers),
-        max_risk=max_risk,
     )
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
         raise typer.Exit(1)
-    if risk_note:
-        console.print(f"[yellow]{risk_note}[/yellow]")
 
     store = BaselineStore()
     prompts = case_prompt_map()
@@ -158,7 +132,6 @@ def test(
         run_type="adhoc",
         case_ids=[c.id for c in cases],
         models=[model],
-        risk_ceiling=max_risk,
         shared_loaded=True,
     )
     run_dir = save_run(
@@ -179,13 +152,13 @@ async def _run_cases(cases, model: str, store):
     from bench.client import run_case
     from bench.dataset import is_mutating
     from bench.scorer import score_case
-    from config import PASS_THRESHOLD
+    from config import CASE_TIMEOUT_S, PASS_THRESHOLD
 
     scorecards, responses = [], {}
     for case in cases:
         console.print(f"  [dim]{case.id}[/dim] ({case.type})", end=" ")
         try:
-            result = await run_case(case, model)
+            result = await asyncio.wait_for(run_case(case, model), timeout=CASE_TIMEOUT_S)
             baseline = store.load(case.id)
             baseline_latency = baseline.latency_s if baseline else result.latency_s
             card = await score_case(case, result, baseline_latency)
@@ -217,6 +190,8 @@ async def _run_cases(cases, model: str, store):
                         f"      [yellow]left behind: {row.get('tool')} "
                         f"{row.get('identifier')} — {row.get('error') or row.get('reason', 'manual')}[/yellow]"
                     )
+        except asyncio.TimeoutError:
+            console.print(f"[red]TIMEOUT after {CASE_TIMEOUT_S:.0f}s — excluded[/red]")
         except Exception as exc:
             console.print(f"[red]ERROR: {exc}[/red]")
     return scorecards, responses
@@ -250,7 +225,7 @@ def sweep(
     from config import PASS_THRESHOLD, build_run_pin
 
     try:
-        assert_ready(mutating=False)
+        assert_ready()
     except StagingUnhealthy as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
@@ -272,18 +247,14 @@ def sweep(
             m for m in registry if m.params_b is None or m.params_b <= max_params_b
         ]
 
-    max_risk, risk_note = _max_risk()
     cases = filter_cases(
         load_all_cases(),
         domain=domain,
         layers=_resolve_layers(False, False, layers),
-        max_risk=max_risk,
     )
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
         raise typer.Exit(1)
-    if risk_note:
-        console.print(f"[yellow]{risk_note}[/yellow]")
 
     store = BaselineStore()
     prompts = case_prompt_map()
@@ -304,8 +275,7 @@ def sweep(
             run_type="adhoc",
             case_ids=[c.id for c in cases],
             models=[entry.key],
-            risk_ceiling=max_risk,
-            shared_loaded=True,
+                shared_loaded=True,
         )
         pin["sweep"] = True
         run_dir = save_run(
@@ -432,6 +402,17 @@ def route(
     min_cases: int = typer.Option(
         3, help="Minimum scored cases before a domain verdict counts as evidence"
     ),
+    min_tool_pass_rate: float = typer.Option(
+        None,
+        help="Pass rate a model needs to 'handle' a tool. Deliberately below "
+        "--min-pass-rate: a tool verdict asks whether the model can drive the tool "
+        "at all, not whether it can own a domain. Defaults to TOOL_PASS_RATE.",
+    ),
+    min_tool_cases: int = typer.Option(
+        None,
+        help="Scored cases before a per-tool verdict counts. Below this the tool is "
+        "reported as thin. Defaults to MIN_TOOL_CASES.",
+    ),
     prefer_lower_tokens: bool = typer.Option(
         False,
         help="Break ties between equally-small models by average token use "
@@ -442,10 +423,15 @@ def route(
     """Generate routing recommendations: the smallest model that passes each domain."""
     from bench.matrix import save_matrix
     from bench.routing import generate, save_routing
+    from config import MIN_TOOL_CASES, TOOL_PASS_RATE
 
     matrix_data, routing = generate(
         min_pass_rate=min_pass_rate,
         min_cases=min_cases,
+        min_tool_pass_rate=(
+            TOOL_PASS_RATE if min_tool_pass_rate is None else min_tool_pass_rate
+        ),
+        min_tool_cases=MIN_TOOL_CASES if min_tool_cases is None else min_tool_cases,
         prefer_lower_tokens=prefer_lower_tokens,
         models_path=models,
     )

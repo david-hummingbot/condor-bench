@@ -1,0 +1,6 @@
+{
+  "case_id": "tool_get_portfolio_overview_001",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 25.152,
+  "timestamp": "2026-08-12T06:15:11.383393+00:00"
+}

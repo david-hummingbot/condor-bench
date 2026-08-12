@@ -19,13 +19,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from config import SCORE_WEIGHTS
+from config import POST_CONDITION_FAIL_CAP, SCORE_WEIGHTS
 from bench.client import BenchmarkResult
+from bench.post_conditions import post_condition_score
 from metrics.answer_quality import AnswerQualityMetric, is_infra_failure
 from metrics.judge import JUDGE_USAGE
 from metrics.latency import LatencyMetric
 from metrics.live_validity import LiveValidityMetric, validity_breakdown
-from metrics.tool_accuracy import ToolAccuracyMetric
+from metrics.tool_accuracy import (
+    ToolAccuracyMetric,
+    phase_breakdown,
+    score_phases,
+    score_recall,
+    violated_forbidden_calls,
+)
 from metrics.tool_params import ToolParamMetric, param_breakdown
 
 _quality_metric = AnswerQualityMetric()
@@ -57,6 +64,11 @@ class ScoreCard:
     baseline_latency_s: float
     error: str | None = None
     category: str = ""
+    # Dataset layer this case came from (consult | tick | tool | agent). Persisted
+    # because the dashboard cannot infer it: chat-scoped Layer 3 cases were merged
+    # into the consult layer but kept their `agent_*` ids, so an id-prefix guess
+    # labels eight of them as the wrong layer.
+    case_type: str = ""
     tool_calls: list[str] = field(default_factory=list)
     # The tools this case is evidence about. Persisted so the per-tool matrix can
     # be rebuilt from results alone, without re-reading (a possibly since-edited)
@@ -75,9 +87,24 @@ class ScoreCard:
     tool_call_details: list[dict[str, Any]] = field(default_factory=list)
     tool_param_detail: dict[str, Any] = field(default_factory=dict)
     live_validity_detail: dict[str, Any] = field(default_factory=dict)
+    # Per-phase results for cases that declare ordered steps; empty otherwise.
+    phase_detail: list[dict[str, Any]] = field(default_factory=list)
     # Set when the harness — not the model — is why this row is bad. Excluded
     # from routing so a misconfiguration can't become a model recommendation.
     harness_artifact: str | None = None
+    # Bans the run violated, as `tool` or `tool:action`. Empty on a clean run — a
+    # tool_accuracy of 0.0 with no explanation is exactly the debugging dead end the
+    # first smoke run hit.
+    forbidden_violations: list[str] = field(default_factory=list)
+    # The agent's own tools it reached for (Claude Code's ToolSearch, Read, …).
+    # Reported, never scored: they are not decisions about condor's surface. Kept
+    # visible so "the tool score ignored these" is a statement you can check rather
+    # than trust.
+    agent_internal_calls: list[str] = field(default_factory=list)
+    # Set when a post-condition probe ran and the asserted end state was not there.
+    # Unlike harness_artifact this *is* the model's failure: the composite is capped
+    # so the case cannot pass.
+    post_condition_failed: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -90,6 +117,7 @@ class ScoreCard:
             "case_id": self.case_id,
             "model": self.model,
             "category": self.category,
+            "case_type": self.case_type,
             "domain": self.domain,
             "risk_level": self.risk_level,
             "answer_quality": round(self.answer_quality, 4),
@@ -103,11 +131,15 @@ class ScoreCard:
             "baseline_latency_s": round(self.baseline_latency_s, 2),
             "error": self.error,
             "harness_artifact": self.harness_artifact,
+            "post_condition_failed": self.post_condition_failed,
+            "forbidden_violations": self.forbidden_violations,
+            "agent_internal_calls": self.agent_internal_calls,
             "tool_calls": self.tool_calls,
             "expected_tools": self.expected_tools,
             "tool_call_details": self.tool_call_details,
             "tool_param_detail": self.tool_param_detail,
             "live_validity_detail": self.live_validity_detail,
+            "phase_detail": self.phase_detail,
             "usage": self.usage,
             "judge_usage": self.judge_usage,
             "wiring": self.wiring,
@@ -147,6 +179,8 @@ async def score(
     expected_no_calls: list[str] | None = None,
     expected_tool_params: dict[str, dict] | None = None,
     live_expected: dict[str, Any] | None = None,
+    steps: list[dict] | None = None,
+    strict_tools: bool = False,
     domain: str = "",
     risk_level: str = "read_only",
 ) -> ScoreCard:
@@ -154,10 +188,18 @@ async def score(
 
     expected_no_calls: tools that must NOT appear; any hit → tool_accuracy 0.
     """
-    tool_names = result.tool_names()
+    # Scored against condor's MCP surface only. An ACP agent's own built-ins
+    # (Claude Code's ToolSearch, Read, …) are in the trace but are not decisions
+    # about condor: counting them cost Layer 2 F1 precision no model could recover
+    # and diluted live validity, which is a claim about the real API. The full trace
+    # is still persisted and displayed — see BenchmarkResult's scoring views.
+    tool_names = result.mcp_tool_names()
+    scored_calls = result.mcp_tool_calls
+    scored_responses = result.mcp_tool_responses
+    internal_calls = result.agent_internal_tool_names()
     judge_before = JUDGE_USAGE.snapshot()
 
-    harness_artifact = _detect_harness_artifact(result)
+    harness_artifact = _detect_harness_artifact(result, expected_tools)
 
     def _card(**overrides: Any) -> ScoreCard:
         base: dict[str, Any] = {
@@ -167,9 +209,13 @@ async def score(
             "risk_level": risk_level,
             "usage": dict(result.usage),
             "wiring": dict(result.wiring),
+            # `tool_calls` is the scored list (MCP surface only); the untouched trace
+            # lives on `tool_call_details`, and what was set aside on
+            # `agent_internal_calls`.
             "tool_calls": tool_names,
             "expected_tools": list(expected_tools or []),
             "tool_call_details": result.tool_calls,
+            "agent_internal_calls": internal_calls,
             "baseline_latency_s": baseline_latency_s,
             "latency_s": result.latency_s,
             "harness_artifact": harness_artifact,
@@ -196,29 +242,71 @@ async def score(
 
     required = normalize_expected_tools(expected_tools)
     forbidden = list(expected_no_calls or [])
+    # Bans are checked against the full calls, not just names, so `tool:action`
+    # entries work — a case can require manage_executors and still forbid
+    # manage_executors:create.
+    violations = violated_forbidden_calls(scored_calls, forbidden)
+
     tool_accuracy: float | None = None
-    if required is not None:
-        tool_accuracy = _tool_metric.score(
-            actual_tools=tool_names,
-            expected_tools=required,
-            forbidden_tools=forbidden or None,
+    phase_detail: list[dict[str, Any]] = []
+    if violations:
+        # A restraint violation is not a partial-credit situation.
+        tool_accuracy = 0.0
+    elif steps:
+        # Ordered phases instead of F1: F1 is order-blind (building before reading
+        # the playbook scores full marks) and charges for retries (recovering from a
+        # schema error looks the same as skipping a phase).
+        tool_accuracy = score_phases(tool_names, steps)
+        phase_detail = phase_breakdown(tool_names, steps)
+    elif required is not None:
+        # Layer 2 probes are "call exactly this tool", so precision counts. Job cases
+        # are scored on recall: the agent's own prompt tells it to gather context, and
+        # charging it for calls the case did not happen to list measures nothing.
+        tool_accuracy = (
+            _tool_metric.score(actual_tools=tool_names, expected_tools=required)
+            if strict_tools
+            else score_recall(tool_names, required)
         )
     elif forbidden:
-        # Only a must-not-call list: 1.0 if clean, else 0.0
-        tool_accuracy = (
-            0.0
-            if ToolAccuracyMetric.violated_forbidden(tool_names, forbidden)
-            else 1.0
-        )
+        tool_accuracy = 1.0
 
     params = expected_tool_params or {}
-    tool_params = _param_metric.score(result.tool_calls, params)
-    param_detail = param_breakdown(result.tool_calls, params) if params else {}
+    tool_params = _param_metric.score(scored_calls, params)
+    param_detail = param_breakdown(scored_calls, params) if params else {}
 
     live_validity = _validity_metric.score(
-        result.tool_responses, live_expected, expected_tools=required
+        scored_responses, live_expected, expected_tools=required
     )
-    validity_detail = validity_breakdown(result.tool_responses, live_expected)
+    validity_detail = validity_breakdown(scored_responses, live_expected)
+
+    # Post-conditions belong to live validity, not to a sixth weighted metric:
+    # both answer "did this actually work against the real API", one from the
+    # response the model saw and one from the state it left behind. Folding them
+    # keeps SCORE_WEIGHTS summing to 1.0 and needs no reweighting.
+    probe_score = post_condition_score(result.post_conditions)
+    post_condition_failed: str | None = None
+    if probe_score is not None:
+        live_validity = (
+            probe_score if live_validity is None else (live_validity + probe_score) / 2
+        )
+        # Anything short of 1.0, not just 0.0. "The routine does not exist" scores
+        # 0.5 against {action: list, contains: [name]} — `nonempty` passes on a list
+        # holding *other* routines — so a ==0 test would miss the real failure mode.
+        # A post-condition is a binary claim about end state; partial credit on one
+        # means the state is not what the case asserted.
+        if probe_score < 1.0:
+            unmet = sorted(
+                str(row.get("tool"))
+                for row in result.post_conditions
+                if row.get("score") is not None and row["score"] < 1.0
+            )
+            post_condition_failed = (
+                f"post-condition not met for {', '.join(unmet)} — the case asserted "
+                "an end state that was not there afterwards"
+            )
+    validity_detail = dict(validity_detail or {})
+    if result.post_conditions:
+        validity_detail["post_conditions"] = result.post_conditions
 
     latency_score = _latency_metric.score(
         test_latency=result.latency_s,
@@ -235,10 +323,16 @@ async def score(
         }
     )
 
+    if post_condition_failed:
+        composite = min(composite, POST_CONDITION_FAIL_CAP)
+
     return _card(
         answer_quality=answer_quality,
         answer_reason=answer_reason,
+        post_condition_failed=post_condition_failed,
+        forbidden_violations=violations,
         tool_accuracy=tool_accuracy,
+        phase_detail=phase_detail,
         tool_params=tool_params,
         live_validity=live_validity,
         latency_score=latency_score,
@@ -250,7 +344,9 @@ async def score(
     )
 
 
-def _detect_harness_artifact(result: BenchmarkResult) -> str | None:
+def _detect_harness_artifact(
+    result: BenchmarkResult, expected_tools: list[str] | None = None
+) -> str | None:
     """Name the harness misconfiguration behind a bad row, if that's what it is.
 
     The failure this guards against: an agent-scoped case that ran chat-scoped
@@ -277,6 +373,25 @@ def _detect_harness_artifact(result: BenchmarkResult) -> str | None:
             f"ACP auto-discovery added {extras} from condor/.mcp.json — the tool "
             "set differs from the PydanticAI path, so tool scores are not comparable"
         )
+
+    # A case cannot fail on a tool it was never shown. The model-size cap trims
+    # `tool_defs[:limit]`, so a case whose expected tool sorted past the cut is
+    # measuring the harness, not the model — the failure mode that made scoping
+    # specialists to their grant worth doing in the first place.
+    offered = wiring.get("offered_tools")
+    if isinstance(offered, list) and offered and expected_tools:
+        from metrics.tool_accuracy import normalize_tool_name
+
+        have = {normalize_tool_name(str(t)) for t in offered}
+        missing = sorted(
+            {normalize_tool_name(str(t)) for t in expected_tools} - have
+        )
+        if missing:
+            return (
+                f"expected tool(s) {', '.join(missing)} were never offered to the "
+                f"model (it saw {len(have)}: {', '.join(sorted(have))}) — the case "
+                "measures the tool filter, not the model"
+            )
     return None
 
 
@@ -301,8 +416,12 @@ async def score_case(
         expected_no_calls=list(getattr(case, "expected_no_calls", []) or []) or None,
         expected_tool_params=getattr(case, "expected_tool_params", {}) or None,
         live_expected=getattr(case, "live_expected", {}) or None,
+        steps=list(getattr(case, "steps", []) or []) or None,
+        # Layer 2 probes are the only cases where tool *precision* is the point.
+        strict_tools=getattr(case, "type", "") == "tool",
         domain=getattr(case, "domain", ""),
         risk_level=getattr(case, "risk_level", "read_only"),
     )
     card.category = getattr(case, "category", "")
+    card.case_type = getattr(case, "type", "")
     return card

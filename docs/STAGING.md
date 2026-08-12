@@ -39,8 +39,10 @@ Three things prevent that:
 2. **The pre-flight is fail-closed.** `bench/staging_health.py` reads the `--url`
    the subprocess will *actually* be launched with and refuses to run unless it
    equals `HUMMINGBOT_API_URL` exactly. No prefix matching, no fallback.
-3. **Mutating cases are gated separately.** `BENCH_ALLOW_MUTATING` defaults to
-   false, and even when true it only takes effect if every other check passed.
+3. **Isolation is the API instance's job.** There is no in-bench gate on
+   capital-affecting cases; point `HUMMINGBOT_API_URL` at an instance carrying
+   only test connectors. What this repo guarantees is that bench is provably
+   talking to *that* instance — which is what check 2 above is for.
 
 ---
 
@@ -71,8 +73,6 @@ HUMMINGBOT_API_URL=http://staging:8000
 HUMMINGBOT_USERNAME=bench
 HUMMINGBOT_PASSWORD=...
 ```
-
-Leave `BENCH_ALLOW_MUTATING` unset for now.
 
 ### 2. Register the server in Condor (automatic)
 
@@ -106,8 +106,8 @@ staging pre-flight url=http://staging:8000
   ✓ server_registered: 'bench_staging' → staging:8000
   ✓ mcp_url_matches: MCP --url resolves to http://staging:8000 (matches HUMMINGBOT_API_URL)
   ✓ api_reachable: http://staging:8000 reachable (2 account(s))
-  ✓ accounts_listed (mutating only): 2 account(s) on API
-  ✓ no_orphaned_executors (mutating only): no active executors
+  ✓ accounts_listed: 2 account(s) on API
+  ✓ no_orphaned_executors: no active executors
 ```
 
 ### 4. Run something read-only
@@ -115,17 +115,6 @@ staging pre-flight url=http://staging:8000
 ```bash
 uv run python runner.py test ollama:qwen2.5:14b --layers tool -d tool:market_data
 ```
-
-### 5. Only then enable mutating cases
-
-```env
-BENCH_ALLOW_MUTATING=true
-```
-
-Re-run `staging-check`. Mutating cases stay blocked unless the mutating-only
-checks pass too.
-
----
 
 ## Risk levels
 
@@ -138,16 +127,24 @@ order:
 | `mutating` | condor-side state only | `manage_routines` create, `manage_memory` write, journal writes |
 | `destructive` | Capital-affecting | `manage_executors` create, `manage_bots` deploy, leverage changes, strategy creation |
 
-A run without `BENCH_ALLOW_MUTATING` keeps only `read_only`. Destructive cases
-additionally have to clear a higher score floor (`DESTRUCTIVE_FLOOR`, 0.70) before
-a model can be recommended for that domain — a model that passes a domain on
-average but botches the irreversible case is not a routing candidate.
+**Every level runs.** The level is not a gate; it decides two things:
+
+* `is_mutating` (anything above `read_only`) triggers `bench/cleanup.py` teardown
+  after the case. A case that mutates but is labelled `read_only` will not be
+  cleaned up, so mislabelling leaks state.
+* `destructive` cases have to clear a higher score floor (`DESTRUCTIVE_FLOOR`,
+  0.70) before a model can be recommended for that domain — a model that passes a
+  domain on average but botches the irreversible case is not a routing candidate.
+
+Because there is no gate, the case text itself is part of the safety story: keep
+capital small and actions unremarkable, and run against an API instance that has
+only test connectors.
 
 ---
 
 ## Cleanup
 
-`bench/cleanup.py` runs after each mutating live case and undoes what that case
+`bench/cleanup.py` runs after each mutating case and undoes what that case
 created. Two rules matter:
 
 - **Only what this run created.** Resource ids come from the case's own tool
@@ -164,7 +161,7 @@ reported for manual attention instead:
       left behind: manage_bots eth-maker-bench — manual
 ```
 
-The pre-flight's orphan scan is the backstop: leftovers block the *next* mutating
+The pre-flight's orphan scan is the backstop: leftovers block the *next*
 run rather than accumulating silently.
 
 ---
@@ -232,7 +229,7 @@ condor's config is the source of truth for URL resolution, deliberately.
 **Tool cases fail with empty payloads rather than errors** — usually the
 configured Hummingbot API has no accounts (or the wrong instance). Point
 `HUMMINGBOT_API_URL` at an API that has the accounts you intend to exercise;
-mutating pre-flight checks that at least one account is listed.
+the pre-flight checks that at least one account is listed.
 
 **`condor's _shared.py no longer exports build_mcp_servers_for_agent()`** — condor
 moved the helper. Update `bench/mcp_provider.py` to match. Do not vendor a copy;

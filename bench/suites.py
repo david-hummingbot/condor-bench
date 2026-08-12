@@ -14,12 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from bench.atomic_io import atomic_write_json, atomic_write_jsonl
-from bench.dataset import (
-    Case,
-    _normalize_risk,
-    filter_cases,
-    load_all_cases,
-)
+from bench.dataset import Case, _normalize_risk, load_all_cases
 from config import ENVIRONMENTS_DIR, SUITES_DIR, staging_config
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -459,7 +454,6 @@ def load_suite_cases_as_objects(
     suite_id: str,
     *,
     case_ids: list[str] | None = None,
-    max_risk: str | None = None,
 ) -> list[Case]:
     """Parse suite rows into the same Case objects the runner expects."""
     from bench.dataset import AgentCase, ConsultCase, TickCase, ToolCase
@@ -543,18 +537,15 @@ def load_suite_cases_as_objects(
                     type="consult",
                     expected_tool_params=data.get("expected_tool_params", {}),
                     live_expected=data.get("live_expected", {}),
+                    expected_no_calls=data.get("expected_no_calls", []),
+                    steps=data.get("steps", []),
+                    post_conditions=data.get("post_conditions", {}),
                     risk_level=_normalize_risk(data.get("risk_level")),
                     agent_slug=data.get("agent_slug"),
                 )
             )
 
-    if max_risk:
-        cases = filter_cases(cases, max_risk=max_risk)
     return cases
 
 
-def risk_ceiling() -> str | None:
-    """Read-only unless BENCH_ALLOW_MUTATING is set."""
-    if staging_config()["allow_mutating"]:
-        return None
-    return "read_only"
+

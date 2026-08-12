@@ -18,11 +18,12 @@ case:
     ``bench/mcp_provider.py``).
 
 ``risk_level``
-    ``read_only`` | ``mutating`` | ``destructive``. Gates whether a case may run
-    against staging at all (``BENCH_ALLOW_MUTATING``) and raises the score bar
-    for destructive cases in routing. Unset defaults to ``read_only``, so a case
-    that *does* mutate must say so explicitly — the safe default is the one that
-    can't place an order.
+    ``read_only`` | ``mutating`` | ``destructive``. Every case runs — isolation is
+    the API instance's job, not a flag here. What the level still decides is the
+    score bar: ``destructive`` cases must clear ``DESTRUCTIVE_FLOOR`` before a
+    model can own the domain, and ``is_mutating`` decides whether teardown runs
+    after the case. Unset defaults to ``read_only``, so a case that *does* mutate
+    must say so explicitly or it will not be cleaned up.
 """
 from __future__ import annotations
 
@@ -50,10 +51,62 @@ _DEFAULT_CONSULT_DOMAIN = "general_consult"
 # ("market_data") from something Condor can actually route ("market_making_expert").
 TOOL_DOMAIN_PREFIX = "tool:"
 
+# Expert vs strategy comes from datasets/agent_roles.json, not from code. Users will
+# ship their own agents, so this has to be a one-line data decision per agent rather
+# than an edit here — and an *unclassified* agent must fail loudly instead of
+# defaulting either way, which is what the roster drift test enforces.
+AGENT_ROLES_PATH = DATASETS_DIR / "agent_roles.json"
+
+
+def load_agent_roles() -> dict[str, dict[str, Any]]:
+    """slug -> {role, domain?, base?, notes?}. Empty when the file is unreadable."""
+    try:
+        data = json.loads(AGENT_ROLES_PATH.read_text())
+    except Exception:
+        return {}
+    agents = data.get("agents")
+    return agents if isinstance(agents, dict) else {}
+
+
+def _slugs_with_role(role: str) -> frozenset[str]:
+    return frozenset(
+        slug
+        for slug, spec in load_agent_roles().items()
+        if isinstance(spec, dict) and spec.get("role") == role
+    )
+
+
+def strategy_agents() -> frozenset[str]:
+    """Agents that specialise another agent, so bench does not route them.
+
+    An XRPL market maker is a market maker pointed at one connector: it calls the
+    same tools and inherits its base's model assignment, so giving it a routing
+    domain would multiply recommendations on evidence that is the base's evidence
+    under a different name.
+    """
+    return _slugs_with_role("strategy")
+
+
+def expert_agents() -> frozenset[str]:
+    """Agents bench sizes a model for, each getting a routing domain."""
+    return _slugs_with_role("expert")
+
+
+def routing_domain_for(slug: str) -> str:
+    """The domain an expert's cases pool into. Usually the slug itself."""
+    spec = load_agent_roles().get(slug) or {}
+    return str(spec.get("domain") or slug)
+
 
 def is_routing_domain(domain: str) -> bool:
-    """True when a domain names something a Condor model assignment can target."""
-    return not domain.startswith(TOOL_DOMAIN_PREFIX)
+    """True when a domain names something a Condor model assignment can target.
+
+    False for Layer 2 capability buckets (``tool:market_data`` — there is no config
+    key for "market data") and for strategies (see :func:`strategy_agents`).
+    """
+    if domain.startswith(TOOL_DOMAIN_PREFIX):
+        return False
+    return domain not in strategy_agents()
 
 
 def _normalize_risk(value: Any) -> str:
@@ -75,8 +128,20 @@ class ConsultCase:
     # Ground truth for the real-API metrics
     expected_tool_params: dict[str, dict] = field(default_factory=dict)
     live_expected: dict[str, Any] = field(default_factory=dict)
+    # Tools that must NOT be called. A consult can be a restraint test — "ask me
+    # what you need before building anything" — and without this the ban is
+    # unscoreable, because the scorer reads it off the case by name.
+    expected_no_calls: list[str] = field(default_factory=list)
     risk_level: str = "read_only"
     agent_slug: str | None = None
+    # Ordered build phases. When present, tool accuracy is scored by
+    # metrics.tool_accuracy.score_phases instead of multiset F1 — see that
+    # function for why a build cannot be scored order-blind.
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    # Assertions checked against the API *after* the run, before teardown. Same
+    # shape as live_expected but the tool is called by bench, not the model:
+    # {"manage_routines": {"action": "list", "contains": ["bench_btc_price"]}}
+    post_conditions: dict[str, Any] = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -108,6 +173,14 @@ class TickCase:
     # the case id so a dataset that forgets the field still gets its own store
     # rather than silently borrowing the chat's.
     agent_slug: str | None = None
+    # Ordered build phases. When present, tool accuracy is scored by
+    # metrics.tool_accuracy.score_phases instead of multiset F1 — see that
+    # function for why a build cannot be scored order-blind.
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    # Assertions checked against the API *after* the run, before teardown. Same
+    # shape as live_expected but the tool is called by bench, not the model:
+    # {"manage_routines": {"action": "list", "contains": ["bench_btc_price"]}}
+    post_conditions: dict[str, Any] = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -168,6 +241,14 @@ class AgentCase:
     tags: list[str] = field(default_factory=list)
     category: str = "agent"
     type: str = "agent"
+    # Ordered build phases. When present, tool accuracy is scored by
+    # metrics.tool_accuracy.score_phases instead of multiset F1 — see that
+    # function for why a build cannot be scored order-blind.
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    # Assertions checked against the API *after* the run, before teardown. Same
+    # shape as live_expected but the tool is called by bench, not the model:
+    # {"manage_routines": {"action": "list", "contains": ["bench_btc_price"]}}
+    post_conditions: dict[str, Any] = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -211,6 +292,9 @@ def load_consult_cases(path: Path | None = None) -> list[ConsultCase]:
             category=data.get("category", ""),
             expected_tools=data.get("expected_tools", []),
             turns=data.get("turns", []),
+            steps=data.get("steps", []),
+            post_conditions=data.get("post_conditions", {}),
+            expected_no_calls=data.get("expected_no_calls", []),
             tags=data.get("tags", []),
             type=data.get("type", "consult"),
             expected_tool_params=data.get("expected_tool_params", {}),
@@ -241,6 +325,8 @@ def load_tick_cases(path: Path | None = None) -> list[TickCase]:
                 tick_number=data.get("tick_number", 1),
                 expected_tool_calls=data.get("expected_tool_calls", []),
                 expected_no_calls=data.get("expected_no_calls", []),
+                steps=data.get("steps", []),
+                post_conditions=data.get("post_conditions", {}),
                 category=data.get("category", ""),
                 tags=data.get("tags", []),
                 expected_tool_params=data.get("expected_tool_params", {}),
@@ -292,6 +378,8 @@ def load_agent_cases(path: Path | None = None) -> list[AgentCase]:
             expected_no_calls=data.get("expected_no_calls", []),
             turns=data.get("turns", []),
             live_expected=data.get("live_expected", {}),
+            steps=data.get("steps", []),
+            post_conditions=data.get("post_conditions", {}),
             risk_level=_normalize_risk(data.get("risk_level")),
             tags=data.get("tags", []),
         )
@@ -342,14 +430,8 @@ def filter_cases(
     domain: str | None = None,
     category: str | None = None,
     layers: Iterable[str] | None = None,
-    max_risk: str | None = None,
 ) -> list[Case]:
-    """Apply the CLI/dashboard filters in one place.
-
-    ``max_risk`` keeps cases at or below a risk level in ``RISK_LEVELS`` order, so
-    ``max_risk="read_only"`` is how a run against a staging API without
-    ``BENCH_ALLOW_MUTATING`` drops the cases it isn't allowed to run.
-    """
+    """Apply the CLI/dashboard filters in one place."""
     out = list(cases)
     if layers:
         wanted = set(layers)
@@ -358,12 +440,4 @@ def filter_cases(
         out = [c for c in out if c.domain == domain]
     if category:
         out = [c for c in out if getattr(c, "category", "") == category]
-    if max_risk:
-        ceiling = RISK_LEVELS.index(_normalize_risk(max_risk))
-        out = [
-            c
-            for c in out
-            if RISK_LEVELS.index(_normalize_risk(getattr(c, "risk_level", None)))
-            <= ceiling
-        ]
     return out

@@ -15,6 +15,11 @@ export function getProviderModels(baseUrl, apiKey = '') {
   return fetch('/api/provider-models?' + params).then(handle)
 }
 
+/** Model ids an ACP bridge (Claude Code, Gemini CLI) will accept. */
+export function getAcpModels(provider) {
+  return fetch('/api/acp-models?' + new URLSearchParams({ provider })).then(handle)
+}
+
 export const createRun = (body) =>
   fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(handle)
 
@@ -25,6 +30,13 @@ export const streamCustomPromptUrl = (id) => `/api/custom-prompt/${id}/stream`
 
 export const cancelRun = (id) =>
   fetch(`/api/runs/${id}`, { method: 'DELETE' }).then(handle)
+
+/** Stop after the in-flight case finishes. Resolves on acceptance, not on pause. */
+export const pauseRun = (id) =>
+  fetch(`/api/runs/${id}/pause`, { method: 'POST' }).then(handle)
+
+export const resumeRun = (id) =>
+  fetch(`/api/runs/${id}/resume`, { method: 'POST' }).then(handle)
 
 export const listRuns = () => fetch('/api/runs').then(handle)
 export const getRun = (dir) => fetch(`/api/runs/${dir}`).then(handle)

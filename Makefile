@@ -1,5 +1,6 @@
 .PHONY: install test-suite baseline test report dashboard dashboard-dev clean \
         tool-surface check-drift case-prompts staging-check register-server \
+        clean-journals \
         sweep matrix route
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
@@ -19,13 +20,20 @@ test-suite:
 tool-surface:
 	uv run python scripts/snapshot_tool_surface.py
 
-# Fail if the MCP wiring or the vendored system prompt have drifted from condor.
-# Run this after every condor pull.
+# Fail if the MCP wiring, the vendored system prompt, or condor's agent roster
+# have drifted from condor. Run this after every condor pull.
+#
+# The roster check is here because it is condor drift, not a routing bug: three
+# agents (xrpl_market_maker, smart_money_flow, meteora_launch_lp) shipped
+# upstream unnoticed because nothing failed when bench had no domain for them.
 check-drift:
 	uv run python -m pytest tests/test_mcp_wiring_drift.py \
-	              tests/test_vendored_drift.py -q
+	              tests/test_vendored_drift.py \
+	              tests/test_matrix_routing.py::test_config_keys_name_agents_condor_actually_ships \
+	              tests/test_matrix_routing.py::test_every_shipped_agent_has_a_routing_domain -q
 
-# Regenerate the dashboard's case_id → question map after editing a dataset.
+# Regenerate the dashboard's case_id → question and case_id → layer maps after
+# editing a dataset. tests/test_dashboard_case_maps.py fails until you do.
 case-prompts:
 	uv run python scripts/sync_case_prompts.py
 
@@ -39,6 +47,13 @@ staging-check:
 # Register BENCH_SERVER_NAME in condor's config.yml from bench's env vars.
 register-server:
 	uv run python scripts/register_bench_server.py
+
+# Clear the journals of bench's own probe agents (bench_* slugs only).
+# There is no MCP journal delete, so per-case teardown cannot reverse a journal
+# write — entries accumulate across sweeps until journal_read responses crowd the
+# judge's context. Dry-run by default; APPLY=1 to delete.
+clean-journals:
+	uv run python scripts/clean_probe_journals.py $(if $(APPLY),--apply,)
 
 # ── Workflow ───────────────────────────────────────────────────────────────────
 

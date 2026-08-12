@@ -32,25 +32,42 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from config import DESTRUCTIVE_FLOOR, DOMAIN_PASS_RATE, RESULTS_DIR
-from bench.dataset import is_routing_domain
+from config import (
+    DESTRUCTIVE_FLOOR,
+    DOMAIN_PASS_RATE,
+    MIN_TOOL_CASES,
+    RESULTS_DIR,
+    TOOL_PASS_RATE,
+)
+from bench.dataset import expert_agents, is_routing_domain, routing_domain_for
 from bench.matrix import UNCLASSIFIED, ModelEntry, build_matrix, load_models
 
 # Domains whose recommendation maps onto a concrete condor config key. Domains
-# absent from this map still get a recommendation; they just don't produce a
-# config line, because bench doesn't know where they'd be applied.
-# Keys track condor's shipped agent roster. It changes: `routine_builder` and
-# `agent_builder` were agents once and are now a shared skill and a condor skill
-# respectively, so pointing a recommendation at them would write a config key
-# nothing reads.
-CONDOR_CONFIG_KEYS = {
-    "general_consult": "agents/condor/agent_key",
-    "market_making_expert": "agents/market_making_expert/agent_key",
-    "directional_trader": "agents/directional_trader/agent_key",
-    "solana_dex_lp_expert": "agents/solana_dex_lp_expert/agent_key",
-    "delta_neutral_funding_agent": "agents/delta_neutral_funding_agent/agent_key",
-    "tick_execution": "agents/_defaults/agent_key",
-}
+# absent from this map still get a recommendation; they just don't produce a config
+# line, because bench doesn't know where they'd be applied.
+#
+# Derived from datasets/agent_roles.json rather than hand-maintained, so the roster
+# and the config keys cannot disagree — the previous literal dict is how three agents
+# shipped upstream with no routing domain, and how a fourth kept a key after being
+# reclassified as a strategy. Strategies are absent by construction: they inherit
+# their base's model assignment.
+#
+# tick_execution is the one entry with no agent behind it: condor's agents/_defaults
+# is a fallback model setting for agent ticks, not an agent with an AGENT.md.
+_TICK_CONFIG_KEY = "agents/_defaults/agent_key"
+
+
+def condor_config_keys() -> dict[str, str]:
+    """domain -> condor config path, for every expert plus tick_execution."""
+    keys = {
+        routing_domain_for(slug): f"agents/{slug}/agent_key"
+        for slug in sorted(expert_agents())
+    }
+    keys["tick_execution"] = _TICK_CONFIG_KEY
+    return keys
+
+
+CONDOR_CONFIG_KEYS = condor_config_keys()
 
 
 @dataclass
@@ -162,6 +179,8 @@ def recommend(
     *,
     min_pass_rate: float = DOMAIN_PASS_RATE,
     min_cases: int = 3,
+    min_tool_pass_rate: float = TOOL_PASS_RATE,
+    min_tool_cases: int = MIN_TOOL_CASES,
     prefer_lower_tokens: bool = False,
     models_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -275,6 +294,11 @@ def recommend(
             "min_cases": min_cases,
             "destructive_floor": DESTRUCTIVE_FLOOR,
             "pass_threshold": matrix.get("pass_threshold"),
+            # The tool axis is judged on its own, looser bar. Carried here so a
+            # reader of routing.json can never mistake a 67% tool row for a
+            # domain row that scraped past 80%.
+            "min_tool_pass_rate": min_tool_pass_rate,
+            "min_tool_cases": min_tool_cases,
         },
         "routing_options": {"prefer_lower_tokens": prefer_lower_tokens},
         "recommendations": recommendations,
@@ -290,7 +314,9 @@ def recommend(
         ),
         "condor_config_snippet": config_snippet,
         "config_conflicts": config_conflicts,
-        "tool_gaps": _tool_gaps(matrix, registry, min_pass_rate),
+        "tool_gaps": _tool_gaps(
+            matrix, registry, min_tool_pass_rate, min_tool_cases
+        ),
     }
 
 
@@ -353,25 +379,36 @@ def _config_snippet(
 def _tool_gaps(
     matrix: dict[str, Any],
     registry: dict[str, ModelEntry],
-    min_pass_rate: float,
+    min_tool_pass_rate: float = TOOL_PASS_RATE,
+    min_tool_cases: int = MIN_TOOL_CASES,
 ) -> dict[str, Any]:
-    """Per-tool smallest passing model, and the tools nothing handles.
+    """Per-tool smallest passing model, the tools nothing handles, and thin rows.
 
     Finer grained than the domain view and useful for a different decision: a
     domain can pass overall while one tool inside it fails for every local model,
     which is the signal to keep that specific capability on a cloud model.
+
+    **This axis uses its own bar, not the domain one.** ``min_tool_pass_rate``
+    (0.65) asks "can the model drive this tool at all", where the domain bar (0.80)
+    asks "can it own this job". Reusing 0.80 here made every affordable sample size
+    require a perfect score, so one unlucky case marked a tool unhandled — see the
+    note on ``TOOL_PASS_RATE``.
+
+    A model under ``min_tool_cases`` lands in ``thin`` rather than in
+    ``smallest_passing`` or ``unhandled``. Reporting one case as a verdict is what
+    let a single flake decide a tool's fate.
     """
     smallest: dict[str, Any] = {}
     unhandled: list[str] = []
+    thin: dict[str, Any] = {}
     for tool, cells in (matrix.get("tools") or {}).items():
         candidates = _candidates(cells, registry)
-        # Per-tool evidence is thin by construction (often one case), so the
-        # min_cases guard does not apply here — the pass rate is the whole signal.
+        evidenced = [c for c in candidates if c.scored >= min_tool_cases]
         passing = [
             c
-            for c in candidates
+            for c in evidenced
             if c.pass_rate is not None
-            and c.pass_rate >= min_pass_rate
+            and c.pass_rate >= min_tool_pass_rate
             and not c.destructive_failures
         ]
         if passing:
@@ -382,15 +419,33 @@ def _tool_gaps(
                 "pass_rate": winner.pass_rate,
                 "scored": winner.scored,
             }
-        elif candidates:
+        elif evidenced:
             unhandled.append(tool)
-    return {"smallest_passing": smallest, "unhandled": sorted(unhandled)}
+        elif candidates:
+            # Measured, but not enough per model to call it either way.
+            best = max(candidates, key=lambda c: c.scored)
+            thin[tool] = {
+                "best_scored": best.scored,
+                "needs": min_tool_cases,
+                "models_measured": len(candidates),
+            }
+    return {
+        "smallest_passing": smallest,
+        "unhandled": sorted(unhandled),
+        "thin": thin,
+        "criteria": {
+            "min_tool_pass_rate": min_tool_pass_rate,
+            "min_tool_cases": min_tool_cases,
+        },
+    }
 
 
 def generate(
     *,
     min_pass_rate: float = DOMAIN_PASS_RATE,
     min_cases: int = 3,
+    min_tool_pass_rate: float = TOOL_PASS_RATE,
+    min_tool_cases: int = MIN_TOOL_CASES,
     prefer_lower_tokens: bool = False,
     results_dir: Path | None = None,
     models_path: Path | None = None,
@@ -401,6 +456,8 @@ def generate(
         matrix,
         min_pass_rate=min_pass_rate,
         min_cases=min_cases,
+        min_tool_pass_rate=min_tool_pass_rate,
+        min_tool_cases=min_tool_cases,
         prefer_lower_tokens=prefer_lower_tokens,
         models_path=models_path,
     )

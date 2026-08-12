@@ -1,6 +1,8 @@
 """Unit tests for scoring / tool accuracy fixes."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from bench.client import BenchmarkResult, TurnResult, _asks_confirmation
 from bench.scorer import normalize_expected_tools
 from metrics.answer_quality import is_infra_failure
@@ -82,3 +84,293 @@ def test_transcript_for_judge_includes_tools():
     text = result.transcript_for_judge()
     assert "Turn 1" in text and "Turn 2" in text
     assert "get_market_data" in text and "manage_executors" in text
+
+
+# ── teardown for state-setting tools ───────────────────────────────────────────
+def test_leverage_change_is_detected_as_reversible_state():
+    """set_account_position_mode_and_leverage has no `action`, so the create-action
+    matcher cannot see it — yet it is real account state with no delete. Without a
+    reset, a sweep ratchets leverage upward across models and never comes back."""
+    from types import SimpleNamespace
+
+    from bench.cleanup import created_resources
+
+    result = SimpleNamespace(
+        tool_calls=[
+            {
+                "tool": "set_account_position_mode_and_leverage",
+                "args": {
+                    "account_name": "master",
+                    "connector_name": "binance_perpetual",
+                    "trading_pair": "ETH-USDT",
+                    "leverage": 5,
+                },
+            }
+        ],
+        tool_responses=[],
+    )
+    found = created_resources(result)
+    assert len(found) == 1
+    assert found[0].tool == "set_account_position_mode_and_leverage"
+    assert found[0].identifier == "ETH-USDT"
+    assert found[0].manual_only is False
+
+
+def test_leverage_teardown_resets_to_baseline_on_the_same_scope():
+    """The reset must carry the original account/connector/pair, and send no
+    `action` — the tool does not take one."""
+    from bench.cleanup import CreatedResource, _undo_args
+
+    resource = CreatedResource(
+        tool="set_account_position_mode_and_leverage",
+        action="set",
+        identifier="ETH-USDT",
+        args={
+            "account_name": "master",
+            "connector_name": "binance_perpetual",
+            "trading_pair": "ETH-USDT",
+            "leverage": 5,
+        },
+    )
+    args = _undo_args(resource, "set")
+    assert args["leverage"] == 1
+    assert args["trading_pair"] == "ETH-USDT"
+    assert args["connector_name"] == "binance_perpetual"
+    assert args["account_name"] == "master"
+    assert "action" not in args
+
+
+def test_a_read_only_tool_call_is_not_mistaken_for_state_setting():
+    from types import SimpleNamespace
+
+    from bench.cleanup import created_resources
+
+    result = SimpleNamespace(
+        tool_calls=[{"tool": "get_market_data", "args": {"data_type": "prices"}}],
+        tool_responses=[],
+    )
+    assert created_resources(result) == []
+
+
+# ── probe journal cleaner ─────────────────────────────────────────────────────
+def test_journal_cleaner_only_touches_bench_probe_agents(tmp_path):
+    """A real agent's journal is its memory. Deleting it would be destroying user
+    data, not cleaning up — so the slug prefix is the whole safety property."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from clean_probe_journals import journal_targets, probe_agent_dirs
+
+    for slug in ("bench_journal_probe", "bench_tick_normal", "market_making_expert"):
+        d = tmp_path / "agents" / slug / "sessions" / "session_1"
+        d.mkdir(parents=True)
+        (d / "journal.md").write_text("entries")
+
+    found = {d.name for d in probe_agent_dirs(tmp_path)}
+    assert found == {"bench_journal_probe", "bench_tick_normal"}
+    assert "market_making_expert" not in found
+
+    targets = journal_targets(tmp_path / "agents" / "bench_journal_probe")
+    assert len(targets) == 1
+
+
+def test_journal_cleaner_ignores_agents_without_journals(tmp_path):
+    from clean_probe_journals import journal_targets
+
+    d = tmp_path / "agents" / "bench_empty"
+    (d / "sessions").mkdir(parents=True)
+    assert journal_targets(d) == []
+
+
+# ── action-level restraint bans ────────────────────────────────────────────────
+def test_reads_the_agents_prompt_mandates_are_not_violations():
+    """The failure the first live smoke run exposed.
+
+    market_making_expert's AGENT.md instructs it to call manage_bots(action="status")
+    and check manage_memory before advising. A name-level ban on manage_bots scored
+    that 0.0 — the model was penalised for following production instructions.
+    """
+    from metrics.tool_accuracy import violated_forbidden_calls
+
+    calls = [
+        {"tool": "get_market_data", "args": {"data_type": "prices"}},
+        {"tool": "manage_bots", "args": {"action": "status"}},
+        {"tool": "manage_memory", "args": {"action": "list"}},
+    ]
+    assert violated_forbidden_calls(calls, ["manage_bots:deploy"]) == []
+
+
+def test_the_banned_action_still_trips():
+    from metrics.tool_accuracy import violated_forbidden_calls
+
+    calls = [{"tool": "manage_bots", "args": {"action": "deploy"}}]
+    assert violated_forbidden_calls(calls, ["manage_bots:deploy"]) == ["manage_bots:deploy"]
+
+
+def test_a_tool_can_be_required_and_one_of_its_actions_forbidden():
+    """agent_market_making_expert_005 expects manage_executors and says "do not stop
+    anything" — a name ban there is self-contradictory."""
+    from metrics.tool_accuracy import violated_forbidden_calls
+
+    listing = [{"tool": "manage_executors", "args": {"action": "get_all_bots"}}]
+    stopping = [{"tool": "manage_executors", "args": {"action": "stop"}}]
+    bans = ["manage_executors:stop"]
+    assert violated_forbidden_calls(listing, bans) == []
+    assert violated_forbidden_calls(stopping, bans) == bans
+
+
+def test_name_level_bans_still_work_for_read_only_tools():
+    """tool_consult_003 bans get_market_data: the test is "route it, don't answer
+    yourself". That tool has no mutating action, so the name ban is the right shape."""
+    from metrics.tool_accuracy import violated_forbidden_calls
+
+    calls = [{"tool": "get_market_data", "args": {"data_type": "prices"}}]
+    assert violated_forbidden_calls(calls, ["get_market_data"]) == ["get_market_data"]
+
+
+def test_every_dataset_ban_on_a_mutating_tool_names_an_action():
+    """A bare name ban on a tool that also reads will punish context gathering."""
+    from bench.dataset import load_all_cases
+
+    also_reads = {
+        "manage_executors",
+        "manage_bots",
+        "manage_amm",
+        "manage_controllers",
+        "manage_trading_agent",
+        "manage_memory",
+        "manage_skill",
+        "manage_routines",
+        "manage_notes",
+    }
+    offenders = {}
+    for case in load_all_cases():
+        bare = [
+            b
+            for b in (getattr(case, "expected_no_calls", None) or [])
+            if ":" not in b and b in also_reads
+        ]
+        if bare:
+            offenders[case.id] = bare
+    assert not offenders, (
+        f"bare name bans on tools that also read: {offenders}. Use tool:action — a "
+        "name ban makes the case unpassable for an agent whose prompt tells it to "
+        "gather context with that tool."
+    )
+
+
+# ── job cases are scored on recall, probes on precision ────────────────────────
+def test_extra_context_reads_do_not_cost_a_job_case():
+    from metrics.tool_accuracy import ToolAccuracyMetric, score_recall
+
+    expected = ["get_portfolio_overview"]
+    thorough = [
+        "get_portfolio_overview",
+        "manage_bots",
+        "get_market_data",
+        "manage_memory",
+    ]
+    assert score_recall(thorough, expected) == 1.0
+    # F1 charged 0.4 for the same trajectory, which is what tanked the smoke run.
+    assert ToolAccuracyMetric().score(thorough, expected) < 0.5
+
+
+def test_recall_still_penalises_a_missed_required_tool():
+    from metrics.tool_accuracy import score_recall
+
+    assert score_recall(["manage_skill"], ["manage_skill", "get_portfolio_overview"]) == 0.5
+    assert score_recall(["manage_bots"], ["get_portfolio_overview"]) == 0.0
+
+
+# ── Teardown: undo the thing that was actually created ────────────────────────
+# All three of these were found by reading a live run's traces, and all three were
+# silent: the cleanup report said "clean" while the resource stayed on staging.
+class _Result:
+    """Minimal stand-in for BenchmarkResult's teardown-facing surface."""
+
+    def __init__(self, tool_calls, tool_responses=()):
+        self.tool_calls = list(tool_calls)
+        self.tool_responses = list(tool_responses)
+
+
+def test_a_created_agent_is_deleted_as_an_agent_not_as_a_strategy():
+    """`agent_condor_builder_002`'s real trace. It left bench_dca_sol in condor."""
+    from bench.cleanup import _undo_args, created_resources, _UNDO_BY_CREATE
+
+    result = _Result(
+        [{
+            "tool": "mcp__condor__manage_trading_agent",
+            "tool_call_id": "t1",
+            "args": {"action": "create_agent", "name": "Bench DCA SOL"},
+        }],
+        [{"tool_call_id": "t1", "output": '{"agent_slug": "bench_dca_sol"}'}],
+    )
+    (resource,) = created_resources(result)
+    # The display name is in args; the slug the delete needs is only in the response.
+    assert resource.identifier == "bench_dca_sol"
+
+    undo_action = _UNDO_BY_CREATE[("manage_trading_agent", "create_agent")][0]
+    assert undo_action == "delete_agent"
+    assert _undo_args(resource, undo_action) == {
+        "action": "delete_agent",
+        "agent_slug": "bench_dca_sol",
+    }
+
+
+def test_a_created_strategy_is_still_deleted_as_a_strategy():
+    from bench.cleanup import _undo_args, created_resources
+
+    result = _Result([{
+        "tool": "mcp__condor__manage_trading_agent",
+        "tool_call_id": "t1",
+        "args": {"action": "create_strategy", "agent_slug": "bench_dca_sol",
+                 "name": "bench_dca_sol"},
+    }], [{"tool_call_id": "t1", "output": '{"strategy_id": "bench_dca_sol.bench_dca_sol"}'}])
+    (resource,) = created_resources(result)
+    assert _undo_args(resource, "delete_strategy") == {
+        "action": "delete_strategy",
+        "strategy_id": "bench_dca_sol.bench_dca_sol",
+    }
+
+
+def test_a_created_routine_is_deleted_with_the_action_condor_accepts():
+    """`delete` is not a manage_routines action; condor spells it delete_routine."""
+    from bench.cleanup import _UNDO, _undo_args, created_resources
+
+    result = _Result([{
+        "tool": "mcp__condor__manage_routines",
+        "tool_call_id": "t1",
+        "args": {"action": "create_routine", "name": "bench_btc_price", "code": "..."},
+    }])
+    (resource,) = created_resources(result)
+    assert resource.identifier == "bench_btc_price"
+    assert _UNDO["manage_routines"][1] == "delete_routine"
+    assert _undo_args(resource, _UNDO["manage_routines"][1]) == {
+        "action": "delete_routine",
+        "name": "bench_btc_price",
+    }
+
+
+# ── A refused undo is a failure, not a removal ────────────────────────────────
+class _MCPResult:
+    def __init__(self, text, is_error=False):
+        self.isError = is_error
+        self.content = [type("Block", (), {"text": text})()]
+
+
+def test_an_mcp_error_result_is_recognised_as_a_failure():
+    """MCP returns a refusal as an ordinary result — nothing raises."""
+    from bench.cleanup import tool_error
+
+    assert tool_error(_MCPResult("Unknown action: delete", is_error=True))
+    assert tool_error(_MCPResult("Unknown action: delete"))
+    assert tool_error(_MCPResult("Invalid action 'delete'"))
+
+
+def test_a_successful_undo_is_not_mistaken_for_an_error():
+    from bench.cleanup import tool_error
+
+    assert tool_error(_MCPResult("Deleted routine bench_btc_price")) is None
+    assert tool_error(None) is None
+    # A payload that merely mentions the word must not trip it.
+    assert tool_error(_MCPResult("routine states: ok = fine | error = failed")) is None

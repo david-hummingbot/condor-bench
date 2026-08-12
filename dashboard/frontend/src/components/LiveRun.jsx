@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react'
-import { cancelRun, streamUrl } from '../api.js'
+import { Fragment, useState, useEffect, useRef } from 'react'
+import { cancelRun, pauseRun, resumeRun, streamUrl } from '../api.js'
 import { scoreColor, fmtScore, fmtLatency, PASS_THRESHOLD } from '../utils.js'
 import casePrompts from '../casePrompts.json'
 import PageHeader from './PageHeader.jsx'
@@ -18,6 +18,9 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
   const [cases, setCases] = useState([]) // live result rows
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState(null)
+  // Requested-but-not-yet-settled: the button flips immediately, while the run
+  // finishes the case in flight. `status` becomes 'paused' when it actually stops.
+  const [pausePending, setPausePending] = useState(false)
   const esRef = useRef(null)
 
   const [memberInfo, setMemberInfo] = useState(null)
@@ -101,6 +104,12 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
         }
       } else if (t === 'model_done') {
         setCurrentModel(null)
+      } else if (t === 'run_paused') {
+        setStatus('paused')
+        setPausePending(false)
+      } else if (t === 'run_resumed') {
+        setStatus('running')
+        setPausePending(false)
       } else if (t === 'run_done') {
         setStatus(evt.status || 'completed')
         setCurrentCase(null)
@@ -127,6 +136,20 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
   const handleCancel = async () => {
     if (!runId) return
     try { await cancelRun(runId) } catch {}
+  }
+
+  const handlePauseToggle = async () => {
+    if (!runId) return
+    const resuming = status === 'paused'
+    // Optimistic only for pause — resume is confirmed by the run_resumed event,
+    // and showing 'running' before the loop wakes would misreport the state.
+    if (!resuming) setPausePending(true)
+    try {
+      await (resuming ? resumeRun(runId) : pauseRun(runId))
+    } catch (e) {
+      setPausePending(false)
+      setError(e.message || 'Could not change pause state')
+    }
   }
 
   if (!runId) {
@@ -157,8 +180,24 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
         title="Live run"
         description="Case-by-case progress, streamed as the run executes. Results are saved even if you navigate away."
       >
-        <span className={`status-badge ${status}`}>{status}</span>
-        {(status === 'running' || status === 'connecting') && (
+        <span className={`status-badge ${status}`}>
+          {pausePending ? 'pausing…' : status}
+        </span>
+        {(status === 'running' || status === 'paused') && (
+          <button
+            className="btn sm"
+            onClick={handlePauseToggle}
+            disabled={pausePending}
+            title={
+              status === 'paused'
+                ? 'Continue with the next case'
+                : 'Finish the case in flight, then stop before the next one'
+            }
+          >
+            {status === 'paused' ? '▶ Resume' : pausePending ? '⏸ Pausing…' : '⏸ Pause'}
+          </button>
+        )}
+        {(status === 'running' || status === 'connecting' || status === 'paused') && (
           <button className="btn sm danger" onClick={handleCancel}>Cancel</button>
         )}
         {(status === 'completed' || status === 'cancelled' || status === 'failed') && (
@@ -184,9 +223,11 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
         </div>
         <div className="progress-label">
           <span>
-            {currentCase
-              ? <>{currentCase.type === 'tick' ? '🔁' : '💬'} {currentCase.id}</>
-              : status === 'completed' ? 'All done' : ''}
+            {status === 'paused'
+              ? 'Paused — no case running'
+              : currentCase
+                ? <>{currentCase.type === 'tick' ? '🔁' : '💬'} {currentCase.id}</>
+                : status === 'completed' ? 'All done' : ''}
           </span>
           <span>{completed} / {total || '?'}</span>
         </div>
@@ -207,21 +248,37 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
                 <th style={{ textAlign: 'right' }}>Composite</th>
                 <th style={{ textAlign: 'right' }}>Quality</th>
                 <th style={{ textAlign: 'right' }}>Tools</th>
+                <th style={{ textAlign: 'right' }} title="Pinned parameters. Blank when the case pinned none.">Params</th>
+                <th style={{ textAlign: 'right' }} title="Live validity, including any post-condition probe.">Valid</th>
                 <th style={{ textAlign: 'right' }}>Latency</th>
                 <th style={{ textAlign: 'right' }}>Pass</th>
               </tr>
             </thead>
             <tbody>
               {cases.map((c, i) => (
-                <>
+                <Fragment key={c.case_id + i}>
                   <tr
-                    key={c.case_id + i}
                     className="expand-row"
                     onClick={() => setExpanded(expanded === i ? null : i)}
                   >
                     <td>
                       <span style={{ marginRight: 6 }}>{expanded === i ? '▾' : '▸'}</span>
                       {c.case_id}
+                      {c.harness_artifact && (
+                        <span className="router-flag" title={`Excluded from the routing matrix: ${c.harness_artifact}`}>
+                          harness
+                        </span>
+                      )}
+                      {c.post_condition_failed && (
+                        <span className="router-flag" title={`Composite capped — ${c.post_condition_failed}`}>
+                          not built
+                        </span>
+                      )}
+                      {c.forbidden_violations?.length > 0 && (
+                        <span className="router-flag" title={`Tool score zeroed — called a banned action: ${c.forbidden_violations.join(', ')}`}>
+                          banned call
+                        </span>
+                      )}
                     </td>
                     <td style={{ color: 'var(--muted)', fontSize: 12 }}>
                       {c.model ? c.model.split(':').slice(1).join(':') || c.model : '—'}
@@ -235,6 +292,12 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
                     <td style={{ textAlign: 'right', color: scoreColor(c.tool_accuracy) }}>
                       {fmtScore(c.tool_accuracy)}
                     </td>
+                    <td style={{ textAlign: 'right', color: scoreColor(c.tool_params) }}>
+                      {fmtScore(c.tool_params)}
+                    </td>
+                    <td style={{ textAlign: 'right', color: scoreColor(c.live_validity) }}>
+                      {fmtScore(c.live_validity)}
+                    </td>
                     <td style={{ textAlign: 'right', color: 'var(--muted)' }}>
                       {fmtLatency(c.latency_s)}
                     </td>
@@ -247,8 +310,8 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
                     </td>
                   </tr>
                   {expanded === i && (
-                    <tr key={`exp-${i}`}>
-                      <td colSpan={7} style={{ padding: '0 12px 12px' }}>
+                    <tr>
+                      <td colSpan={9} style={{ padding: '0 12px 12px' }}>
                         <div className="case-detail">
                           {c.error && (
                             <div className="error-text" style={{ marginBottom: 8 }}>{c.error}</div>
@@ -278,6 +341,8 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
                               ['Composite', c.composite],
                               ['Quality', c.answer_quality],
                               ['Tools', c.tool_accuracy],
+                              ['Params', c.tool_params],
+                              ['Live validity', c.live_validity],
                               ['Latency score', c.latency_score],
                             ].map(([label, val]) => (
                               <span key={label} className="score-chip">
@@ -296,7 +361,7 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               ))}
             </tbody>
           </table>
