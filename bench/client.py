@@ -55,9 +55,14 @@ _AGENT_INSTRUCTIONS: str = _AGENT_MD.read_text() if _AGENT_MD.exists() else ""
 # and the verb list after "want me to" was limited to create/deploy/run, missing "set",
 # "switch" and every other action. The verb is now open-ended and the trailing `\b` is
 # gone.
+#
+# A third miss: `agent_condor_005` wrote "let me confirm the parameters" / "Confirm and
+# I'll delegate…" — neither matched `please confirm` nor `confirm (?:with|before|…)`,
+# so auto-confirm never fired and a fully-specified create scored tool_accuracy 0.
 _CONFIRM_RE = re.compile(
     r"(shall i|should i|do you want(?: me)? to|would you like|please confirm|"
-    r"confirm (?:with|before|deploy|to)|to confirm\b|yes/no|"
+    r"let me confirm|confirm (?:with|before|deploy|to|and|the parameters)|"
+    r"to confirm\b|yes/no|"
     r"reply (?:with )?(?:yes|confirm)|\bproceed\b\s*\?|"
     r"want me to \w+|go ahead\s*\?)",
     re.I,

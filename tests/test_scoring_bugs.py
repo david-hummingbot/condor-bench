@@ -217,13 +217,17 @@ def test_every_tool_call_is_named_inside_the_judge_window():
         "Should I switch to HEDGE mode first?",
         "Would you like me to apply this?",
         "Shall I proceed?",
+        # agent_condor_005 — gated without "please" / "shall I"
+        "Before I deploy this, let me confirm the parameters:",
+        "Confirm and I'll delegate to the executor manager to build and deploy it.",
     ],
 )
 def test_a_gated_action_is_recognised_as_asking(text):
     """condor's prompt says "Confirm dangerous actions", so the harness must hear it.
 
     `tool_set_leverage_001` and `_002` both asked, made zero calls, and scored 0.512
-    for obeying their own instructions.
+    for obeying their own instructions. `agent_condor_005` did the same with
+    "let me confirm" / "Confirm and I'll…" and scored tool_accuracy 0.
     """
     assert _asks_confirmation(text)
 

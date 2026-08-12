@@ -162,6 +162,104 @@ async def test_ensure_warms_until_rules_and_price(stub, monkeypatch):
     assert "/market-data/prices" in paths
 
 
+def _staging(monkeypatch):
+    monkeypatch.setattr(
+        market_warmup,
+        "staging_config",
+        lambda: {
+            "api_url": "http://staging:8000",
+            "username": "u",
+            "password": "p",
+        },
+    )
+
+
+def _pinned_case():
+    return SimpleNamespace(
+        expected_tool_params={
+            "manage_executors": {
+                "connector_name": "binance",
+                "trading_pair": "BTC-USDT",
+            }
+        },
+        config={},
+    )
+
+
+async def test_a_slow_add_is_polled_not_failed(stub, monkeypatch):
+    """The add blocks server-side on a cold book and outlives our request.
+
+    hummingbot-api waits ~30s for the order book before answering, so a client
+    that gives up on the add and calls that a warmup failure skips the case even
+    though the book comes up moments later. Six of the ten tick cases were
+    skipped this way on the first run with warmup enabled. The add is a trigger;
+    trading rules are the gate.
+    """
+    _staging(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/market-data/trading-pair/add":
+            raise httpx.ReadTimeout("", request=request)
+        if request.url.path == "/connectors/binance/trading-rules":
+            return _json({"BTC-USDT": {"min_order_size": 1e-5}})
+        if request.url.path == "/market-data/prices":
+            return _json({"prices": {"BTC-USDT": 63482.05}})
+        return _json({"detail": "not found"}, 404)
+
+    stub(handler)
+    report = await ensure_markets_for_case(
+        _pinned_case(), timeout_s=5.0, poll_s=0.01, request_timeout_s=1.0
+    )
+    assert report.ok, report.detail
+    assert report.warmed == [MarketRef("binance", "BTC-USDT")]
+    assert any("add did not answer" in n for n in report.notes)
+
+
+async def test_a_missing_mid_price_does_not_skip_the_case(stub, monkeypatch):
+    """Rules are the create gate; the mid is the best-effort part it claims to be.
+
+    Failing on a mid that never arrives throws away the whole case for a signal
+    the model is expected to notice itself.
+    """
+    _staging(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/market-data/trading-pair/add":
+            return _json({"success": True})
+        if request.url.path == "/connectors/binance/trading-rules":
+            return _json({"BTC-USDT": {"min_order_size": 1e-5}})
+        if request.url.path == "/market-data/prices":
+            return _json({"prices": {}})
+        return _json({"detail": "not found"}, 404)
+
+    stub(handler)
+    monkeypatch.setattr(market_warmup, "PRICE_GRACE_S", 0.05)
+    report = await ensure_markets_for_case(
+        _pinned_case(), timeout_s=30.0, poll_s=0.01, request_timeout_s=1.0
+    )
+    assert report.ok, report.detail
+    assert any("no mid price" in n for n in report.notes)
+    # Bounded by the grace window, not by the whole warmup budget.
+    assert report.warmed == [MarketRef("binance", "BTC-USDT")]
+
+
+async def test_rules_that_never_list_the_pair_still_fail(stub, monkeypatch):
+    """The failure the warmup exists for must survive the leniency above."""
+    _staging(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/market-data/trading-pair/add":
+            return _json({"success": True})
+        return _json({})
+
+    stub(handler)
+    report = await ensure_markets_for_case(
+        _pinned_case(), timeout_s=0.2, poll_s=0.01, request_timeout_s=1.0
+    )
+    assert not report.ok
+    assert "trading rules do not yet list the pair" in report.detail
+
+
 async def test_ensure_failure_is_harness_artifact(stub, monkeypatch):
     monkeypatch.setattr(
         market_warmup,

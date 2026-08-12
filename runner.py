@@ -177,6 +177,7 @@ async def _run_cases(cases, model: str, store):
     from bench.client import run_case
     from bench.dataset import is_mutating
     from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
+    from bench.probe_journal import ensure_probe_journal
     from bench.scorer import score_case
     from bench.scorer import timeout_card
     from config import PASS_THRESHOLD, case_timeout_s
@@ -185,6 +186,7 @@ async def _run_cases(cases, model: str, store):
     for case in cases:
         console.print(f"  [dim]{case.id}[/dim] ({case.type})", end=" ")
         try:
+            journal_note = ensure_probe_journal(case)
             warmup = await ensure_markets_for_case(case)
             if not warmup.ok:
                 card = warmup_failure_card(case, model, warmup)
@@ -192,6 +194,8 @@ async def _run_cases(cases, model: str, store):
                 console.print(f"→ [yellow]harness skip[/yellow]")
                 console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
                 continue
+            for note in ([journal_note] if journal_note else []) + warmup.notes:
+                console.print(f"      [dim]{note}[/dim]")
 
             # Baseline first: the ceiling is sized from it, so a slow case gets room
             # proportional to how slow it has always been.
@@ -608,7 +612,9 @@ def dashboard() -> None:
 def _print_summary(scorecards, model: str, pass_threshold: float) -> None:
     if not scorecards:
         return
-    valid = [sc for sc in scorecards if sc.error is None]
+    # Same "scored" set the saved summary uses: a harness artifact is a case that
+    # did not measure the model, so averaging its 0.0 in would report the harness.
+    valid = [sc for sc in scorecards if sc.error is None and not sc.harness_artifact]
     n = len(valid) or 1
     console.print(f"\n[bold]{model}[/bold] — {len(valid)}/{len(scorecards)} cases scored")
     console.print(f"  Composite:      {sum(s.composite for s in valid)/n:.3f}")
@@ -643,7 +649,7 @@ def _print_summary(scorecards, model: str, pass_threshold: float) -> None:
     if artifacts:
         console.print(
             f"  [yellow]Harness artifacts: {len(artifacts)} case(s) excluded from "
-            "routing[/yellow]"
+            "the averages above and from routing[/yellow]"
         )
 
 

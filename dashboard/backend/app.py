@@ -214,6 +214,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.dataset import case_prompt_map, filter_cases, is_mutating, load_all_cases
     from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.mcp_provider import target_banner
+    from bench.probe_journal import ensure_probe_journal
     from bench.reporter import save_run
     from bench.scorer import score_case, timeout_card
     from config import build_run_pin, case_timeout_s
@@ -334,6 +335,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     sc_dict: dict = {}
                     response = ""
                     try:
+                        ensure_probe_journal(case)
                         warmup = await ensure_markets_for_case(case)
                         if not warmup.ok:
                             sc = warmup_failure_card(case, norm_key, warmup)

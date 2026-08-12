@@ -140,6 +140,26 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
     if repo is None:
         return report
 
+    # 1a'. Temporary skill patches on the checkout the model will read.
+    #
+    # Condor's routine_cookbook still documents get_prices as a flat pair→price
+    # map; the API nests under prices{}. agent_condor_routine_001 followed the
+    # cookbook, saw None for a live BTC-USDT price, and guessed
+    # binance_paper_trade. Until Condor fixes hummingbot_client.md, rewrite the
+    # known-bad snippet here so the case measures the model, not the doc bug.
+    # Non-blocking: a missing/unknown file must not abort the whole run.
+    from bench.skill_patches import apply_skill_patches
+
+    for patch in apply_skill_patches(repo):
+        report.checks.append(
+            Check(
+                f"skill_patch:{patch.name}",
+                patch.status in {"applied", "already_correct"},
+                f"{patch.status}: {patch.detail}",
+                blocking=False,
+            )
+        )
+
     # 1a. The checkout bench reads must be the one that is *running*.
     #
     # Two checkouts existed side by side — a feature branch serving the live bot and

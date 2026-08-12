@@ -253,6 +253,13 @@ commit that changes case ground truth.
 | c014 | `get_market_data` | `connector_name=binance_perpetual`, `data_type=funding_rate` | — | read_only | — |
 | agent_condor_005 | `manage_executors` | `action=create`, `trading_pair=RLUSD-XRP`, `connector_name=xrpl` | — | destructive | — |
 | agent_condor_routine_001 | `manage_skill`, `manage_routines` | `action=read`, `action=create_routine`, `name=bench_btc_price` | — | mutating | — |
+
+`agent_condor_routine_001` reads `routine_cookbook` / `hummingbot_client.md` before
+writing. Condor currently documents `get_prices` as a flat pair→price map; the API
+returns `{"prices": {...}}`. Until that Condor fix lands, pre-flight rewrites the
+known-bad snippet via `bench/skill_patches.py` so the case is not poisoned by the
+doc bug (a live Binance price looked like a fetch failure, then a
+`binance_paper_trade` guess).
 | agent_condor_routine_003 | `manage_routines` | `action=list` | — | read_only | — |
 | agent_condor_routine_004 | `manage_routines` | `action=run`, `name=market_scanner` | — | mutating | — |
 | agent_condor_builder_001 | — | — | `manage_trading_agent:create_strategy`, `manage_trading_agent:create_agent`, `manage_executors:create`, `manage_executors:stop` | read_only | — |

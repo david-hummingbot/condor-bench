@@ -89,6 +89,34 @@ def test_summary_counts_capped_post_condition_failures_separately(tmp_path, monk
     assert summary["harness_artifacts"] == 1
 
 
+def test_harness_artifacts_stay_out_of_the_headline_averages(tmp_path, monkeypatch):
+    """Six tick cases skipped by a warmup timeout entered composite_avg as 0.0.
+
+    `_domain_breakdown` had always dropped harness artifacts, so the domain read
+    "1 scored, 9 excluded" while the headline read a 0.76 average over 88 cases
+    including six zeros the model never had a chance to earn. One definition of
+    scored, or the summary contradicts its own breakdown.
+    """
+    import bench.reporter as reporter
+
+    monkeypatch.setattr(reporter, "RESULTS_DIR", tmp_path)
+
+    run_dir = save_run(
+        "m",
+        [
+            _card("ran", 0.90),
+            _card("skipped", 0.0, harness_artifact="market warmup failed — binance/BTC-USDT"),
+        ],
+        {},
+        "smoke03",
+    )
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["cases_total"] == 2
+    assert summary["cases_scored"] == 1
+    assert summary["composite_avg"] == 0.9
+    assert summary["pass_rate"] == 1.0
+
+
 def test_case_records_persist_the_dataset_layer(tmp_path, monkeypatch):
     """The dashboard's Type column reads ``case_type`` and cannot re-derive it.
 

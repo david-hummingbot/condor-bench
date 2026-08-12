@@ -1,6 +1,6 @@
 {
   "case_id": "tool_manage_skill_001",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 14.253,
-  "timestamp": "2026-08-12T06:18:49.206381+00:00"
+  "latency_s": 23.138,
+  "timestamp": "2026-08-12T13:32:05.439050+00:00"
 }

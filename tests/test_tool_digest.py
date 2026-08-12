@@ -323,3 +323,62 @@ def test_dust_rows_cannot_push_the_total_out_of_view():
     assert "32,800.00" in digest, "the total an answer would cite"
     assert "31800.00" in digest, "the holding an answer would cite"
     assert "300 zero/unpriced omitted" in digest, "say what was dropped"
+
+
+# ── Nested list fields on each row must stay citeable ─────────────────────────
+# list_agent_definitions returns strategies: ["BTC-USDT Adaptive Grid", …] per
+# agent. The row renderer kept only scalars, so the judge never saw those names
+# and marked a verbatim Strategies column as fabricated (c011 aq 0.35,
+# tool_manage_trading_agent_001 aq 0.55).
+_AGENT_DEFINITIONS = {
+    "agents": [
+        {
+            "slug": "adaptive_grid_trader",
+            "name": "Adaptive Grid Trader",
+            "description": (
+                "Expert in multi-timeframe adaptive grid trading with safety-first "
+                "order sizing, a configurable untraded reserve, and strategy controls."
+            ),
+            "agent_key": "anthropic:claude-sonnet-4-5",
+            "when_to_consult": "when you want adaptive grid trading on BTC or SOL",
+            "strategies": ["BTC-USDT Adaptive Grid", "SOL-USDT Adaptive Grid"],
+            "tools": ["manage_executors", "get_market_data"],
+        },
+        {
+            "slug": "directional_trader",
+            "name": "Directional Trader",
+            "description": "Signal engineering, controllers, and backtesting.",
+            "agent_key": "anthropic:claude-sonnet-4-5",
+            "when_to_consult": "trend and signal work",
+            "strategies": ["EMA Trend Loop"],
+            "tools": [],
+        },
+    ]
+}
+
+
+def test_agent_definition_strategies_reach_the_judge():
+    """The failure this nested-list rendering exists to prevent."""
+    digest = digest_tool_output("manage_trading_agent", _AGENT_DEFINITIONS)
+    assert "BTC-USDT Adaptive Grid" in digest
+    assert "SOL-USDT Adaptive Grid" in digest
+    assert "EMA Trend Loop" in digest
+    assert "Adaptive Grid Trader" in digest
+    assert "Directional Trader" in digest
+
+
+def test_empty_nested_lists_are_still_shown():
+    """Empty strategies=[] must be visible so invented names stay falsifiable."""
+    payload = {
+        "agents": [
+            {
+                "slug": "condor",
+                "name": "Condor",
+                "description": "General assistant",
+                "strategies": [],
+                "tools": [],
+            }
+        ]
+    }
+    digest = digest_tool_output("manage_trading_agent", payload)
+    assert "strategies=[]" in digest

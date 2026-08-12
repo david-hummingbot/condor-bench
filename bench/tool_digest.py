@@ -413,7 +413,12 @@ def _digest_generic_text(text: str, structured: Any, *, max_chars: int) -> str:
 
 # How many rows of a list-of-records to actually show the judge, and how much of each.
 _LIST_ROWS = 15
-_LIST_ROW_CHARS = 160
+# Wide enough for slug + name + strategies=[…] before a truncated description.
+_LIST_ROW_CHARS = 220
+_LIST_NESTED_ITEMS = 6
+_LIST_NESTED_CHARS = 100
+# Strings longer than this are deferred so short citeables (and nested lists) fit.
+_LIST_LONG_SCALAR_CHARS = 48
 
 
 def _summarize_list_field(label: str, value: Any) -> str:
@@ -425,6 +430,11 @@ def _summarize_list_field(label: str, value: Any) -> str:
     model that correctly named one continuous routine out of 29 was marked down for
     "unverified implementation details": the names it cited had been deleted before the
     judge ever saw them. `agent_condor_routine_003` scored 0.55 that way.
+
+    Nested *list* fields on each row used to be dropped entirely (only scalars were
+    kept). ``list_agent_definitions`` returns ``strategies: ["BTC-USDT Adaptive Grid",
+    …]`` per agent; c011 and ``tool_manage_trading_agent_001`` quoted those names and
+    were scored 0.35 / 0.55 for fabricating a column the digest had erased.
 
     Rows are capped and the remainder is stated, mirroring the pipe-table digester —
     the point is that *some* rows are citeable, not that all of them fit.
@@ -438,20 +448,52 @@ def _summarize_list_field(label: str, value: Any) -> str:
     lines = [f"{label}: {len(value)} items"]
     for item in shown:
         if isinstance(item, dict):
-            # Compact key=value so a row stays one line: the judge needs the values,
-            # not the JSON punctuation.
-            body = " ".join(
-                f"{k}={_scalar(v)}"
-                for k, v in item.items()
-                if isinstance(v, (str, int, float, bool)) or v is None
-            )
-            rendered = body or ", ".join(list(item.keys())[:6])
+            rendered = _format_record_row(item)
         else:
             rendered = str(item)
         lines.append(f"  - {rendered[:_LIST_ROW_CHARS]}")
     if omitted:
         lines.append(f"  … {omitted} additional row(s) omitted")
     return "\n".join(lines)
+
+
+def _format_record_row(item: dict) -> str:
+    """One list-of-dicts row: short scalars and nested scalar lists before long text.
+
+    ``description`` and similar long strings used to consume the whole row budget, so
+    even after nested lists were included they still fell past ``_LIST_ROW_CHARS``.
+    Short identifiers and list fields (name, strategies) are the citeable bits.
+    """
+    short: list[str] = []
+    nested_lists: list[str] = []
+    long: list[str] = []
+    for key, value in item.items():
+        if isinstance(value, list):
+            if value and not all(
+                isinstance(x, (str, int, float, bool)) or x is None for x in value
+            ):
+                continue
+            nested_lists.append(f"{key}={_format_scalar_list(value)}")
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            part = f"{key}={_scalar(value)}"
+            if isinstance(value, str) and len(value) > _LIST_LONG_SCALAR_CHARS:
+                long.append(part)
+            else:
+                short.append(part)
+    body = " ".join(short + nested_lists + long)
+    return body or ", ".join(list(item.keys())[:6])
+
+
+def _format_scalar_list(value: list, *, max_items: int = _LIST_NESTED_ITEMS,
+                        max_chars: int = _LIST_NESTED_CHARS) -> str:
+    shown = value[:max_items]
+    body = ", ".join(_scalar(x) for x in shown)
+    omitted = len(value) - len(shown)
+    if omitted:
+        body = f"{body}, … +{omitted}"
+    if len(body) > max_chars:
+        body = body[: max_chars - 1] + "…"
+    return f"[{body}]"
 
 
 def _scalar(value: Any) -> str:

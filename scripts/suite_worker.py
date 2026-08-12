@@ -36,6 +36,7 @@ async def _run(job: dict) -> dict:
     from bench.client import run_case
     from bench.dataset import is_mutating
     from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
+    from bench.probe_journal import ensure_probe_journal
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.scorer import score_case
@@ -91,6 +92,7 @@ async def _run(job: dict) -> dict:
     responses: dict[str, str] = {}
 
     for case in cases:
+        ensure_probe_journal(case)
         warmup = await ensure_markets_for_case(case)
         if not warmup.ok:
             scorecards.append(warmup_failure_card(case, model, warmup))

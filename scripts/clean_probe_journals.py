@@ -56,11 +56,24 @@ def probe_agent_dirs(repo: Path) -> list[Path]:
 
 
 def journal_targets(agent_dir: Path) -> list[Path]:
-    """Session directories under an agent that hold a journal."""
-    sessions = agent_dir / "sessions"
-    if not sessions.is_dir():
-        return []
-    return sorted(d for d in sessions.iterdir() if d.is_dir() and (d / "journal.md").is_file())
+    """Session directories under an agent that hold a journal.
+
+    Both layouts condor resolves: the legacy flat ``<agent>/sessions/`` and the
+    per-strategy ``<agent>/strategies/<slug>/sessions/`` that tick probes use.
+    Missing the latter would let exactly the journals bench now provisions grow
+    forever, which is what this script exists to prevent.
+    """
+    roots = [agent_dir / "sessions"]
+    strategies = agent_dir / "strategies"
+    if strategies.is_dir():
+        roots.extend(d / "sessions" for d in sorted(strategies.iterdir()) if d.is_dir())
+    return sorted(
+        d
+        for sessions in roots
+        if sessions.is_dir()
+        for d in sessions.iterdir()
+        if d.is_dir() and (d / "journal.md").is_file()
+    )
 
 
 def main() -> int:
