@@ -32,6 +32,50 @@ _SUMMARY_LINE_RE = re.compile(
 )
 _PORTFOLIO_HINTS = ("portfolio overview", "token balances", "total balance value")
 
+# Unix epochs the judge would otherwise have to convert in its head. The bands are
+# deliberately narrow — 2001-09-09 to 2096 in seconds, the same window in
+# milliseconds — because anything outside them is far more likely to be a quantity
+# than a timestamp.
+_EPOCH_S_RANGE = (1_000_000_000, 4_000_000_000)
+_EPOCH_MS_RANGE = (1_000_000_000_000, 4_000_000_000_000)
+
+
+def annotate_epochs(args: Any) -> Any:
+    """Copy ``args`` with epoch-looking numbers spelled out as UTC timestamps.
+
+    The judge reads tool *arguments* verbatim and cannot do the arithmetic, so it
+    guesses — and on c008 it guessed wrong, calling ``start_time=1786406400``
+    "likely a future/incorrect epoch" and docking a correct answer from 1.0 to 0.75.
+    That value is 2026-08-11T00:00:00Z, a sound reading of "the last 24 hours".
+
+    Rendering it as ``1786406400 (2026-08-11T00:00:00Z)`` removes the guess instead
+    of asking the judge to be better at mental arithmetic. Applies to any
+    time-windowed case, which is where this failure recurs.
+    """
+    from datetime import datetime, timezone
+
+    def _annotate(value: Any) -> Any:
+        # bool is an int subclass, and True/False are never timestamps.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(value, dict):
+                return {k: _annotate(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_annotate(v) for v in value]
+            return value
+        for low, high, divisor in (
+            (*_EPOCH_S_RANGE, 1),
+            (*_EPOCH_MS_RANGE, 1000),
+        ):
+            if low <= value < high:
+                try:
+                    stamp = datetime.fromtimestamp(value / divisor, timezone.utc)
+                except (OverflowError, OSError, ValueError):
+                    return value
+                return f"{value} ({stamp.strftime('%Y-%m-%dT%H:%M:%SZ')})"
+        return value
+
+    return _annotate(args)
+
 
 def digest_tool_output(
     tool_name: str,

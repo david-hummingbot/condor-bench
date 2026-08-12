@@ -61,14 +61,22 @@ measure — and a run answered it correctly via `manage_servers` for a composite
 **Question:** What's the combined P&L on the positions my running executors are holding?
 
 **Favorable outcome**
-- Call `manage_executors` with `action=positions_summary` and report the combined PnL.
+- Call `manage_executors` with `action=performance_report` and report the combined PnL.
 - Tools: `manage_executors`.
 
 Named the executors on purpose. `get_portfolio_overview` defaults to
 `include_perp_positions=True`, so "total P&L across my active positions" — the old
 wording — resolves there just as legitimately, and a run answered it that way for a
-composite of 0.451. `positions_summary` reads the executor store, so the question has
-to point at the executors for the pinned action to be the right call.
+composite of 0.451, so the question now points at the executors.
+
+The pinned action is `performance_report`, not `positions_summary`. Naming the
+executors fixed the *tool* but left the action contestable in the same breath: the
+question asks for **combined** P&L, and condor splits these as "positions_summary →
+View all positions" against "performance_report → Get executor performance report".
+A run called `performance_report`, got exactly `pnl_total_quote` /
+`unrealized_pnl_quote` / `global_pnl_quote` back, was scored 0.95 on the answer — and
+still lost the whole `tool_params` weight to a pin that wanted the per-position view
+of a question about an aggregate.
 
 #### c008 — Trade history
 **Question:** Show me my trade history for the last 24 hours and tell me whether I was net long or short.
@@ -177,7 +185,7 @@ commit that changes case ground truth.
 | c004 | `get_portfolio_overview` | — | — | read_only | — |
 | c005 | `manage_bots` | `action=status` | — | read_only | — |
 | c006 | `manage_servers` | `action=status` | — | read_only | — |
-| c007 | `manage_executors` | `action=positions_summary` | — | read_only | — |
+| c007 | `manage_executors` | `action=performance_report` | — | read_only | — |
 | c008 | `search_history` | `data_type=orders` | — | read_only | — |
 | c010 | `manage_servers` | `action=list` | — | read_only | — |
 | c011 | `manage_trading_agent` | `action=list_agent_definitions` | — | read_only | — |

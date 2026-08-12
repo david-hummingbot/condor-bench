@@ -211,6 +211,14 @@ def summary_counts_for_matrix(summary: dict) -> bool:
         return False
     if summary.get("suite_id"):
         return False
+    # A cancelled run is saved so its scored cases are not thrown away, but it must
+    # not feed the matrix by default. Cell ownership is newest-run-wins, so a run
+    # cancelled at case 12 would claim its model's domain and tool cells on 12 cases
+    # and shadow a complete 90-case run from the day before — replacing good evidence
+    # with less of it. Opt in with `include_in_matrix` when the partial set is what
+    # you actually want measured.
+    if summary.get("partial") is True:
+        return False
     return True
 
 

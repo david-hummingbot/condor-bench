@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -42,6 +43,8 @@ if str(ROOT) not in sys.path:
 load_dotenv(ROOT / ".env")
 RESULTS_DIR = ROOT / "results"
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+
+log = logging.getLogger(__name__)
 
 # active run state: run_id -> dict
 _active_runs: dict[str, dict[str, Any]] = {}
@@ -266,6 +269,41 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             env_backup: dict[str, str | None] = {}
             scorecards = []
             responses: dict[str, str] = {}
+
+            def _persist(*, partial: bool):
+                """Write this model's scorecards. Returns the run dir, or None.
+
+                Shared by the normal path and the cancel path so a cancelled run
+                keeps what it measured. `save_run` is synchronous, which is what
+                makes it safe to call while unwinding a cancellation — an `await`
+                there would be cancelled again before it finished.
+                """
+                if not scorecards:
+                    return None
+                pin = build_run_pin(
+                    run_type="adhoc",
+                    # The cases actually scored, not the ones planned: a pin that
+                    # claimed all 93 on a run cancelled at 12 would misdescribe
+                    # its own coverage.
+                    case_ids=[sc.case_id for sc in scorecards]
+                    if partial
+                    else [c.id for c in cases],
+                    models=[norm_key],
+                    shared_loaded=True,
+                )
+                if partial:
+                    pin["partial"] = True
+                    pin["cases_planned"] = len(cases)
+                    pin["cases_scored"] = len(scorecards)
+                return save_run(
+                    norm_key,
+                    scorecards,
+                    responses,
+                    uuid.uuid4().hex[:8],
+                    prompts=prompts,
+                    extra_summary=pin,
+                )
+
             try:
                 for k, v in env_vars.items():
                     env_backup[k] = os.environ.get(k)
@@ -340,25 +378,26 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                         "total": total,
                     })
 
-                if scorecards:
-                    run_id_short = uuid.uuid4().hex[:8]
-                    pin = build_run_pin(
-                        run_type="adhoc",
-                        case_ids=[c.id for c in cases],
-                        models=[norm_key],
-                        shared_loaded=True,
-                    )
-                    run_dir = save_run(
-                        norm_key,
-                        scorecards,
-                        responses,
-                        run_id_short,
-                        prompts=prompts,
-                        extra_summary=pin,
-                    )
+                run_dir = _persist(partial=False)
+                if run_dir is not None:
                     await _emit(run_id, {"type": "model_done", "model": model_key, "run_dir": run_dir.name})
 
             except asyncio.CancelledError:
+                # Cancelling used to discard everything scored so far: `save_run` sits
+                # after the case loop, and the cancellation unwound straight past it.
+                # A run stopped at case 82 of 93 threw away 81 scored cases and left
+                # `results/` empty, which for an ACP model is hours of real spend.
+                partial_dir = _persist(partial=True)
+                if partial_dir is not None:
+                    log.warning(
+                        "run cancelled — saved %d scored case(s) to %s",
+                        len(scorecards),
+                        partial_dir.name,
+                    )
+                    state["partial_run_dirs"] = [
+                        *state.get("partial_run_dirs", []),
+                        partial_dir.name,
+                    ]
                 raise
             finally:
                 for k, v in env_backup.items():

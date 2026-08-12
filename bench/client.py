@@ -38,7 +38,7 @@ from condor_compat.acp.client import (
 )
 
 from bench.mcp_provider import build_mcp_configs, wiring_metadata
-from bench.tool_digest import DEFAULT_DIGEST_CHARS, digest_tool_output
+from bench.tool_digest import DEFAULT_DIGEST_CHARS, annotate_epochs, digest_tool_output
 from config import condor_path
 
 # ── Agent instructions ─────────────────────────────────────────────────────────
@@ -343,7 +343,11 @@ class BenchmarkResult:
                     if output is None:
                         queue = outputs_by_name.get(name)
                         output = queue.pop(0) if queue else None
-                    lines.append(f"  {name}({_compact(args, 300)})")
+                    # Epochs are spelled out: the judge reads these numbers as-is
+                    # and cannot convert them, so a valid `start_time` once read as
+                    # "likely a future/incorrect epoch" and cost a correct answer
+                    # 0.25 of its quality score.
+                    lines.append(f"  {name}({_compact(annotate_epochs(args), 300)})")
                     if output is None:
                         lines.append("    → (no output captured)")
                     else:
