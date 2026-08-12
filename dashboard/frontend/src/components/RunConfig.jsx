@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { getProviders, getProviderModels, createRun, getDatasets } from '../api.js'
+import { getProviders, getProviderModels, getAcpModels, createRun, getDatasets } from '../api.js'
 import StagingStatus from './StagingStatus.jsx'
 import PageHeader from './PageHeader.jsx'
 
@@ -50,7 +50,18 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   const update = (id, patch) =>
     setCfg(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }))
 
-  const toggle = (id) => update(id, { enabled: !cfg[id]?.enabled })
+  const toggle = (p) => {
+    const id = typeof p === 'string' ? p : p.id
+    const enabling = !cfg[id]?.enabled
+    update(id, { enabled: enabling })
+    // Fetch an ACP bridge's model list as soon as it is switched on, so the working
+    // default is already selected. Waiting for a button press meant the common path
+    // ran with the CLI's configured model, which is the one that can 400 on every
+    // prompt and produce a run of empty rows.
+    if (enabling && typeof p === 'object' && p.fetch_acp_models && !cfg[id]?.acpModels) {
+      loadAcpModels(p)
+    }
+  }
 
   const loadModels = async (p) => {
     const state = cfg[p.id]
@@ -77,7 +88,15 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
       const state = cfg[p.id]
       if (!state?.enabled) continue
       if (p.bare_key) {
-        out.push({ model_key: p.id, api_key: null, base_url: null })
+        // An ACP agent runs whatever model its CLI is configured with unless the key
+        // names one. Naming one is not optional in practice: a locally configured
+        // model the bridge cannot use fails every prompt with an API 400.
+        const model = state.selectedModel
+        out.push({
+          model_key: model ? `${p.id}:${model}` : p.id,
+          api_key: null,
+          base_url: null,
+        })
       } else {
         const model = state.selectedModel
         if (!model) continue
@@ -94,8 +113,43 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
     return out
   }
 
-  const toggleLayer = (id) =>
-    setLayers(prev => (prev.includes(id) ? prev.filter(l => l !== id) : [...prev, id]))
+  /**
+   * Ask an ACP bridge which models it accepts. Also the fastest way to find out the
+   * bridge works at all — if this errors, no run against that agent can succeed, and
+   * the message carries the bridge's stderr rather than leaving empty rows behind.
+   */
+  const loadAcpModels = async (p) => {
+    update(p.id, { loading: true, error: '' })
+    try {
+      const data = await getAcpModels(p.id)
+      const models = data.models || []
+      update(p.id, {
+        acpModels: models,
+        acpCurrent: data.current || '',
+        // Default to the bridge's own recommendation, not to the CLI's configured
+        // model: that one is whatever happens to be in ~/.claude/settings.json and
+        // is exactly what can fail every prompt in the run.
+        selectedModel: models.some(m => m.id === 'default') ? 'default' : (models[0]?.id || ''),
+        loading: false,
+      })
+    } catch (e) {
+      update(p.id, { loading: false, error: e.message, acpModels: [] })
+    }
+  }
+
+  const toggleLayer = (id) => {
+    const next = layers.includes(id) ? layers.filter(l => l !== id) : [...layers, id]
+    setLayers(next)
+    // Drop a domain/category the new layer set can no longer produce. Leaving a
+    // stale one selected is exactly how "Tools + general_consult" — a combination
+    // with no case behind it — became submittable.
+    const rows = (datasets?.combos || []).filter(
+      c => !next.length || next.includes(c.layer)
+    )
+    if (domain && !rows.some(c => c.domain === domain)) setDomain('')
+    const cat = category.trim()
+    if (cat && !rows.some(c => c.category === cat)) setCategory('')
+  }
 
   const handleStart = async () => {
     const models = enabledModels()
@@ -122,24 +176,49 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   const stagingBlocked =
     (staging?.checks || []).some(c => c.blocking && !c.ok)
 
-  // Case count for the current filters, so "start" isn't a guess about scope.
-  // Counted off the layer × domain cross-tab: summing one axis and ignoring the
-  // other reported a domain's whole case count for "this domain, tick layer only".
-  // The category filter is free text applied server-side, so it is not counted here.
-  const selectedCases = (() => {
-    if (!datasets) return null
-    const cross = datasets.layer_domains || {}
-    const wantedLayers = layers.length ? layers : Object.keys(cross)
-    let n = 0
-    for (const layer of wantedLayers) {
-      const byDomain = cross[layer] || {}
-      for (const [d, count] of Object.entries(byDomain)) {
-        if (domain && d !== domain) continue
-        n += count
-      }
+  /**
+   * The three filters AND together, and the axes barely overlap — a Tool case's
+   * domain is always a `tool:` bucket and its category is always "tool". Offering
+   * the routing domains and the whole category list next to a Tools selection
+   * proposed combinations that match nothing, and the only feedback was the run
+   * being refused after Start with "No cases matched the selected filters."
+   *
+   * So every list below is derived from the real (layer, domain, category)
+   * combinations: each filter offers only values that survive the others, and the
+   * count is exact rather than an estimate that ignored the category.
+   */
+  const combos = datasets?.combos || []
+  const matching = (opts = {}) => {
+    const wantLayers = opts.layers ?? layers
+    const wantDomain = opts.domain ?? domain
+    const wantCategory = opts.category ?? category.trim()
+    return combos.filter(c =>
+      (!wantLayers.length || wantLayers.includes(c.layer)) &&
+      (!wantDomain || c.domain === wantDomain) &&
+      (!wantCategory || c.category === wantCategory)
+    )
+  }
+  const countOf = (rows) => rows.reduce((n, c) => n + c.count, 0)
+
+  // Domains available under the chosen layers, ignoring the category so narrowing
+  // the category can never empty the domain list you picked from.
+  const domainOptions = (() => {
+    const seen = new Map()
+    for (const c of matching({ domain: '', category: '' })) {
+      seen.set(c.domain, (seen.get(c.domain) || 0) + c.count)
     }
-    return n
+    return [...seen.entries()].sort((a, b) => a[0].localeCompare(b[0]))
   })()
+
+  const categoryOptions = (() => {
+    const seen = new Map()
+    for (const c of matching({ category: '' })) {
+      if (c.category) seen.set(c.category, (seen.get(c.category) || 0) + c.count)
+    }
+    return [...seen.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  })()
+
+  const selectedCases = datasets ? countOf(matching()) : null
 
   const groups = [
     { label: 'CLI Agents', kinds: ['agent'] },
@@ -174,12 +253,12 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
                 const allModels = [...(state.loadedModels.length ? state.loadedModels : p.models)]
                 return (
                   <div key={p.id} className={`provider-row ${state.enabled ? 'enabled' : ''}`}>
-                    <div className="provider-header" onClick={() => toggle(p.id)}>
+                    <div className="provider-header" onClick={() => toggle(p)}>
                       <label className="toggle" onClick={e => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={state.enabled}
-                          onChange={() => toggle(p.id)}
+                          onChange={() => toggle(p)}
                         />
                         <span className="toggle-track" />
                       </label>
@@ -189,6 +268,46 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
 
                     {state.enabled && (
                       <div className="provider-body">
+                        {p.fetch_acp_models && (
+                          <div className="field">
+                            <label>Model</label>
+                            <div className="inline-row">
+                              {state.acpModels?.length > 0 ? (
+                                <select
+                                  className="select"
+                                  value={state.selectedModel || ''}
+                                  onChange={e => update(p.id, { selectedModel: e.target.value })}
+                                >
+                                  <option value="">CLI default (whatever it is configured with)</option>
+                                  {state.acpModels.map(m => (
+                                    <option key={m.id} value={m.id}>
+                                      {m.name}{m.id === state.acpCurrent ? ' — CLI current' : ''}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <span className="run-meta">
+                                  Not selected — the run will use whatever model this CLI is
+                                  configured with.
+                                </span>
+                              )}
+                              <button
+                                className="btn sm"
+                                onClick={() => loadAcpModels(p)}
+                                disabled={state.loading}
+                              >
+                                {state.loading ? '…' : state.acpModels?.length ? '↻' : 'Load models'}
+                              </button>
+                            </div>
+                            {state.error && <span className="error-text">{state.error}</span>}
+                            {state.acpModels?.length > 0 && state.selectedModel && (
+                              <span className="run-meta">
+                                {state.acpModels.find(m => m.id === state.selectedModel)?.description}
+                              </span>
+                            )}
+                          </div>
+                        )}
+
                         {p.needs_api_key && (
                           <div className="field">
                             <label>API Key</label>
@@ -341,36 +460,42 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
         </div>
 
         <div className="field" style={{ marginBottom: 14 }}>
-          <label>Routing domain (optional)</label>
+          <label>
+            Domain (optional)
+            {layers.length > 0 && (
+              <span className="run-meta"> — only domains in the selected layers</span>
+            )}
+          </label>
           <select
             className="select"
             value={domain}
             onChange={e => setDomain(e.target.value)}
-            style={{ maxWidth: 320 }}
+            style={{ maxWidth: 380 }}
           >
             <option value="">All domains</option>
-            {(datasets?.routing_domains || []).map(d => (
+            {domainOptions.map(([d, n]) => (
               <option key={d} value={d}>
-                {d} ({datasets.domains?.[d] ?? 0})
+                {/* Layer 2 groups are capability buckets, not routing targets —
+                    they filter perfectly well, they just never reach the Router. */}
+                {d.startsWith('tool:') ? `${d.slice(5)} — capability bucket` : d} ({n})
               </option>
             ))}
           </select>
         </div>
 
         <div className="field">
-          <label>Category filter (optional)</label>
-          <input
-            type="text"
-            className="input"
-            placeholder="e.g. risk, concepts, troubleshooting"
+          <label>Category (optional)</label>
+          <select
+            className="select"
             value={category}
             onChange={e => setCategory(e.target.value)}
-            style={{ maxWidth: 320 }}
-            list="bench-categories"
-          />
-          <datalist id="bench-categories">
-            {(datasets?.categories || []).map(c => <option key={c} value={c} />)}
-          </datalist>
+            style={{ maxWidth: 380 }}
+          >
+            <option value="">All categories</option>
+            {categoryOptions.map(([c, n]) => (
+              <option key={c} value={c}>{c} ({n})</option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -382,11 +507,15 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
               <>
                 <strong>{modelCount}</strong> model{modelCount !== 1 ? 's' : ''}
                 {selectedCases != null && <> × <strong>{selectedCases}</strong> case{selectedCases !== 1 ? 's' : ''}</>}
-                {category.trim() && (
-                  <span className="run-meta"> · before the category filter narrows it</span>
-                )}
               </>
             )}
+          {/* Caught here rather than after Start: the backend's only answer to an
+              impossible filter set is to refuse the run once it has been submitted. */}
+          {selectedCases === 0 && (
+            <span className="error-text" style={{ marginLeft: 12 }}>
+              no case matches these filters — widen the layers, domain or category
+            </span>
+          )}
           {stagingBlocked && (
             <span className="error-text" style={{ marginLeft: 12 }}>
               staging pre-flight is failing — the run will refuse to start
@@ -399,7 +528,9 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
         <button
           className="btn primary"
           onClick={handleStart}
-          disabled={modelCount === 0 || submitting || isRunning || stagingBlocked}
+          disabled={
+            modelCount === 0 || selectedCases === 0 || submitting || isRunning || stagingBlocked
+          }
         >
           {isRunning ? '⏳ Running…' : submitting ? 'Starting…' : '▶ Start Benchmark'}
         </button>

@@ -15,6 +15,11 @@ export function getProviderModels(baseUrl, apiKey = '') {
   return fetch('/api/provider-models?' + params).then(handle)
 }
 
+/** Model ids an ACP bridge (Claude Code, Gemini CLI) will accept. */
+export function getAcpModels(provider) {
+  return fetch('/api/acp-models?' + new URLSearchParams({ provider })).then(handle)
+}
+
 export const createRun = (body) =>
   fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(handle)
 

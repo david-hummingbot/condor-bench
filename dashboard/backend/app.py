@@ -48,10 +48,17 @@ _active_runs: dict[str, dict[str, Any]] = {}
 _custom_runs: dict[str, dict[str, Any]] = {}
 
 PROVIDERS = [
+    # ACP agents: the model is chosen inside the CLI, so bench can only name one via
+    # the `provider:model` suffix. `fetch_acp_models` tells the UI it can ask the
+    # bridge which ids it accepts — worth doing rather than leaving it implicit,
+    # because the locally configured model can reject the request the bridge builds
+    # and then every prompt in the run fails with an API 400 and no output.
     {"id": "claude-code", "label": "Claude Code", "kind": "agent", "bare_key": True,
-     "needs_api_key": False, "supports_url": False, "models": []},
+     "needs_api_key": False, "supports_url": False, "fetch_acp_models": True,
+     "models": []},
     {"id": "gemini", "label": "Gemini CLI", "kind": "agent", "bare_key": True,
-     "needs_api_key": False, "supports_url": False, "models": []},
+     "needs_api_key": False, "supports_url": False, "fetch_acp_models": True,
+     "models": []},
     {"id": "anthropic", "label": "Anthropic", "kind": "cloud",
      "needs_api_key": True, "supports_url": False,
      "models": ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
@@ -554,11 +561,28 @@ async def get_datasets():
         bucket = layer_domains.setdefault(str(case.type), {})
         bucket[str(case.domain)] = bucket.get(str(case.domain), 0) + 1
 
+    # Every distinct (layer, domain, category) with its count — at most one entry
+    # per case, so this is small. It exists because the three filters AND together
+    # and the axes barely overlap: a Tool case's domain is always a `tool:` bucket
+    # and its category is always "tool", so offering the routing domains and the
+    # full category list alongside a Tools selection proposes combinations that
+    # cannot match anything. With the combinations themselves in hand the form can
+    # offer only what exists and count the selection exactly, instead of letting a
+    # run be submitted and refused with "No cases matched the selected filters."
+    combos: dict[tuple[str, str, str], int] = {}
+    for case in cases:
+        key = (str(case.type), str(case.domain), str(case.category or ""))
+        combos[key] = combos.get(key, 0) + 1
+
     return {
         "total": len(cases),
         "layers": _tally(lambda c: c.type),
         "domains": _tally(lambda c: c.domain),
         "layer_domains": {k: dict(sorted(v.items())) for k, v in sorted(layer_domains.items())},
+        "combos": [
+            {"layer": layer, "domain": domain, "category": category, "count": count}
+            for (layer, domain, category), count in sorted(combos.items())
+        ],
         "routing_domains": sorted(
             {c.domain for c in cases if is_routing_domain(c.domain)}
         ),
@@ -652,6 +676,43 @@ async def api_put_settings(body: SettingsUpdate):
 @app.get("/api/providers")
 async def get_providers():
     return {"providers": PROVIDERS}
+
+
+@app.get("/api/acp-models")
+async def get_acp_models(provider: str = "claude-code"):
+    """Ask an ACP bridge which model ids it will accept.
+
+    Doubles as a health check for the ACP path: if this fails, no run against that
+    agent can work, and the error carries the bridge's own stderr instead of the
+    empty responses the failure used to produce.
+    """
+    from bench.client import acp_available_models
+
+    try:
+        models = await asyncio.wait_for(acp_available_models(provider), timeout=60)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            504, f"`{provider}` did not answer within 60s — is the ACP bridge installed?"
+        ) from None
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    rows = models.get("availableModels") or []
+    return {
+        "provider": provider,
+        "models": [
+            {
+                "id": str(r.get("modelId")),
+                "name": str(r.get("name") or r.get("modelId")),
+                "description": str(r.get("description") or ""),
+            }
+            for r in rows
+            if isinstance(r, dict) and r.get("modelId")
+        ],
+        # What a run with a bare `claude-code` key would use — the CLI's own
+        # configured model, which is not necessarily one bench should recommend.
+        "current": models.get("currentModelId"),
+    }
 
 
 @app.get("/api/provider-models")

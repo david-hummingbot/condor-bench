@@ -211,7 +211,11 @@ export default function CaseTable({ cases }) {
 
                         <TokenChips usage={c.usage} judge={c.judge_usage} />
                         <PhaseDetail phases={c.phase_detail} />
-                        <ToolTrace calls={c.tool_call_details} expected={c.expected_tools} />
+                        <ToolTrace
+                          calls={c.tool_call_details}
+                          expected={c.expected_tools}
+                          internal={c.agent_internal_calls}
+                        />
                         <ParamDetail detail={c.tool_param_detail} />
                         <ValidityDetail detail={c.live_validity_detail} />
                         <WiringDetail wiring={c.wiring} />
@@ -298,13 +302,21 @@ function PhaseDetail({ phases }) {
   )
 }
 
-function ToolTrace({ calls, expected }) {
+function ToolTrace({ calls, expected, internal }) {
   if (!calls?.length && !expected?.length) return null
   return (
     <div style={{ marginTop: 12 }}>
       <div className="case-detail-label">Tool calls</div>
       {expected?.length > 0 && (
         <div className="run-meta">expected: {expected.join(', ')}</div>
+      )}
+      {/* Named rather than quietly dropped: the agent's own tools are in the trace
+          below but excluded from the tool, param and validity scores, because they
+          are not choices about condor's surface. */}
+      {internal?.length > 0 && (
+        <div className="run-meta" style={{ color: 'var(--yellow)' }}>
+          not scored — the agent's own tools: {internal.join(', ')}
+        </div>
       )}
       {!calls?.length ? (
         <div className="case-detail-text">(no tool calls)</div>
