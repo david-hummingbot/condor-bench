@@ -97,6 +97,44 @@ def test_every_pinned_action_exists_on_its_tool():
     )
 
 
+def test_every_banned_action_exists_on_its_tool():
+    """A ban on an action that does not exist can never fire.
+
+    `expected_no_calls` is the restraint half of a case: "answer, but change nothing".
+    Seven cases banned `manage_bots:start` and `manage_bots:stop`, and neither is an
+    action — condor spells them `start_controllers`, `stop_bot`, `stop_controllers`. Two
+    more banned `manage_controllers:create` and `:save` against a Literal of
+    `upsert | delete | list | describe`.
+
+    Unlike a bad *pin*, which fails loudly by making tool_params unearnable, a bad *ban*
+    fails silently and permissively: the restraint reads as enforced, the case passes,
+    and a model that actually stopped a live bot on a "do not create anything" case
+    would not be caught. That is the one failure mode here with real-money consequences,
+    so it gets its own check.
+    """
+    vocab = _action_vocabulary()
+    if not vocab:
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+
+    offenders = []
+    for case in load_all_cases():
+        for ban in getattr(case, "expected_no_calls", None) or []:
+            tool, _, action = ban.partition(":")
+            if not action:
+                continue  # bare-name bans are checked by test_scoring_fixes
+            allowed = vocab.get(tool)
+            if allowed and action not in allowed:
+                offenders.append(
+                    f"{case.id}: banned {ban!r} — {tool} accepts "
+                    f"{', '.join(sorted(allowed))}"
+                )
+
+    assert not offenders, (
+        "cases ban actions their tool does not have, so the restraint is unenforced "
+        "and the case passes regardless:\n  " + "\n  ".join(offenders)
+    )
+
+
 def _literal_vocabulary() -> dict[str, dict[str, set[str]]]:
     """tool name -> {parameter: the string values its Literal allows}.
 

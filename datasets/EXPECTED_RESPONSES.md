@@ -210,15 +210,15 @@ commit that changes case ground truth.
 | agent_condor_routine_001 | `manage_skill`, `manage_routines` | `action=read`, `action=create_routine`, `name=bench_btc_price` | — | mutating | — |
 | agent_condor_routine_003 | `manage_routines` | `action=list` | — | read_only | — |
 | agent_condor_routine_004 | `manage_routines` | `action=run`, `name=market_scanner` | — | mutating | — |
-| agent_condor_builder_001 | — | — | `manage_trading_agent`, `manage_executors` | read_only | — |
+| agent_condor_builder_001 | — | — | `manage_trading_agent:create_strategy`, `manage_trading_agent:create_agent`, `manage_executors:create`, `manage_executors:stop` | read_only | — |
 | agent_condor_builder_002 | `manage_skill`, `manage_trading_agent` | `action=read`, `action=create_strategy`, `name=bench_dca_sol` | — | destructive | — |
 | agent_condor_delegate_001 | `delegate` | `agent=market_making_expert`, `action=start` | — | mutating | — |
 | t001 | `get_market_data`, `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_normal` |
 | t002 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_profit` |
-| t003 | `trading_agent_journal_write` | — | `manage_executors` | mutating | `bench_tick_risk_blocked` |
+| t003 | `trading_agent_journal_write` | — | `manage_executors:create`, `manage_executors:stop` | mutating | `bench_tick_risk_blocked` |
 | t004 | `get_market_data`, `trading_agent_journal_write` | — | — | mutating | `bench_tick_near_limit` |
 | t005 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_error_recovery` |
-| t006 | `get_market_data` | — | `manage_executors` | read_only | `bench_tick_dry_run` |
+| t006 | `get_market_data` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_dry_run` |
 
 `manage_notes` has no cases. condor's own docstring for it reads "DEPRECATED — use
 manage_memory instead … New code should call manage_memory directly", it is a thin
