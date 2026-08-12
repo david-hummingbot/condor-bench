@@ -207,3 +207,50 @@ def test_a_refusal_is_not_a_removal(monkeypatch: pytest.MonkeyPatch):
 def test_tool_error_reads_condors_result_shapes(payload, expect_error):
     got = tool_error(_Outcome(payload))
     assert bool(got) is expect_error, f"{payload} -> {got!r}"
+
+
+def test_the_leverage_reset_avoids_condors_broken_enum():
+    """Leverage is real account state with no delete, and the reset always failed.
+
+    It sent `position_mode: "ONEWAY"`, which condor's MCP layer rejects — it accepts only
+    `HEDGE` / `ONE-WAY`, while the API behind it demands `HEDGE` / `ONEWAY`. No value
+    satisfies both, so every reset errored ("left behind:
+    set_account_position_mode_and_leverage BTC-USDT — Unknown") and leverage ratcheted
+    across runs — the exact failure this state-setter machinery exists to prevent.
+
+    `position_mode` is optional on the tool ("If position mode is not specified, will
+    only set the leverage"), so dropping it makes the reset work without waiting for the
+    condor bug to be fixed.
+    """
+    from bench.cleanup import _STATE_SETTERS, _undo_args, created_resources
+
+    reset = _STATE_SETTERS["set_account_position_mode_and_leverage"]
+    assert reset["leverage"] == 1
+    assert "position_mode" not in reset, (
+        "no position_mode value is accepted by both condor and the API"
+    )
+
+    class _Result:
+        tool_calls = [
+            {
+                "tool": "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
+                "tool_call_id": "c1",
+                "args": {
+                    "account_name": "master_account",
+                    "connector_name": "binance_perpetual",
+                    "trading_pair": "BTC-USDT",
+                    "leverage": 20,
+                    "position_mode": "HEDGE",
+                },
+            }
+        ]
+        tool_responses = []
+
+    found = created_resources(_Result())
+    assert len(found) == 1
+    args = _undo_args(found[0], "set")
+    assert args["leverage"] == 1
+    assert "position_mode" not in args, "the reset must not resend the rejected enum"
+    # Scoping args carry through, so the reset lands on the pair the case changed.
+    assert args["trading_pair"] == "BTC-USDT"
+    assert args["connector_name"] == "binance_perpetual"

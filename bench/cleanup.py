@@ -50,9 +50,21 @@ _CREATE_ACTIONS = {
 # Leverage is the case that matters: it is real account state with no delete, so
 # without this a sweep ratchets leverage upward across models and never comes back.
 _STATE_SETTERS: dict[str, dict[str, Any]] = {
+    # Leverage only, deliberately no `position_mode`.
+    #
+    # The reset used to send `position_mode: "ONEWAY"`, and condor's MCP layer rejects
+    # that outright — `tools/trading.py:47` accepts only `HEDGE` or `ONE-WAY`, while the
+    # hummingbot API behind it demands `HEDGE` or `ONEWAY`. The two disagree, so *no*
+    # value satisfies both and the reset always failed: a baseline run reported
+    # "left behind: set_account_position_mode_and_leverage BTC-USDT — Unknown". Leverage
+    # is real account state with no delete, which is the whole reason this machinery
+    # exists, so it was ratcheting upward across runs and never coming back.
+    #
+    # The tool documents `position_mode` as optional — "If position mode is not
+    # specified, will only set the leverage" — so omitting it makes the reset work today
+    # instead of waiting on the condor fix.
     "set_account_position_mode_and_leverage": {
         "leverage": 1,
-        "position_mode": "ONEWAY",
     },
 }
 
