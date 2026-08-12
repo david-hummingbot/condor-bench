@@ -1,0 +1,6 @@
+{
+  "case_id": "agent_condor_builder_002",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 39.13,
+  "timestamp": "2026-08-12T06:09:38.847941+00:00"
+}

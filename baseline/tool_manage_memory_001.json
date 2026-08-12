@@ -1,0 +1,6 @@
+{
+  "case_id": "tool_manage_memory_001",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 6.287,
+  "timestamp": "2026-08-12T06:18:59.040329+00:00"
+}

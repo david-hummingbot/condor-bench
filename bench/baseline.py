@@ -6,13 +6,14 @@ accuracy is scored against dataset expected_tools ground truth.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from config import BASELINE_DIR, BASELINE_MODEL
+from config import BASELINE_DIR, BASELINE_MODEL, CASE_TIMEOUT_S
 from bench.cleanup import teardown
 from bench.client import run_case
 from bench.dataset import is_mutating
@@ -88,8 +89,21 @@ async def generate_baselines(
         try:
             # Baselines are latency references, so they must be produced by the
             # same code path a test run uses — otherwise the reference is measured
-            # against different wiring than the runs it scores.
-            result = await run_case(case, model)
+            # against different wiring than the runs it scores. That now includes
+            # the timeout: latency_score is min(1, baseline / test), so an inflated
+            # baseline is *rewarding*, not penalising. `c012` once took 609s for a
+            # bare manage_skill:list, and a reference that long would have handed
+            # every model a free 1.0 on that case forever. Better to record no
+            # baseline than a runaway one.
+            result = await asyncio.wait_for(
+                run_case(case, model), timeout=CASE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            console.print(
+                f"[red]Timeout on {case.id} after {CASE_TIMEOUT_S:.0f}s — "
+                "no baseline recorded[/red]"
+            )
+            continue
         except Exception as exc:
             console.print(f"[red]Error on {case.id}: {exc}[/red]")
             continue

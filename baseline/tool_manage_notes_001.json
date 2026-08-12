@@ -1,0 +1,6 @@
+{
+  "case_id": "tool_manage_notes_001",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 5.115,
+  "timestamp": "2026-08-12T06:19:05.493581+00:00"
+}
