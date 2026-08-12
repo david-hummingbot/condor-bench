@@ -448,14 +448,33 @@ def _detect_harness_artifact(
             "set differs from the PydanticAI path, so tool scores are not comparable"
         )
 
+    from metrics.tool_accuracy import normalize_tool_name
+
+    # A journal the harness never provisioned is not a model failure. condor resolves
+    # a journal from `{agent_slug}.{strategy_slug}_{n}` to a directory on disk, so a
+    # probe agent that does not exist there answers "no journal available for this
+    # agent" no matter what the model did. Four tick cases pin
+    # `trading_agent_journal_write` as an expected call, and every one of them scored
+    # live_validity 0.0 on that — then lost answer_quality again for "silently ignoring
+    # the failed journal write". Both deductions were the fixture's absence.
+    for record in getattr(result, "tool_responses", []) or []:
+        tool = normalize_tool_name(str(record.get("tool", "")))
+        if not tool.startswith("trading_agent_journal"):
+            continue
+        text = str(record.get("output") or "")
+        if "no journal available for this agent" in text.lower():
+            return (
+                "the journal for this case's probe agent does not exist on the condor "
+                "checkout, so the write could not succeed however the model behaved — "
+                "provision agents/<slug>/strategies/<case_id>/sessions/session_1"
+            )
+
     # A case cannot fail on a tool it was never shown. The model-size cap trims
     # `tool_defs[:limit]`, so a case whose expected tool sorted past the cut is
     # measuring the harness, not the model — the failure mode that made scoping
     # specialists to their grant worth doing in the first place.
     offered = wiring.get("offered_tools")
     if isinstance(offered, list) and offered and expected_tools:
-        from metrics.tool_accuracy import normalize_tool_name
-
         have = {normalize_tool_name(str(t)) for t in offered}
         missing = sorted(
             {normalize_tool_name(str(t)) for t in expected_tools} - have

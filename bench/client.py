@@ -783,6 +783,31 @@ async def run_tick(
     )
 
 
+def tick_agent_id(case: Any) -> str:
+    """The agent_id condor's journal tools can actually resolve.
+
+    condor builds this as ``f"{agent.slug}.{strategy.slug}_{session_num}"``
+    (``condor/agents/engine.py:136,160``) and `resolve_agent_dirs` parses it back the
+    same way — it takes everything before the *last* underscore as the strategy path and
+    the remainder as the session number.
+
+    Bench sent ``f"bench-{case.id}"``, e.g. ``bench-t002``. That has no underscore at
+    all, so `resolve_agent_dirs` hit `rfind("_") == -1` and returned `(None, None)`
+    before looking at anything on disk. Every tick journal write therefore answered
+    ``{"error": "no journal available for this agent"}`` — unconditionally, for every
+    tick case, however the model behaved. Four cases pin `trading_agent_journal_write`
+    as an expected call and could never earn its live validity.
+
+    The id being well-formed is necessary but not sufficient: the strategy directory has
+    to exist too (``agents/{slug}/strategies/{case_id}/sessions/session_1``). Until the
+    probe agents are provisioned the write still fails — but now with a resolvable id, so
+    the failure is about provisioning rather than about a malformed string, and
+    :func:`bench.scorer._detect_harness_artifact` can name it.
+    """
+    slug = getattr(case, "agent_slug", None) or "bench_tick"
+    return f"{slug}.{case.id}_1"
+
+
 def build_tick_prompt_for_case(case: Any, model: str) -> str:
     from condor_compat.agents.prompts import build_tick_prompt
     agent = SimpleNamespace(
@@ -797,7 +822,7 @@ def build_tick_prompt_for_case(case: Any, model: str) -> str:
         agent=agent, strategy=strategy, config=case.config,
         core_data=case.core_data, learnings=case.learnings, summary=case.summary,
         recent_decisions=case.recent_decisions, risk_state=case.risk_state,
-        tick_number=case.tick_number, agent_id=f"bench-{case.id}",
+        tick_number=case.tick_number, agent_id=tick_agent_id(case),
         cached_routines_section="", user_memory="", skills_index="",
     )
 

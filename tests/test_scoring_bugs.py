@@ -355,3 +355,69 @@ def test_a_timed_out_case_is_recorded_not_deleted():
     # answer_quality is None, not 0.0: the model was never measured.
     assert card["answer_quality"] is None
     assert "358" in card["answer_reason"]
+
+
+# ── 10. Every tick journal write was unearnable ────────────────────────────────
+def test_the_tick_agent_id_parses_the_way_condor_reads_it():
+    """`bench-t002` has no underscore, so condor bailed before touching the disk.
+
+    `resolve_agent_dirs` splits on the *last* underscore — everything before it is the
+    strategy path, the rest is the session number — and returns `(None, None)` when
+    there is none. So `trading_agent_journal_write` answered
+    `{"error": "no journal available for this agent"}` for every tick case, whatever the
+    model did, and the four cases that pin it could never earn its live validity.
+    """
+    from bench.client import tick_agent_id
+    from bench.dataset import load_tick_cases
+
+    cases = load_tick_cases()
+    assert cases, "no tick cases to check"
+    for case in cases:
+        agent_id = tick_agent_id(case)
+        assert not agent_id.startswith("bench-"), "the malformed form is back"
+        last = agent_id.rfind("_")
+        assert last != -1, f"{agent_id} has no session separator — condor returns None"
+        prefix, session = agent_id[:last], agent_id[last + 1 :]
+        assert session.isdigit(), f"{agent_id}: session part must be a number"
+        # The prefix must name agent.strategy, which is how condor maps it to a folder.
+        assert "." in prefix, f"{prefix} does not name agent.strategy"
+        slug, strategy = prefix.split(".", 1)
+        assert slug == case.agent_slug
+        assert strategy == case.id
+
+
+def test_a_missing_probe_journal_is_attributed_to_the_harness():
+    """A journal nobody provisioned is not a model failure.
+
+    Fixing the id makes it resolvable, but the strategy directory still has to exist.
+    Until it does, the write fails — and it must not cost the model live_validity and
+    then answer_quality again for "silently ignoring the failed journal write".
+    """
+    from types import SimpleNamespace
+
+    from bench.scorer import _detect_harness_artifact
+
+    healthy_wiring = {"api_url": "http://localhost:8000", "assistant_prompt": "ok"}
+    missing = SimpleNamespace(
+        wiring=healthy_wiring,
+        tool_responses=[
+            {
+                "tool": "mcp__condor__trading_agent_journal_write",
+                "output": '{"error": "no journal available for this agent"}',
+            }
+        ],
+    )
+    reason = _detect_harness_artifact(missing, ["trading_agent_journal_write"])
+    assert reason and "does not exist" in reason
+
+    # A journal that worked is not an artifact.
+    working = SimpleNamespace(
+        wiring=healthy_wiring,
+        tool_responses=[
+            {
+                "tool": "mcp__condor__trading_agent_journal_write",
+                "output": '{"written": true, "tick": 12}',
+            }
+        ],
+    )
+    assert _detect_harness_artifact(working, ["trading_agent_journal_write"]) is None
