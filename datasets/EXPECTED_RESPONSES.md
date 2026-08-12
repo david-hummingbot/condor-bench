@@ -23,12 +23,18 @@ The dataset was refactored (2026-08-09) to a single "everyday usage" category: 1
 
 ### Everyday usage
 
-#### c002 — Active API server
-**Question:** What API server am I connected to right now?
+#### c002 — Condor user role
+**Question:** What's my role in Condor, and do I have admin rights?
 
 **Favorable outcome**
-- Call `get_user_context` and state the `active_server` value directly.
+- Call `get_user_context` and report `user_role` and `is_admin` directly.
 - Tools: `get_user_context`.
+
+Asked about role rather than about the active server on purpose. `get_user_context`
+returns `active_server`, but so does `manage_servers`, so the old wording ("what API
+server am I connected to") was fully answerable without the tool this case exists to
+measure — and a run answered it correctly via `manage_servers` for a composite of
+0.665. `user_role` and `is_admin` are held by `get_user_context` alone.
 
 #### c004 — Open orders
 **Question:** Do I have any open orders right now?
@@ -38,7 +44,7 @@ The dataset was refactored (2026-08-09) to a single "everyday usage" category: 1
 - Tools: `get_portfolio_overview`.
 
 #### c005 — Running bots
-**Question:** What bots do I have running?
+**Question:** What bots do I currently have running, and what is each one doing?
 
 **Favorable outcome**
 - Call `manage_bots` and summarize bot names/status.
@@ -51,22 +57,28 @@ The dataset was refactored (2026-08-09) to a single "everyday usage" category: 1
 - Call `manage_servers` with `action="status"` (active server; do not hardcode a server name) and report online/offline plainly.
 - Tools: `manage_servers`. Params: `action=status`.
 
-#### c007 — Total P&L
-**Question:** What's my total P&L across my active positions?
+#### c007 — Executor position P&L
+**Question:** What's the combined P&L on the positions my running executors are holding?
 
 **Favorable outcome**
-- Call `manage_executors` (performance report) and report realized/total PnL.
+- Call `manage_executors` with `action=positions_summary` and report the combined PnL.
 - Tools: `manage_executors`.
 
+Named the executors on purpose. `get_portfolio_overview` defaults to
+`include_perp_positions=True`, so "total P&L across my active positions" — the old
+wording — resolves there just as legitimately, and a run answered it that way for a
+composite of 0.451. `positions_summary` reads the executor store, so the question has
+to point at the executors for the pinned action to be the right call.
+
 #### c008 — Trade history
-**Question:** Show me my trade history from the past week.
+**Question:** Show me my trade history for the last 24 hours and tell me whether I was net long or short.
 
 **Favorable outcome**
 - Call `search_history` and summarize recent fills (pair, side, price, time).
 - Tools: `search_history`.
 
 #### c010 — Accessible servers
-**Question:** List the API servers I have access to.
+**Question:** List the API servers I have access to
 
 **Favorable outcome**
 - Call `manage_servers` (list) and enumerate server names/permissions, noting which is active.
@@ -162,28 +174,35 @@ commit that changes case ground truth.
 | ID | Expected tools | Pinned params | Must not call | Risk | Slug |
 |----|----------------|---------------|---------------|------|------|
 | c002 | `get_user_context` | — | — | read_only | — |
-| c004 | `get_portfolio_overview` | `include_active_orders=True` | — | read_only | — |
+| c004 | `get_portfolio_overview` | — | — | read_only | — |
 | c005 | `manage_bots` | `action=status` | — | read_only | — |
 | c006 | `manage_servers` | `action=status` | — | read_only | — |
-| c007 | `manage_executors` | `action=get_all_bots` | — | read_only | — |
+| c007 | `manage_executors` | `action=positions_summary` | — | read_only | — |
 | c008 | `search_history` | `data_type=orders` | — | read_only | — |
 | c010 | `manage_servers` | `action=list` | — | read_only | — |
-| c011 | `manage_trading_agent` | `action=list` | — | read_only | — |
+| c011 | `manage_trading_agent` | `action=list_agent_definitions` | — | read_only | — |
 | c014 | `get_market_data` | `connector_name=binance`, `data_type=funding_info` | — | read_only | — |
 | agent_condor_005 | `manage_executors` | `action=create`, `trading_pair=BTC-USDT`, `connector_name=binance` | — | destructive | — |
-| agent_condor_006 | `manage_notes` | `action=write` | — | mutating | — |
 | agent_condor_routine_001 | `manage_skill`, `manage_routines` | `action=read`, `action=create_routine`, `name=bench_btc_price` | — | mutating | — |
 | agent_condor_routine_003 | `manage_routines` | `action=list` | — | read_only | — |
 | agent_condor_routine_004 | `manage_routines` | `action=run`, `name=market_scanner` | — | mutating | — |
 | agent_condor_builder_001 | — | — | `manage_trading_agent`, `manage_executors` | read_only | — |
-| agent_condor_builder_002 | `manage_skill`, `manage_trading_agent` | `action=read`, `action=create_strategy` | — | destructive | — |
-| agent_condor_delegate_001 | `delegate` | `agent=market_making_expert` | — | mutating | — |
+| agent_condor_builder_002 | `manage_skill`, `manage_trading_agent` | `action=read`, `action=create_strategy`, `name=bench_dca_sol` | — | destructive | — |
+| agent_condor_delegate_001 | `delegate` | `agent=market_making_expert`, `action=start` | — | mutating | — |
 | t001 | `get_market_data`, `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_normal` |
 | t002 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_profit` |
 | t003 | `trading_agent_journal_write` | — | `manage_executors` | mutating | `bench_tick_risk_blocked` |
 | t004 | `get_market_data`, `trading_agent_journal_write` | — | — | mutating | `bench_tick_near_limit` |
 | t005 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_error_recovery` |
 | t006 | `get_market_data` | — | `manage_executors` | read_only | `bench_tick_dry_run` |
+
+`manage_notes` has no cases. condor's own docstring for it reads "DEPRECATED — use
+manage_memory instead … New code should call manage_memory directly", it is a thin
+alias (`set`→write, `get`→read), and no agent in the roster is granted it. Scoring a
+model against it punished exactly the behaviour condor documents: a run called
+`manage_memory` for "save a note", the judge scored the answer 0.9 and called the
+save correct, and the case still landed at 0.47 because the pinned tool was never
+touched. `manage_memory` carries the coverage instead.
 
 Risk taxonomy: `read_only` = no state change; `mutating` = condor-side state only
 (routines, skills, memory, journals); `destructive` = capital-affecting (executors,
