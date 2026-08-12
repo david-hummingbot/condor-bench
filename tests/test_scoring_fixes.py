@@ -280,3 +280,97 @@ def test_recall_still_penalises_a_missed_required_tool():
 
     assert score_recall(["manage_skill"], ["manage_skill", "get_portfolio_overview"]) == 0.5
     assert score_recall(["manage_bots"], ["get_portfolio_overview"]) == 0.0
+
+
+# ── Teardown: undo the thing that was actually created ────────────────────────
+# All three of these were found by reading a live run's traces, and all three were
+# silent: the cleanup report said "clean" while the resource stayed on staging.
+class _Result:
+    """Minimal stand-in for BenchmarkResult's teardown-facing surface."""
+
+    def __init__(self, tool_calls, tool_responses=()):
+        self.tool_calls = list(tool_calls)
+        self.tool_responses = list(tool_responses)
+
+
+def test_a_created_agent_is_deleted_as_an_agent_not_as_a_strategy():
+    """`agent_condor_builder_002`'s real trace. It left bench_dca_sol in condor."""
+    from bench.cleanup import _undo_args, created_resources, _UNDO_BY_CREATE
+
+    result = _Result(
+        [{
+            "tool": "mcp__condor__manage_trading_agent",
+            "tool_call_id": "t1",
+            "args": {"action": "create_agent", "name": "Bench DCA SOL"},
+        }],
+        [{"tool_call_id": "t1", "output": '{"agent_slug": "bench_dca_sol"}'}],
+    )
+    (resource,) = created_resources(result)
+    # The display name is in args; the slug the delete needs is only in the response.
+    assert resource.identifier == "bench_dca_sol"
+
+    undo_action = _UNDO_BY_CREATE[("manage_trading_agent", "create_agent")][0]
+    assert undo_action == "delete_agent"
+    assert _undo_args(resource, undo_action) == {
+        "action": "delete_agent",
+        "agent_slug": "bench_dca_sol",
+    }
+
+
+def test_a_created_strategy_is_still_deleted_as_a_strategy():
+    from bench.cleanup import _undo_args, created_resources
+
+    result = _Result([{
+        "tool": "mcp__condor__manage_trading_agent",
+        "tool_call_id": "t1",
+        "args": {"action": "create_strategy", "agent_slug": "bench_dca_sol",
+                 "name": "bench_dca_sol"},
+    }], [{"tool_call_id": "t1", "output": '{"strategy_id": "bench_dca_sol.bench_dca_sol"}'}])
+    (resource,) = created_resources(result)
+    assert _undo_args(resource, "delete_strategy") == {
+        "action": "delete_strategy",
+        "strategy_id": "bench_dca_sol.bench_dca_sol",
+    }
+
+
+def test_a_created_routine_is_deleted_with_the_action_condor_accepts():
+    """`delete` is not a manage_routines action; condor spells it delete_routine."""
+    from bench.cleanup import _UNDO, _undo_args, created_resources
+
+    result = _Result([{
+        "tool": "mcp__condor__manage_routines",
+        "tool_call_id": "t1",
+        "args": {"action": "create_routine", "name": "bench_btc_price", "code": "..."},
+    }])
+    (resource,) = created_resources(result)
+    assert resource.identifier == "bench_btc_price"
+    assert _UNDO["manage_routines"][1] == "delete_routine"
+    assert _undo_args(resource, _UNDO["manage_routines"][1]) == {
+        "action": "delete_routine",
+        "name": "bench_btc_price",
+    }
+
+
+# ── A refused undo is a failure, not a removal ────────────────────────────────
+class _MCPResult:
+    def __init__(self, text, is_error=False):
+        self.isError = is_error
+        self.content = [type("Block", (), {"text": text})()]
+
+
+def test_an_mcp_error_result_is_recognised_as_a_failure():
+    """MCP returns a refusal as an ordinary result — nothing raises."""
+    from bench.cleanup import tool_error
+
+    assert tool_error(_MCPResult("Unknown action: delete", is_error=True))
+    assert tool_error(_MCPResult("Unknown action: delete"))
+    assert tool_error(_MCPResult("Invalid action 'delete'"))
+
+
+def test_a_successful_undo_is_not_mistaken_for_an_error():
+    from bench.cleanup import tool_error
+
+    assert tool_error(_MCPResult("Deleted routine bench_btc_price")) is None
+    assert tool_error(None) is None
+    # A payload that merely mentions the word must not trip it.
+    assert tool_error(_MCPResult("routine states: ok = fine | error = failed")) is None
