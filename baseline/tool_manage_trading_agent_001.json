@@ -1,6 +1,6 @@
 {
   "case_id": "tool_manage_trading_agent_001",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 9.116,
-  "timestamp": "2026-08-12T06:19:15.776452+00:00"
+  "latency_s": 14.647,
+  "timestamp": "2026-08-12T13:32:35.382038+00:00"
 }

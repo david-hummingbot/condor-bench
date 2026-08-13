@@ -64,7 +64,16 @@ def _parse(raw: str) -> tuple[float, str]:
 
 
 def is_infra_failure(text: str) -> bool:
-    """True when the model never produced a usable answer due to infra/provider limits."""
+    """True when the model never produced a usable answer due to infra/provider limits.
+
+    **Pass the model's own output, never the judge transcript.** The transcript embeds
+    digested tool results, and condor's own skill files discuss rate limits in prose:
+    `pmm_config_playbook/SKILL.md` ("more rate limit usage") and
+    `routine_cookbook/SKILL.md` ("bulk fetch many pairs / rate-limit"). A case whose
+    tool merely *returned* those words was scored a provider outage —
+    `agent_market_making_expert_002` went to 0.5132 and `tool_manage_skill_001` to
+    0.452, both on complete, fully grounded answers with every tool call succeeding.
+    """
     if not text or not text.strip():
         return False
     return any(p.search(text) for p in _INFRA_PATTERNS)
@@ -94,27 +103,47 @@ class AnswerQualityMetric:
         self.threshold = threshold
         self._judge = ClaudeJudge()
 
-    async def a_score(self, input_text: str, actual_output: str) -> tuple[float, str]:
+    async def a_score(
+        self, input_text: str, actual_output: str, *, response: str | None = None
+    ) -> tuple[float | None, str]:
+        """Score the transcript. ``response`` is the model's own text, if separable.
+
+        The infra gate reads ``response`` rather than ``actual_output``: the latter is
+        the judge transcript, which carries tool output that can contain the very words
+        the gate looks for. See :func:`is_infra_failure`.
+
+        Returns ``None`` for the score when no judgement could be made — an infra
+        failure or a judge that did not answer. ``None`` redistributes this metric's
+        weight in the composite (see ``bench.scorer._composite``); 0.0 asserted that
+        the model gave a bad answer, which is a different and usually false claim.
+        """
+        gate = response if response is not None else actual_output
         if not actual_output.strip():
-            return 0.0, "No response produced."
-        if is_infra_failure(actual_output):
-            return 0.0, f"Infrastructure error (excluded from model-quality avg): {actual_output[:160]}"
+            return None, "No response produced."
+        if is_infra_failure(gate):
+            return None, f"Infrastructure error (not scored): {gate[:160]}"
         try:
             raw = await self._judge.a_generate(_build_prompt(input_text, actual_output))
             return _parse(raw)
         except Exception as exc:
-            return 0.0, f"Judge error: {exc}"
+            # A judge that returned malformed JSON has told us nothing about the model.
+            # `tool_explore_geckoterminal_002` lost the full 0.45 weight to
+            # "Judge error: Expecting ',' delimiter" on a correct, grounded answer.
+            return None, f"Judge error (not scored): {exc}"
 
-    def score(self, input_text: str, actual_output: str) -> tuple[float, str]:
+    def score(
+        self, input_text: str, actual_output: str, *, response: str | None = None
+    ) -> tuple[float | None, str]:
+        gate = response if response is not None else actual_output
         if not actual_output.strip():
-            return 0.0, "No response produced."
-        if is_infra_failure(actual_output):
-            return 0.0, f"Infrastructure error (excluded from model-quality avg): {actual_output[:160]}"
+            return None, "No response produced."
+        if is_infra_failure(gate):
+            return None, f"Infrastructure error (not scored): {gate[:160]}"
         try:
             raw = self._judge.generate(_build_prompt(input_text, actual_output))
             return _parse(raw)
         except Exception as exc:
-            return 0.0, f"Judge error: {exc}"
+            return None, f"Judge error (not scored): {exc}"
 
     def passes(self, score: float) -> bool:
         return score >= self.threshold

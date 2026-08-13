@@ -54,12 +54,31 @@ _KEY_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _lookup(args: dict[str, Any], key: str) -> Any:
-    """Read a pinned key from a call's args, accepting its documented aliases."""
+    """Read a pinned key from a call's args, accepting aliases and one nesting level.
+
+    Several tools take their real payload in a sub-object: `manage_executors(action=
+    "create")` wants `connector_name` and `trading_pair` inside `executor_config`,
+    where the top-level keys of the same name are the *filter* args for
+    `positions_summary`. Reading only the top level scored the correct call
+    `actual: null` on both keys — `tool_manage_executors_002` lost the whole
+    tool_params weight for putting the values exactly where the tool documents them.
+
+    The descent is one level and stops at the first hit, so a pin can be written in
+    either shape and still means the same thing.
+    """
     if key in args:
         return args[key]
     for alias in _KEY_ALIASES.get(key, ()):
         if alias in args:
             return args[alias]
+    names = (key, *_KEY_ALIASES.get(key, ()))
+    for value in args.values():
+        nested = _as_dict(value)
+        if not nested:
+            continue
+        for name in names:
+            if name in nested:
+                return nested[name]
     return None
 
 
@@ -200,7 +219,7 @@ def _matches(actual: Any, expected: Any) -> bool:
             # Scalar-vs-list tolerance: several tools accept trading_pair or
             # trading_pairs for the same intent.
             return any(_matches(item, expected) for item in actual)
-        return str(actual).strip().casefold() == expected.strip().casefold()
+        return _norm_text(actual) == _norm_text(expected)
 
     if isinstance(expected, (list, tuple)):
         if not isinstance(actual, (list, tuple)):
@@ -225,6 +244,18 @@ def _matches(actual: Any, expected: Any) -> bool:
         return all(_matches(actual_dict.get(k), v) for k, v in expected.items())
 
     return actual == expected
+
+
+def _norm_text(value: Any) -> str:
+    """Compare strings ignoring case, surrounding space and trailing sentence marks.
+
+    Free-text pins were punctuation-exact: `tool_send_notification_002` pins
+    `text="funding check complete"` and the model sent "funding check complete." —
+    copying the full stop from the question's own sentence — which scored 0.0. The
+    sister case only escaped by luck. Trailing `.` and `!` never change what a pinned
+    value *means*, so they are not a thing to test.
+    """
+    return str(value).strip().rstrip(".!").strip().casefold()
 
 
 def _coerce_number(value: Any) -> float | None:

@@ -32,7 +32,18 @@ from metrics.tool_accuracy import normalize_tool_name
 # as a protocol error. FastMCP hands these back as ordinary text, so a caller that
 # only checks for exceptions sees a successful call returning prose.
 _ERROR_PATTERNS = (
-    re.compile(r"\berror\b\s*[:=]", re.I),
+    # `\berror\b\s*[:=]` only catches "Error:" with nothing between. The failures that
+    # actually mattered in the last run all put words there or none at all, so hard
+    # failures scored a perfect 1.0 while a *recoverable* "Error: Failed to get schema"
+    # scored 0.0 — the metric was inverted exactly where it counts:
+    #   "Error creating executor: 500, message=... missing 2 required positional
+    #    arguments: 'binance_api_key'"   → absent keys, scored 1.0
+    #   "Error executing tool consult: API error (401): Invalid token" → scored 1.0
+    re.compile(r"\berror\b(?:\s+\w+){0,4}\s*[:=]", re.I),
+    re.compile(r"\bapi\s+error\b\s*\(?\s*\d{3}", re.I),
+    re.compile(r"\b[45]\d{2}\s*,\s*message\s*=", re.I),
+    re.compile(r"\binvalid\s+token\b", re.I),
+    re.compile(r"\bmissing\s+\d+\s+required\b", re.I),
     re.compile(r"\btraceback\b", re.I),
     re.compile(r"\b(?:4\d{2}|5\d{2})\s+(?:client|server)?\s*error", re.I),
     re.compile(r"\bunauthoriz(?:ed|ation)\b", re.I),

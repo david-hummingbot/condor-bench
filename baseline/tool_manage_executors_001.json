@@ -1,6 +1,6 @@
 {
   "case_id": "tool_manage_executors_001",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 6.669,
-  "timestamp": "2026-08-12T06:15:20.306887+00:00"
+  "latency_s": 9.816,
+  "timestamp": "2026-08-12T13:28:35.742175+00:00"
 }

@@ -38,19 +38,43 @@ from condor_compat.acp.client import (
 )
 
 from bench.mcp_provider import build_mcp_configs, wiring_metadata
-from bench.tool_digest import DEFAULT_DIGEST_CHARS, digest_tool_output
+from bench.tool_digest import DEFAULT_DIGEST_CHARS, annotate_epochs, digest_tool_output
 from config import condor_path
 
 # ── Agent instructions ─────────────────────────────────────────────────────────
 _AGENT_MD = Path(__file__).parent.parent / "condor_compat" / "agents" / "condor" / "AGENT.md"
 _AGENT_INSTRUCTIONS: str = _AGENT_MD.read_text() if _AGENT_MD.exists() else ""
 
+# Phrasings that mean "I have everything I need but I am gating on you". condor's own
+# prompt tells the assistant to "Confirm dangerous actions", so a destructive case that
+# does not recognise the gate scores a model for obeying its instructions:
+# `tool_set_leverage_001` and `_002` both asked and made zero calls, for 0.512 each.
+#
+# Two bugs were in the old pattern. `\bproceed\?\b` never matched a sentence ending
+# "Proceed?" — `\b` after `\?` requires a word character *following* the question mark —
+# and the verb list after "want me to" was limited to create/deploy/run, missing "set",
+# "switch" and every other action. The verb is now open-ended and the trailing `\b` is
+# gone.
+#
+# A third miss: `agent_condor_005` wrote "let me confirm the parameters" / "Confirm and
+# I'll delegate…" — neither matched `please confirm` nor `confirm (?:with|before|…)`,
+# so auto-confirm never fired and a fully-specified create scored tool_accuracy 0.
 _CONFIRM_RE = re.compile(
-    r"(shall i|do you want(?: me)? to|please confirm|confirm (?:with|before|deploy|to)|"
-    r"yes/no|reply (?:with )?(?:yes|confirm)|\bproceed\?\b|want me to (?:create|deploy|run))",
+    r"(shall i|should i|do you want(?: me)? to|would you like|please confirm|"
+    r"let me confirm|confirm (?:with|before|deploy|to|and|the parameters)|"
+    r"to confirm\b|yes/no|"
+    r"reply (?:with )?(?:yes|confirm)|\bproceed\b\s*\?|"
+    r"want me to \w+|go ahead\s*\?)",
     re.I,
 )
 _AUTO_CONFIRM_MSG = "Yes, proceed. Deploy / execute with the parameters you proposed."
+
+# Characters the whole tool log may occupy in the judge transcript, and the smallest
+# useful per-call digest. The judge prompt caps its input at
+# `metrics.answer_quality.JUDGE_INPUT_CHARS` (8000); leaving room for the response and
+# the turn scaffolding puts the log's share near 5500.
+_JUDGE_TOOL_LOG_BUDGET = 5500
+_MIN_DIGEST_CHARS = 220
 
 
 def _build_consult_prompt(question: str, instructions: str | None = None) -> str:
@@ -290,7 +314,7 @@ class BenchmarkResult:
             if c.get("origin", "mcp") != "mcp"
         ]
 
-    def transcript_for_judge(self, *, output_chars: int = DEFAULT_DIGEST_CHARS) -> str:
+    def transcript_for_judge(self, *, output_chars: int | None = None) -> str:
         """Full transcript with the tool log, for the quality judge.
 
         Tool *outputs* are included, not just names. The judge is instructed to
@@ -309,6 +333,16 @@ class BenchmarkResult:
             return ""
         if len(self.turns) == 1 and not self.turns[0].tool_calls:
             return self.turns[0].response
+
+        # Share the log budget across the calls rather than giving each the full digest
+        # allowance: eight calls at 1600 chars produced ~13k characters against an 8000
+        # cap, so a third of the log was unreachable however it was ordered.
+        if output_chars is None:
+            total_calls = sum(len(t.tool_calls) for t in self.turns) or 1
+            output_chars = max(
+                _MIN_DIGEST_CHARS, _JUDGE_TOOL_LOG_BUDGET // total_calls
+            )
+            output_chars = min(output_chars, DEFAULT_DIGEST_CHARS)
 
         outputs_by_id = {
             r.get("tool_call_id"): r.get("output")
@@ -335,6 +369,17 @@ class BenchmarkResult:
             if not turn.tool_calls:
                 lines.append("Tools called: (none)")
             else:
+                # Name every call before logging any of them. The judge prompt hard
+                # truncates at JUDGE_INPUT_CHARS, and the tool log is the tail, so on a
+                # long turn the *last* digest fell off the end — and the judge concluded
+                # the call never happened. `agent_directional_trader_002` was cut to 0.55
+                # for "never calling read_file on windows_and_costs.md" and "fabricating"
+                # a table copied verbatim from the file that call returned. A roster that
+                # survives truncation makes that particular wrong conclusion impossible.
+                roster = ", ".join(
+                    str(c.get("tool", "")) for c in turn.tool_calls
+                )
+                lines.append(f"Tools called ({len(turn.tool_calls)}), in order: {roster}")
                 lines.append("Tool log:")
                 for call in turn.tool_calls:
                     name = str(call.get("tool", ""))
@@ -343,7 +388,11 @@ class BenchmarkResult:
                     if output is None:
                         queue = outputs_by_name.get(name)
                         output = queue.pop(0) if queue else None
-                    lines.append(f"  {name}({_compact(args, 300)})")
+                    # Epochs are spelled out: the judge reads these numbers as-is
+                    # and cannot convert them, so a valid `start_time` once read as
+                    # "likely a future/incorrect epoch" and cost a correct answer
+                    # 0.25 of its quality score.
+                    lines.append(f"  {name}({_compact(annotate_epochs(args), 300)})")
                     if output is None:
                         lines.append("    → (no output captured)")
                     else:
@@ -739,6 +788,31 @@ async def run_tick(
     )
 
 
+def tick_agent_id(case: Any) -> str:
+    """The agent_id condor's journal tools can actually resolve.
+
+    condor builds this as ``f"{agent.slug}.{strategy.slug}_{session_num}"``
+    (``condor/agents/engine.py:136,160``) and `resolve_agent_dirs` parses it back the
+    same way — it takes everything before the *last* underscore as the strategy path and
+    the remainder as the session number.
+
+    Bench sent ``f"bench-{case.id}"``, e.g. ``bench-t002``. That has no underscore at
+    all, so `resolve_agent_dirs` hit `rfind("_") == -1` and returned `(None, None)`
+    before looking at anything on disk. Every tick journal write therefore answered
+    ``{"error": "no journal available for this agent"}`` — unconditionally, for every
+    tick case, however the model behaved. Four cases pin `trading_agent_journal_write`
+    as an expected call and could never earn its live validity.
+
+    The id being well-formed is necessary but not sufficient: the strategy directory has
+    to exist too (``agents/{slug}/strategies/{case_id}/sessions/session_1``). Until the
+    probe agents are provisioned the write still fails — but now with a resolvable id, so
+    the failure is about provisioning rather than about a malformed string, and
+    :func:`bench.scorer._detect_harness_artifact` can name it.
+    """
+    slug = getattr(case, "agent_slug", None) or "bench_tick"
+    return f"{slug}.{case.id}_1"
+
+
 def build_tick_prompt_for_case(case: Any, model: str) -> str:
     from condor_compat.agents.prompts import build_tick_prompt
     agent = SimpleNamespace(
@@ -753,7 +827,7 @@ def build_tick_prompt_for_case(case: Any, model: str) -> str:
         agent=agent, strategy=strategy, config=case.config,
         core_data=case.core_data, learnings=case.learnings, summary=case.summary,
         recent_decisions=case.recent_decisions, risk_state=case.risk_state,
-        tick_number=case.tick_number, agent_id=f"bench-{case.id}",
+        tick_number=case.tick_number, agent_id=tick_agent_id(case),
         cached_routines_section="", user_memory="", skills_index="",
     )
 

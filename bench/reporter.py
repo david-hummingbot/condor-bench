@@ -147,7 +147,11 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
     if not scorecards:
         return {"model": model, "cases": 0}
 
-    valid = [sc for sc in scorecards if sc.error is None]
+    # A harness artifact is not a score. `_domain_breakdown` has always dropped
+    # them; the headline did not, so six tick cases skipped by a market-warmup
+    # timeout entered composite_avg and pass_rate as 0.0 and read as the model
+    # failing them. One definition of "scored" for both.
+    valid = [sc for sc in scorecards if sc.error is None and not sc.harness_artifact]
     n = len(valid) or 1
     with_tools = [s for s in valid if s.tool_accuracy is not None]
     with_params = [s for s in valid if s.tool_params is not None]

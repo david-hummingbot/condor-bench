@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -42,6 +43,8 @@ if str(ROOT) not in sys.path:
 load_dotenv(ROOT / ".env")
 RESULTS_DIR = ROOT / "results"
 FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"
+
+log = logging.getLogger(__name__)
 
 # active run state: run_id -> dict
 _active_runs: dict[str, dict[str, Any]] = {}
@@ -209,10 +212,12 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.cleanup import teardown
     from bench.client import case_input_text, run_case
     from bench.dataset import case_prompt_map, filter_cases, is_mutating, load_all_cases
+    from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.mcp_provider import target_banner
+    from bench.probe_journal import ensure_probe_journal
     from bench.reporter import save_run
-    from bench.scorer import score_case
-    from config import CASE_TIMEOUT_S, build_run_pin
+    from bench.scorer import score_case, timeout_card
+    from config import build_run_pin, case_timeout_s
 
     state = _active_runs[run_id]
     state["status"] = "running"
@@ -238,6 +243,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             domain=req.domain,
             category=req.category,
             layers=layers,
+            risk_levels=req.risk_levels,
         )
         if not cases:
             raise ValueError("No cases matched the selected filters.")
@@ -265,6 +271,41 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             env_backup: dict[str, str | None] = {}
             scorecards = []
             responses: dict[str, str] = {}
+
+            def _persist(*, partial: bool):
+                """Write this model's scorecards. Returns the run dir, or None.
+
+                Shared by the normal path and the cancel path so a cancelled run
+                keeps what it measured. `save_run` is synchronous, which is what
+                makes it safe to call while unwinding a cancellation — an `await`
+                there would be cancelled again before it finished.
+                """
+                if not scorecards:
+                    return None
+                pin = build_run_pin(
+                    run_type="adhoc",
+                    # The cases actually scored, not the ones planned: a pin that
+                    # claimed all 93 on a run cancelled at 12 would misdescribe
+                    # its own coverage.
+                    case_ids=[sc.case_id for sc in scorecards]
+                    if partial
+                    else [c.id for c in cases],
+                    models=[norm_key],
+                    shared_loaded=True,
+                )
+                if partial:
+                    pin["partial"] = True
+                    pin["cases_planned"] = len(cases)
+                    pin["cases_scored"] = len(scorecards)
+                return save_run(
+                    norm_key,
+                    scorecards,
+                    responses,
+                    uuid.uuid4().hex[:8],
+                    prompts=prompts,
+                    extra_summary=pin,
+                )
+
             try:
                 for k, v in env_vars.items():
                     env_backup[k] = os.environ.get(k)
@@ -294,35 +335,60 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     sc_dict: dict = {}
                     response = ""
                     try:
-                        result = await asyncio.wait_for(
-                            run_case(case, norm_key), timeout=CASE_TIMEOUT_S
-                        )
-                        baseline = store.load(case.id)
-                        baseline_latency = baseline.latency_s if baseline else result.latency_s
-                        sc = await score_case(case, result, baseline_latency)
-                        sc_dict = sc.as_dict()
-                        sc_dict["question"] = question
-                        response = result.response
-                        scorecards.append(sc)
-                        responses[case.id] = response
-
-                        if is_mutating(case):
-                            report = await teardown(
-                                result,
-                                norm_key,
-                                agent_slug=getattr(case, "agent_slug", None),
+                        ensure_probe_journal(case)
+                        warmup = await ensure_markets_for_case(case)
+                        if not warmup.ok:
+                            sc = warmup_failure_card(case, norm_key, warmup)
+                            sc_dict = sc.as_dict()
+                            sc_dict["question"] = question
+                            scorecards.append(sc)
+                        else:
+                            # Baseline first: it sizes the ceiling, so a case gets room
+                            # proportional to how slow it has always been.
+                            baseline = store.load(case.id)
+                            timeout_s = case_timeout_s(
+                                baseline.latency_s if baseline else None
                             )
-                            if not report.clean:
-                                await _emit(run_id, {
-                                    "type": "cleanup",
-                                    "case_id": case.id,
-                                    "model": model_key,
-                                    "report": report.as_dict(),
-                                })
+                            result = await asyncio.wait_for(
+                                run_case(case, norm_key), timeout=timeout_s
+                            )
+                            baseline_latency = (
+                                baseline.latency_s if baseline else result.latency_s
+                            )
+                            sc = await score_case(case, result, baseline_latency)
+                            sc_dict = sc.as_dict()
+                            sc_dict["question"] = question
+                            response = result.response
+                            scorecards.append(sc)
+                            responses[case.id] = response
+
+                            if is_mutating(case):
+                                report = await teardown(
+                                    result,
+                                    norm_key,
+                                    agent_slug=getattr(case, "agent_slug", None),
+                                )
+                                if not report.clean:
+                                    await _emit(run_id, {
+                                        "type": "cleanup",
+                                        "case_id": case.id,
+                                        "model": model_key,
+                                        "report": report.as_dict(),
+                                    })
                     except asyncio.CancelledError:
                         raise
                     except asyncio.TimeoutError:
-                        error = f"timed out after {CASE_TIMEOUT_S:.0f}s"
+                        # Record a card, not just an event: the dashboard already showed
+                        # the error, but the saved run had no row for the case at all, so
+                        # a thinned domain left no trace in the matrix.
+                        base = store.load(case.id)
+                        base_s = base.latency_s if base else 0.0
+                        limit = case_timeout_s(base_s or None)
+                        sc = timeout_card(case, norm_key, limit, base_s)
+                        sc_dict = sc.as_dict()
+                        sc_dict["question"] = question
+                        scorecards.append(sc)
+                        error = f"timed out after {limit:.0f}s"
                     except Exception as exc:
                         error = str(exc)
 
@@ -339,25 +405,26 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                         "total": total,
                     })
 
-                if scorecards:
-                    run_id_short = uuid.uuid4().hex[:8]
-                    pin = build_run_pin(
-                        run_type="adhoc",
-                        case_ids=[c.id for c in cases],
-                        models=[norm_key],
-                        shared_loaded=True,
-                    )
-                    run_dir = save_run(
-                        norm_key,
-                        scorecards,
-                        responses,
-                        run_id_short,
-                        prompts=prompts,
-                        extra_summary=pin,
-                    )
+                run_dir = _persist(partial=False)
+                if run_dir is not None:
                     await _emit(run_id, {"type": "model_done", "model": model_key, "run_dir": run_dir.name})
 
             except asyncio.CancelledError:
+                # Cancelling used to discard everything scored so far: `save_run` sits
+                # after the case loop, and the cancellation unwound straight past it.
+                # A run stopped at case 82 of 93 threw away 81 scored cases and left
+                # `results/` empty, which for an ACP model is hours of real spend.
+                partial_dir = _persist(partial=True)
+                if partial_dir is not None:
+                    log.warning(
+                        "run cancelled — saved %d scored case(s) to %s",
+                        len(scorecards),
+                        partial_dir.name,
+                    )
+                    state["partial_run_dirs"] = [
+                        *state.get("partial_run_dirs", []),
+                        partial_dir.name,
+                    ]
                 raise
             finally:
                 for k, v in env_backup.items():
@@ -624,9 +691,18 @@ async def get_datasets():
     # cannot match anything. With the combinations themselves in hand the form can
     # offer only what exists and count the selection exactly, instead of letting a
     # run be submitted and refused with "No cases matched the selected filters."
-    combos: dict[tuple[str, str, str], int] = {}
+    # Risk joins the key rather than getting its own tally: it cuts across every
+    # other axis (a `tool:leverage` case is destructive, a `tool:servers` one is
+    # read-only), so a separate count would let the form offer "Tools + read_only"
+    # and then report a total that ignored the risk selection.
+    combos: dict[tuple[str, str, str, str], int] = {}
     for case in cases:
-        key = (str(case.type), str(case.domain), str(case.category or ""))
+        key = (
+            str(case.type),
+            str(case.domain),
+            str(case.category or ""),
+            str(case.risk_level),
+        )
         combos[key] = combos.get(key, 0) + 1
 
     return {
@@ -635,8 +711,14 @@ async def get_datasets():
         "domains": _tally(lambda c: c.domain),
         "layer_domains": {k: dict(sorted(v.items())) for k, v in sorted(layer_domains.items())},
         "combos": [
-            {"layer": layer, "domain": domain, "category": category, "count": count}
-            for (layer, domain, category), count in sorted(combos.items())
+            {
+                "layer": layer,
+                "domain": domain,
+                "category": category,
+                "risk_level": risk,
+                "count": count,
+            }
+            for (layer, domain, category, risk), count in sorted(combos.items())
         ],
         "routing_domains": sorted(
             {c.domain for c in cases if is_routing_domain(c.domain)}
@@ -723,9 +805,14 @@ class SettingsUpdate(BaseModel):
 
 @app.put("/api/settings")
 async def api_put_settings(body: SettingsUpdate):
-    from bench.settings_store import update_settings
+    from bench.settings_store import SettingsError, update_settings
 
-    return update_settings(body.updates)
+    try:
+        return update_settings(body.updates)
+    except SettingsError as exc:
+        # A rejected value is operator error, not a server fault — 400 so the form can
+        # show it next to the field instead of a generic failure.
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/providers")
@@ -801,6 +888,9 @@ class RunRequest(BaseModel):
     domain: str | None = None
     # Dataset layers: consult | tick | tool | agent. None means all four.
     layers: list[str] | None = None
+    # read_only | mutating | destructive. None means all three — a set, not a
+    # ceiling, so "read_only + destructive" is expressible.
+    risk_levels: list[str] | None = None
     consult_only: bool = False
     tick_only: bool = False
 

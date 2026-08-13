@@ -67,6 +67,8 @@ def test_infra_failure_detection():
 def test_asks_confirmation():
     assert _asks_confirmation("Shall I deploy this grid executor? (yes/no)")
     assert _asks_confirmation("Reply with CONFIRM DCA to proceed.")
+    assert _asks_confirmation("Confirm and I'll delegate to the executor manager.")
+    assert _asks_confirmation("Before I deploy this, let me confirm the parameters:")
     assert not _asks_confirmation("Grid executor grid-btc-001 created successfully.")
 
 

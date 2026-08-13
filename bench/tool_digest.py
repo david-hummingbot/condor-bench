@@ -32,6 +32,50 @@ _SUMMARY_LINE_RE = re.compile(
 )
 _PORTFOLIO_HINTS = ("portfolio overview", "token balances", "total balance value")
 
+# Unix epochs the judge would otherwise have to convert in its head. The bands are
+# deliberately narrow — 2001-09-09 to 2096 in seconds, the same window in
+# milliseconds — because anything outside them is far more likely to be a quantity
+# than a timestamp.
+_EPOCH_S_RANGE = (1_000_000_000, 4_000_000_000)
+_EPOCH_MS_RANGE = (1_000_000_000_000, 4_000_000_000_000)
+
+
+def annotate_epochs(args: Any) -> Any:
+    """Copy ``args`` with epoch-looking numbers spelled out as UTC timestamps.
+
+    The judge reads tool *arguments* verbatim and cannot do the arithmetic, so it
+    guesses — and on c008 it guessed wrong, calling ``start_time=1786406400``
+    "likely a future/incorrect epoch" and docking a correct answer from 1.0 to 0.75.
+    That value is 2026-08-11T00:00:00Z, a sound reading of "the last 24 hours".
+
+    Rendering it as ``1786406400 (2026-08-11T00:00:00Z)`` removes the guess instead
+    of asking the judge to be better at mental arithmetic. Applies to any
+    time-windowed case, which is where this failure recurs.
+    """
+    from datetime import datetime, timezone
+
+    def _annotate(value: Any) -> Any:
+        # bool is an int subclass, and True/False are never timestamps.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if isinstance(value, dict):
+                return {k: _annotate(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_annotate(v) for v in value]
+            return value
+        for low, high, divisor in (
+            (*_EPOCH_S_RANGE, 1),
+            (*_EPOCH_MS_RANGE, 1000),
+        ):
+            if low <= value < high:
+                try:
+                    stamp = datetime.fromtimestamp(value / divisor, timezone.utc)
+                except (OverflowError, OSError, ValueError):
+                    return value
+                return f"{value} ({stamp.strftime('%Y-%m-%dT%H:%M:%SZ')})"
+        return value
+
+    return _annotate(args)
+
 
 def digest_tool_output(
     tool_name: str,
@@ -252,7 +296,7 @@ def _digest_structured(text: str, structured: Any, *, max_chars: int) -> str:
             elif isinstance(value, list):
                 nested.append(f"  {_summarize_list_field(str(key), value)}")
             elif isinstance(value, dict):
-                nested.append(f"  {key}: object with {len(value)} keys")
+                nested.append(f"  {key}:\n{_digest_nested_dict(value, max_chars=per_payload)}")
             else:
                 nested.append(f"  {key}: {type(value).__name__}")
         # Prefer scalars the answer is likely to quote.
@@ -262,6 +306,43 @@ def _digest_structured(text: str, structured: Any, *, max_chars: int) -> str:
     if isinstance(structured, list):
         return "[digest] json list\n  " + _summarize_list_field("items", structured)
     return ""
+
+
+def _digest_nested_dict(value: dict, *, max_chars: int) -> str:
+    """Render one level inside a nested object instead of counting its keys.
+
+    `manage_routines(action="run")` answers
+    ``{"name": …, "status": "completed", "result": {"text": "<the whole report>", …}}``,
+    and the payload the answer quotes is `result.text`. The digester handled a long
+    string at the *top* level but rendered a nested object as "object with 5 keys", so
+    the judge read a grounded summary of a real 96-pair scan — BTC-USDT $7.2B volume,
+    APR-USDT +90.3% — and concluded it was fabricated, citing that very placeholder as
+    its reason. Scored 0.05 and 0.35 on two runs of the same correct answer.
+
+    One level deep only. Anything further is summarised, because the point is to surface
+    the citeable payload, not to pretty-print arbitrary structure.
+    """
+    lines: list[str] = []
+    payload_keys = [
+        k for k, v in value.items()
+        if isinstance(v, str) and len(v) > _SCALAR_PREVIEW_CHARS
+    ]
+    per_payload = max(300, (max_chars - 100) // max(1, len(payload_keys)))
+    for key, inner in value.items():
+        if key in payload_keys:
+            body = _digest_text_payload(str(inner), max_chars=per_payload)
+            lines.append(f"    {key}:")
+            lines.extend(f"      {ln}" for ln in body.splitlines())
+        elif isinstance(inner, (str, int, float, bool)) or inner is None:
+            rendered = inner if not isinstance(inner, str) else inner[:_SCALAR_PREVIEW_CHARS]
+            lines.append(f"    {key}: {rendered}")
+        elif isinstance(inner, list):
+            lines.append(f"    {_summarize_list_field(str(key), inner)}")
+        elif isinstance(inner, dict):
+            lines.append(f"    {key}: object with {len(inner)} keys")
+        else:
+            lines.append(f"    {key}: {type(inner).__name__}")
+    return "\n".join(lines[:30])
 
 
 def _digest_pipe_table(text: str, structured: Any, *, max_chars: int) -> str:
@@ -330,16 +411,94 @@ def _digest_generic_text(text: str, structured: Any, *, max_chars: int) -> str:
     return f"{text[:head]}\n…\n{text[-tail:]}"
 
 
+# How many rows of a list-of-records to actually show the judge, and how much of each.
+_LIST_ROWS = 15
+# Wide enough for slug + name + strategies=[…] before a truncated description.
+_LIST_ROW_CHARS = 220
+_LIST_NESTED_ITEMS = 6
+_LIST_NESTED_CHARS = 100
+# Strings longer than this are deferred so short citeables (and nested lists) fit.
+_LIST_LONG_SCALAR_CHARS = 48
+
+
 def _summarize_list_field(label: str, value: Any) -> str:
+    """Render a list field as rows, not just a count.
+
+    A count is unusable as evidence. The judge is asked to verify that figures in the
+    answer appear in tool output, and every list-returning tool — routines, servers,
+    agent definitions, orders, bots — was collapsed to "N items (e.g. keys: …)". So a
+    model that correctly named one continuous routine out of 29 was marked down for
+    "unverified implementation details": the names it cited had been deleted before the
+    judge ever saw them. `agent_condor_routine_003` scored 0.55 that way.
+
+    Nested *list* fields on each row used to be dropped entirely (only scalars were
+    kept). ``list_agent_definitions`` returns ``strategies: ["BTC-USDT Adaptive Grid",
+    …]`` per agent; c011 and ``tool_manage_trading_agent_001`` quoted those names and
+    were scored 0.35 / 0.55 for fabricating a column the digest had erased.
+
+    Rows are capped and the remainder is stated, mirroring the pipe-table digester —
+    the point is that *some* rows are citeable, not that all of them fit.
+    """
     if not isinstance(value, list):
         return f"{label}: {value!r}"
     if not value:
         return f"{label}: [] (0)"
-    sample = value[0]
-    if isinstance(sample, dict):
-        keys = ", ".join(list(sample.keys())[:6])
-        return f"{label}: {len(value)} items (e.g. keys: {keys})"
-    return f"{label}: {len(value)} items (e.g. {sample!r})"
+
+    shown, omitted = value[:_LIST_ROWS], max(0, len(value) - _LIST_ROWS)
+    lines = [f"{label}: {len(value)} items"]
+    for item in shown:
+        if isinstance(item, dict):
+            rendered = _format_record_row(item)
+        else:
+            rendered = str(item)
+        lines.append(f"  - {rendered[:_LIST_ROW_CHARS]}")
+    if omitted:
+        lines.append(f"  … {omitted} additional row(s) omitted")
+    return "\n".join(lines)
+
+
+def _format_record_row(item: dict) -> str:
+    """One list-of-dicts row: short scalars and nested scalar lists before long text.
+
+    ``description`` and similar long strings used to consume the whole row budget, so
+    even after nested lists were included they still fell past ``_LIST_ROW_CHARS``.
+    Short identifiers and list fields (name, strategies) are the citeable bits.
+    """
+    short: list[str] = []
+    nested_lists: list[str] = []
+    long: list[str] = []
+    for key, value in item.items():
+        if isinstance(value, list):
+            if value and not all(
+                isinstance(x, (str, int, float, bool)) or x is None for x in value
+            ):
+                continue
+            nested_lists.append(f"{key}={_format_scalar_list(value)}")
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            part = f"{key}={_scalar(value)}"
+            if isinstance(value, str) and len(value) > _LIST_LONG_SCALAR_CHARS:
+                long.append(part)
+            else:
+                short.append(part)
+    body = " ".join(short + nested_lists + long)
+    return body or ", ".join(list(item.keys())[:6])
+
+
+def _format_scalar_list(value: list, *, max_items: int = _LIST_NESTED_ITEMS,
+                        max_chars: int = _LIST_NESTED_CHARS) -> str:
+    shown = value[:max_items]
+    body = ", ".join(_scalar(x) for x in shown)
+    omitted = len(value) - len(shown)
+    if omitted:
+        body = f"{body}, … +{omitted}"
+    if len(body) > max_chars:
+        body = body[: max_chars - 1] + "…"
+    return f"[{body}]"
+
+
+def _scalar(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return text[:60]
 
 
 def _row_sort_key(parts: list[str]) -> float:

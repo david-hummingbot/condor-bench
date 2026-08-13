@@ -1,6 +1,6 @@
 {
   "case_id": "tool_journal_write_001",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 16.651,
-  "timestamp": "2026-08-12T06:20:41.385301+00:00"
+  "latency_s": 14.035,
+  "timestamp": "2026-08-12T13:34:44.898355+00:00"
 }

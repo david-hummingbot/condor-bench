@@ -38,6 +38,25 @@ def _resolve_layers(
     return None
 
 
+def _resolve_risk_levels(risk: Optional[str]) -> Optional[list[str]]:
+    """Parse ``--risk read_only,destructive`` into a set of levels, or None for all."""
+    if not risk:
+        return None
+    # Imported here, not at module scope: every bench import in this file is lazy so
+    # `--help` does not pay for loading the datasets and config.
+    from bench.dataset import RISK_LEVELS
+
+    chosen = [level.strip() for level in risk.split(",") if level.strip()]
+    unknown = [level for level in chosen if level not in RISK_LEVELS]
+    if unknown:
+        console.print(
+            f"[red]Unknown risk level(s): {', '.join(unknown)}. "
+            f"Choose from {', '.join(RISK_LEVELS)}.[/red]"
+        )
+        raise typer.Exit(2)
+    return chosen
+
+
 @app.command()
 def baseline(
     overwrite: bool = typer.Option(False, help="Regenerate existing baselines"),
@@ -83,6 +102,11 @@ def test(
     layers: Optional[str] = typer.Option(
         None, help=f"Comma-separated dataset layers ({', '.join(LAYER_CHOICES)})"
     ),
+    risk: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated risk levels (read_only, mutating, destructive). "
+        "A set, not a ceiling — '--risk read_only' is the cheap tool-calling probe.",
+    ),
     consult_only: bool = typer.Option(False, help="Only consult cases"),
     tick_only: bool = typer.Option(False, help="Only tick cases"),
 ) -> None:
@@ -107,6 +131,7 @@ def test(
         domain=domain,
         category=category,
         layers=_resolve_layers(consult_only, tick_only, layers),
+        risk_levels=_resolve_risk_levels(risk),
     )
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
@@ -151,15 +176,32 @@ async def _run_cases(cases, model: str, store):
     from bench.cleanup import teardown
     from bench.client import run_case
     from bench.dataset import is_mutating
+    from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
+    from bench.probe_journal import ensure_probe_journal
     from bench.scorer import score_case
-    from config import CASE_TIMEOUT_S, PASS_THRESHOLD
+    from bench.scorer import timeout_card
+    from config import PASS_THRESHOLD, case_timeout_s
 
     scorecards, responses = [], {}
     for case in cases:
         console.print(f"  [dim]{case.id}[/dim] ({case.type})", end=" ")
         try:
-            result = await asyncio.wait_for(run_case(case, model), timeout=CASE_TIMEOUT_S)
+            journal_note = ensure_probe_journal(case)
+            warmup = await ensure_markets_for_case(case)
+            if not warmup.ok:
+                card = warmup_failure_card(case, model, warmup)
+                scorecards.append(card)
+                console.print(f"→ [yellow]harness skip[/yellow]")
+                console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
+                continue
+            for note in ([journal_note] if journal_note else []) + warmup.notes:
+                console.print(f"      [dim]{note}[/dim]")
+
+            # Baseline first: the ceiling is sized from it, so a slow case gets room
+            # proportional to how slow it has always been.
             baseline = store.load(case.id)
+            timeout_s = case_timeout_s(baseline.latency_s if baseline else None)
+            result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
             baseline_latency = baseline.latency_s if baseline else result.latency_s
             card = await score_case(case, result, baseline_latency)
             scorecards.append(card)
@@ -191,7 +233,17 @@ async def _run_cases(cases, model: str, store):
                         f"{row.get('identifier')} — {row.get('error') or row.get('reason', 'manual')}[/yellow]"
                     )
         except asyncio.TimeoutError:
-            console.print(f"[red]TIMEOUT after {CASE_TIMEOUT_S:.0f}s — excluded[/red]")
+            # Record it. Appending nothing made the case vanish from the run entirely,
+            # so a thinned domain looked like a domain nobody had asked about.
+            baseline = store.load(case.id)
+            base_s = baseline.latency_s if baseline else 0.0
+            scorecards.append(
+                timeout_card(case, model, case_timeout_s(base_s or None), base_s)
+            )
+            console.print(
+                f"[red]TIMEOUT after {case_timeout_s(base_s or None):.0f}s — "
+                "recorded as a harness artifact[/red]"
+            )
         except Exception as exc:
             console.print(f"[red]ERROR: {exc}[/red]")
     return scorecards, responses
@@ -205,6 +257,11 @@ def sweep(
     domain: Optional[str] = typer.Option(None, "-d", help="Only this routing domain"),
     layers: Optional[str] = typer.Option(
         None, help=f"Comma-separated dataset layers ({', '.join(LAYER_CHOICES)})"
+    ),
+    risk: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated risk levels (read_only, mutating, destructive). "
+        "A set, not a ceiling — '--risk read_only' is the cheap tool-calling probe.",
     ),
     only: Optional[str] = typer.Option(
         None, help="Comma-separated model keys — sweep just these from the registry"
@@ -251,6 +308,7 @@ def sweep(
         load_all_cases(),
         domain=domain,
         layers=_resolve_layers(False, False, layers),
+        risk_levels=_resolve_risk_levels(risk),
     )
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
@@ -554,7 +612,9 @@ def dashboard() -> None:
 def _print_summary(scorecards, model: str, pass_threshold: float) -> None:
     if not scorecards:
         return
-    valid = [sc for sc in scorecards if sc.error is None]
+    # Same "scored" set the saved summary uses: a harness artifact is a case that
+    # did not measure the model, so averaging its 0.0 in would report the harness.
+    valid = [sc for sc in scorecards if sc.error is None and not sc.harness_artifact]
     n = len(valid) or 1
     console.print(f"\n[bold]{model}[/bold] — {len(valid)}/{len(scorecards)} cases scored")
     console.print(f"  Composite:      {sum(s.composite for s in valid)/n:.3f}")
@@ -589,7 +649,7 @@ def _print_summary(scorecards, model: str, pass_threshold: float) -> None:
     if artifacts:
         console.print(
             f"  [yellow]Harness artifacts: {len(artifacts)} case(s) excluded from "
-            "routing[/yellow]"
+            "the averages above and from routing[/yellow]"
         )
 
 

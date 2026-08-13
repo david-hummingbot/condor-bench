@@ -184,3 +184,34 @@ async def test_transport_failure_is_unknown(stub):
     stub(boom)
 
     assert await _probe_active_executors(URL, "bench", "pw", 5.0) is None
+
+
+def test_a_shell_that_merely_mentions_main_py_is_not_a_running_condor():
+    """The mismatch check must not fire on bench's own tooling.
+
+    Two condor checkouts ran side by side — a feature branch serving the live bot, and
+    `main`, where CONDOR_PATH pointed — so bench measured code that was not deployed and
+    its service tokens were rejected 401 by the running web API. The pre-flight now
+    catches that, but a substring test on the whole command line matched any shell script
+    containing the text "main.py", including the check's own diagnostics. A check that
+    fires on itself would block every run.
+    """
+    from bench.staging_health import is_condor_main_cmdline
+
+    assert is_condor_main_cmdline(["/usr/bin/python3", "main.py"])
+    assert is_condor_main_cmdline(["/venv/bin/python3", "/home/u/condor/main.py"])
+    assert is_condor_main_cmdline(["python", "main.py", "--verbose"])
+
+    # Not condor:
+    assert not is_condor_main_cmdline([])
+    assert not is_condor_main_cmdline(["/bin/bash", "-c", 'case "$c" in *main.py*)'])
+    assert not is_condor_main_cmdline(["python3", "-c", "print('main.py')"])
+    assert not is_condor_main_cmdline(["python3", "-m", "mcp_servers.condor"])
+    assert not is_condor_main_cmdline(["node", "main.py"])
+
+
+def test_the_checkout_detector_never_raises():
+    """Best effort by design: an empty list means "could not tell", not "nothing runs"."""
+    from bench.staging_health import running_condor_checkouts
+
+    assert isinstance(running_condor_checkouts(), list)

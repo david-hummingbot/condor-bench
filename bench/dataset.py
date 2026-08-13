@@ -430,8 +430,20 @@ def filter_cases(
     domain: str | None = None,
     category: str | None = None,
     layers: Iterable[str] | None = None,
+    risk_levels: Iterable[str] | None = None,
 ) -> list[Case]:
-    """Apply the CLI/dashboard filters in one place."""
+    """Apply the CLI/dashboard filters in one place.
+
+    ``risk_levels`` is a set, not a ceiling. A ceiling would imply the three levels
+    are ordered by cost, and for picking a workload they are not: "read_only plus
+    destructive" is a reasonable ask (probe the irreversible paths without the
+    bookkeeping of mutating cleanup) and no max-risk parameter can express it.
+
+    It exists for the small-model case. The 28 read-only cases in ``tools.jsonl``
+    reach 18 of the 24 tools with one call each, which is the cheapest honest answer
+    to "can this model drive an MCP tool at all" — and there was no way to ask for
+    them, because risk cuts across every other axis.
+    """
     out = list(cases)
     if layers:
         wanted = set(layers)
@@ -440,4 +452,7 @@ def filter_cases(
         out = [c for c in out if c.domain == domain]
     if category:
         out = [c for c in out if getattr(c, "category", "") == category]
+    if risk_levels:
+        risks = set(risk_levels)
+        out = [c for c in out if c.risk_level in risks]
     return out

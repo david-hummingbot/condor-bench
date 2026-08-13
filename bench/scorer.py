@@ -55,7 +55,9 @@ def normalize_expected_tools(expected_tools: list[str] | None) -> list[str] | No
 class ScoreCard:
     case_id: str
     model: str
-    answer_quality: float
+    # None when no judgement could be made — an infra failure or a judge that did not
+    # answer. Distinct from 0.0, which asserts the model gave a bad answer.
+    answer_quality: float | None
     answer_reason: str
     tool_accuracy: float | None  # None when no required expected_tools
     latency_score: float
@@ -120,7 +122,9 @@ class ScoreCard:
             "case_type": self.case_type,
             "domain": self.domain,
             "risk_level": self.risk_level,
-            "answer_quality": round(self.answer_quality, 4),
+            "answer_quality": (
+                round(self.answer_quality, 4) if self.answer_quality is not None else None
+            ),
             "answer_reason": self.answer_reason,
             "tool_accuracy": round(self.tool_accuracy, 4) if self.tool_accuracy is not None else None,
             "tool_params": round(self.tool_params, 4) if self.tool_params is not None else None,
@@ -156,9 +160,10 @@ def _composite(
     weights is always 1.0 and composites stay comparable across cases with
     different amounts of ground truth.
     """
-    quality = components.get("answer_quality") or 0.0
+    quality = components.get("answer_quality")
     total = 0.0
     absorbed = weights.get("answer_quality", 0.0)
+    scorable: list[tuple[str, float, float]] = []
     for name, weight in weights.items():
         if name == "answer_quality":
             continue
@@ -167,7 +172,22 @@ def _composite(
             absorbed += weight
             continue
         total += weight * value
-    return total + absorbed * quality
+        scorable.append((name, weight, value))
+
+    if quality is not None:
+        return total + absorbed * quality
+
+    # Quality is the absorber every other unscorable component folds into, so a None
+    # here cannot fall through to 0.0 — that would keep the absorbed weight in the
+    # denominator and score it zero, capping a flawless case at 0.55. Renormalise over
+    # whatever *was* measurable instead: "we could not judge the prose, so this is the
+    # score on the parts we could check."
+    measured_weight = sum(w for _, w, _ in scorable)
+    if not measured_weight:
+        # Nothing at all was scorable. 0.0 would read as a model failure; the caller
+        # marks these rows so the matrix excludes them.
+        return 0.0
+    return total / measured_weight
 
 
 async def score(
@@ -236,8 +256,11 @@ async def score(
             error=f"infra: {raw[:200]}",
         )
 
+    # `response=` is the gate input; the transcript is what the judge reads. Handing
+    # the transcript to the infra check let a skill file that mentions "rate limit"
+    # register as a provider outage.
     answer_quality, answer_reason = await _quality_metric.a_score(
-        input_text, result.transcript_for_judge()
+        input_text, result.transcript_for_judge(), response=result.response
     )
 
     required = normalize_expected_tools(expected_tools)
@@ -326,6 +349,17 @@ async def score(
     if post_condition_failed:
         composite = min(composite, POST_CONDITION_FAIL_CAP)
 
+    # An unjudgeable answer is not automatically an unusable row, and the two cases
+    # differ. An *infra* failure means the model never really answered, so the row is
+    # marked and the matrix drops it — the reason string used to promise that
+    # ("excluded from model-quality avg") while nothing set `error`, so a 0.0 sailed
+    # into the averages. A *judge* failure means the model answered and the judge did
+    # not: the tool evidence is still good, so the row stays and the composite is
+    # renormalised over what was measurable.
+    quality_infra = answer_quality is None and answer_reason.startswith(
+        "Infrastructure error"
+    )
+
     return _card(
         answer_quality=answer_quality,
         answer_reason=answer_reason,
@@ -337,10 +371,50 @@ async def score(
         live_validity=live_validity,
         latency_score=latency_score,
         composite=composite,
-        error=result.error,
+        error=result.error or (f"infra: {answer_reason[:200]}" if quality_infra else None),
         judge_usage=JUDGE_USAGE.delta_since(judge_before),
         tool_param_detail=param_detail,
         live_validity_detail=validity_detail,
+    )
+
+
+def timeout_card(case: Any, model: str, timeout_s: float, baseline_latency_s: float = 0.0):
+    """Scorecard for a case killed by the wall-clock ceiling.
+
+    A timeout used to append *nothing* in the CLI path, so the case simply vanished:
+    two `solana_dex_lp_expert` cases disappeared from a run and took 40% of that
+    domain's evidence with them, with no trace in the summary. Silence is the one thing
+    a benchmark must not do with a case it failed to measure — thin evidence has to look
+    thin.
+
+    Marked `harness_artifact` rather than scored 0.0, which is the same treatment market
+    warmup failures get (see :func:`bench.market_warmup.warmup_failure_card`): the model
+    was never measured, so the row is excluded from the matrix instead of being averaged
+    in as a bad answer.
+    """
+    return ScoreCard(
+        case_id=getattr(case, "id", "?"),
+        model=model,
+        category=getattr(case, "category", "") or "",
+        case_type=getattr(case, "type", "") or "",
+        domain=getattr(case, "domain", "") or "",
+        risk_level=getattr(case, "risk_level", "read_only") or "read_only",
+        answer_quality=None,
+        answer_reason=f"timed out after {timeout_s:.0f}s",
+        tool_accuracy=None,
+        tool_params=None,
+        live_validity=None,
+        latency_score=0.0,
+        composite=0.0,
+        latency_s=timeout_s,
+        baseline_latency_s=baseline_latency_s,
+        expected_tools=list(getattr(case, "expected_tools", []) or []),
+        harness_artifact=(
+            f"case exceeded its {timeout_s:.0f}s ceiling "
+            f"(baseline {baseline_latency_s:.1f}s) — the model was not measured, so this "
+            "row is excluded rather than scored"
+        ),
+        error=f"timeout after {timeout_s:.0f}s",
     )
 
 
@@ -374,14 +448,33 @@ def _detect_harness_artifact(
             "set differs from the PydanticAI path, so tool scores are not comparable"
         )
 
+    from metrics.tool_accuracy import normalize_tool_name
+
+    # A journal the harness never provisioned is not a model failure. condor resolves
+    # a journal from `{agent_slug}.{strategy_slug}_{n}` to a directory on disk, so a
+    # probe agent that does not exist there answers "no journal available for this
+    # agent" no matter what the model did. Four tick cases pin
+    # `trading_agent_journal_write` as an expected call, and every one of them scored
+    # live_validity 0.0 on that — then lost answer_quality again for "silently ignoring
+    # the failed journal write". Both deductions were the fixture's absence.
+    for record in getattr(result, "tool_responses", []) or []:
+        tool = normalize_tool_name(str(record.get("tool", "")))
+        if not tool.startswith("trading_agent_journal"):
+            continue
+        text = str(record.get("output") or "")
+        if "no journal available for this agent" in text.lower():
+            return (
+                "the journal for this case's probe agent does not exist on the condor "
+                "checkout, so the write could not succeed however the model behaved — "
+                "provision agents/<slug>/strategies/<case_id>/sessions/session_1"
+            )
+
     # A case cannot fail on a tool it was never shown. The model-size cap trims
     # `tool_defs[:limit]`, so a case whose expected tool sorted past the cut is
     # measuring the harness, not the model — the failure mode that made scoping
     # specialists to their grant worth doing in the first place.
     offered = wiring.get("offered_tools")
     if isinstance(offered, list) and offered and expected_tools:
-        from metrics.tool_accuracy import normalize_tool_name
-
         have = {normalize_tool_name(str(t)) for t in offered}
         missing = sorted(
             {normalize_tool_name(str(t)) for t in expected_tools} - have

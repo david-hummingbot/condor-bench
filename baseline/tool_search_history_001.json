@@ -1,6 +1,6 @@
 {
   "case_id": "tool_search_history_001",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 10.262,
-  "timestamp": "2026-08-12T06:16:18.842316+00:00"
+  "latency_s": 8.387,
+  "timestamp": "2026-08-12T13:29:50.492623+00:00"
 }

@@ -100,19 +100,40 @@ SETTINGS_FIELDS: list[dict[str, Any]] = [
         "secret": True,
         "hint": "Only needed if a case exercises send_notification.",
     },
+    {
+        "key": "BENCH_CHAT_ID",
+        "label": "Telegram chat id",
+        "group": "Staging",
+        "secret": False,
+        "hint": (
+            "Where send_notification delivers. Leave empty to keep the synthetic "
+            "default (999001), which Telegram rejects with 'chat not found' — a real "
+            "id makes notification cases scorable, and means a run messages you."
+        ),
+    },
 ]
 
-# Keys owned by bench (or retired) — cleared from .env on save so old values
-# cannot stick. Server/chat/user are fixed constants; staging account was removed
-# in favor of "whatever accounts the configured Hummingbot API has".
+# Keys owned by bench (or retired) — cleared from .env on save so old values cannot
+# stick. Server and user stay fixed constants; staging account was removed in favor of
+# "whatever accounts the configured Hummingbot API has".
+#
+# BENCH_CHAT_ID is deliberately *not* here any more. It was a constant because nothing
+# needed to change it, but the constant is 999001 — a synthetic id, not a Telegram chat —
+# so `send_notification` could only ever answer "Bad Request: chat not found", and four
+# cases could not earn live_validity for a reason no amount of bot configuration fixed.
+# It is now an ordinary editable setting; `config.staging_config` already read the env
+# override, so nothing downstream changes.
 _INTERNAL_STAGING_KEYS = (
     "BENCH_SERVER_NAME",
-    "BENCH_CHAT_ID",
     "BENCH_USER_ID",
     "BENCH_STAGING_ACCOUNT",
 )
 _KNOWN = {f["key"] for f in SETTINGS_FIELDS} | set(_INTERNAL_STAGING_KEYS)
 _LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+
+
+class SettingsError(ValueError):
+    """A rejected settings value, surfaced to the operator rather than raised at run time."""
 
 def _mask(value: str) -> str:
     if not value:
@@ -203,7 +224,18 @@ def update_settings(updates: dict[str, str | None]) -> dict[str, Any]:
             continue
         if isinstance(value, str) and value.startswith("••••"):
             continue  # masked placeholder — leave alone
-        current[key] = str(value)
+        text = str(value).strip()
+        # `staging_config` does `int(...)` on this, and it is read by every run and by
+        # the pre-flight — so a typo here would surface as a ValueError traceback from
+        # somewhere unrelated. Reject it while the operator is still looking at the form.
+        if key == "BENCH_CHAT_ID" and text:
+            candidate = text[1:] if text.startswith("-") else text
+            if not candidate.isdigit():
+                raise SettingsError(
+                    f"Telegram chat id must be a number (got {text!r}). Group chats are "
+                    "negative; leave it empty to keep the synthetic default."
+                )
+        current[key] = text
 
     # Drop operator-facing identity overrides — bench owns these.
     for key in _INTERNAL_STAGING_KEYS:

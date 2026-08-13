@@ -70,33 +70,54 @@ def test_combos_reproduce_filter_cases_exactly():
     from bench.dataset import filter_cases
 
     cases = load_all_cases()
-    combos: dict[tuple[str, str, str], int] = {}
+    combos: dict[tuple[str, str, str, str], int] = {}
     for case in cases:
-        key = (str(case.type), str(case.domain), str(case.category or ""))
+        key = (
+            str(case.type),
+            str(case.domain),
+            str(case.category or ""),
+            str(case.risk_level),
+        )
         combos[key] = combos.get(key, 0) + 1
 
-    def offered(layers, domain, category):
+    def offered(layers, domain, category, risks):
         return sum(
             n
-            for (layer, dom, cat), n in combos.items()
+            for (layer, dom, cat, risk), n in combos.items()
             if (not layers or layer in layers)
             and (not domain or dom == domain)
             and (not category or cat == category)
+            and (not risks or risk in risks)
         )
 
     layer_sets = [[], ["consult"], ["tick"], ["tool"], ["agent"], ["tool", "agent"]]
     domains = [""] + sorted({c.domain for c in cases})
     categories = [""] + sorted({c.category for c in cases if c.category})
+    # Risk is a set, not a ceiling, so the mixed selections have to be covered too —
+    # "read_only + destructive" is a combination no max-risk parameter could express.
+    risk_sets = [
+        [],
+        ["read_only"],
+        ["mutating"],
+        ["destructive"],
+        ["read_only", "destructive"],
+        ["mutating", "destructive"],
+    ]
 
-    for layers, domain, category in itertools.product(layer_sets, domains, categories):
-        assert offered(layers, domain, category) == len(
+    for layers, domain, category, risks in itertools.product(
+        layer_sets, domains, categories, risk_sets
+    ):
+        assert offered(layers, domain, category, risks) == len(
             filter_cases(
                 cases,
                 domain=domain or None,
                 category=category or None,
                 layers=layers or None,
+                risk_levels=risks or None,
             )
-        ), f"layers={layers} domain={domain!r} category={category!r}"
+        ), (
+            f"layers={layers} domain={domain!r} category={category!r} risks={risks}"
+        )
 
 
 def test_no_layer_shares_a_domain_with_the_tool_buckets():
