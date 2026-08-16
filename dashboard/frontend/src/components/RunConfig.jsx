@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { getProviders, getProviderModels, getAcpModels, createRun, getDatasets } from '../api.js'
 import StagingStatus from './StagingStatus.jsx'
 import PageHeader from './PageHeader.jsx'
+import ModelPicker from './ModelPicker.jsx'
 
 const LAYER_OPTS = [
   { id: 'consult', label: 'Consult', hint: 'Layer 1 — end-to-end advisory + strategy creation' },
@@ -71,11 +72,12 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
     if (!url) return
     update(p.id, { loading: true, error: '' })
     try {
-      const data = await getProviderModels(url, state.apiKey)
+      const data = await getProviderModels(url, state.apiKey, p.id)
       const models = data.models || []
+      const keep = state.selectedModel && models.includes(state.selectedModel)
       update(p.id, {
         loadedModels: models,
-        selectedModel: models[0] || state.selectedModel,
+        selectedModel: keep ? state.selectedModel : (models[0] || state.selectedModel),
         loading: false,
       })
     } catch (e) {
@@ -299,18 +301,19 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
                             <label>Model</label>
                             <div className="inline-row">
                               {state.acpModels?.length > 0 ? (
-                                <select
-                                  className="select"
+                                <ModelPicker
+                                  models={state.acpModels.map(m => ({
+                                    id: m.id,
+                                    name: m.id === state.acpCurrent
+                                      ? `${m.name} — CLI current`
+                                      : m.name,
+                                    description: m.description,
+                                  }))}
                                   value={state.selectedModel || ''}
-                                  onChange={e => update(p.id, { selectedModel: e.target.value })}
-                                >
-                                  <option value="">CLI default (whatever it is configured with)</option>
-                                  {state.acpModels.map(m => (
-                                    <option key={m.id} value={m.id}>
-                                      {m.name}{m.id === state.acpCurrent ? ' — CLI current' : ''}
-                                    </option>
-                                  ))}
-                                </select>
+                                  onChange={v => update(p.id, { selectedModel: v })}
+                                  allowEmpty
+                                  emptyLabel="CLI default (whatever it is configured with)"
+                                />
                               ) : (
                                 <span className="run-meta">
                                   Not selected — the run will use whatever model this CLI is
@@ -367,6 +370,11 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
                                   {state.loading ? '…' : 'Load models'}
                                 </button>
                               )}
+                              {state.loadedModels.length > 0 && (
+                                <span className="run-meta">
+                                  {state.loadedModels.length} models
+                                </span>
+                              )}
                             </div>
                             {state.error && (
                               <span className="error-text">{state.error}</span>
@@ -400,31 +408,11 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
                         {!p.bare_key && allModels.length > 0 && (
                           <div className="field">
                             <label>Model</label>
-                            {allModels.length <= 8 ? (
-                              <select
-                                className="select"
-                                value={state.selectedModel}
-                                onChange={e => update(p.id, { selectedModel: e.target.value })}
-                              >
-                                {allModels.map(m => (
-                                  <option key={m} value={m}>{m}</option>
-                                ))}
-                              </select>
-                            ) : (
-                              <input
-                                type="text"
-                                className="input"
-                                placeholder="model name"
-                                value={state.selectedModel}
-                                onChange={e => update(p.id, { selectedModel: e.target.value })}
-                                list={`models-${p.id}`}
-                              />
-                            )}
-                            {allModels.length > 8 && (
-                              <datalist id={`models-${p.id}`}>
-                                {allModels.map(m => <option key={m} value={m} />)}
-                              </datalist>
-                            )}
+                            <ModelPicker
+                              models={allModels}
+                              value={state.selectedModel}
+                              onChange={v => update(p.id, { selectedModel: v })}
+                            />
                           </div>
                         )}
 

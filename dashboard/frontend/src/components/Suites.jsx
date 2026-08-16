@@ -22,6 +22,7 @@ import {
 } from '../api.js'
 import PageHeader from './PageHeader.jsx'
 import EmptyState from './EmptyState.jsx'
+import ModelPicker from './ModelPicker.jsx'
 
 const SUITE_TABS = [
   { id: 'cases', label: 'Cases' },
@@ -350,18 +351,12 @@ export default function Suites({ onRunStarted }) {
             />
             <label className="settings-field">
               <span className="settings-label">Model</span>
-              <select
+              <ModelPicker
+                models={modelOptions.map((m) => ({ id: m.key, name: m.label }))}
                 value={suiteForm.model_key}
-                onChange={(e) => setSuiteForm({ ...suiteForm, model_key: e.target.value })}
-                required
-              >
-                {!modelOptions.length && <option value="">Loading models…</option>}
-                {modelOptions.map((m) => (
-                  <option key={m.key} value={m.key}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => setSuiteForm({ ...suiteForm, model_key: v })}
+                placeholder="Choose a model"
+              />
               <span className="muted settings-hint">
                 Fixed model for every Environment in this suite — so Condor A/B
                 deltas are from the checkout, not from switching models.

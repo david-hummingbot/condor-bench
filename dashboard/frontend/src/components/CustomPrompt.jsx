@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { getProviders, getProviderModels, createCustomPrompt, streamCustomPromptUrl } from '../api.js'
 import PageHeader from './PageHeader.jsx'
+import ModelPicker from './ModelPicker.jsx'
 
 const SCORE_COLOR = (v) => v >= 0.8 ? 'var(--green)' : v >= 0.5 ? 'var(--yellow)' : 'var(--red)'
 
@@ -209,11 +210,12 @@ export default function CustomPrompt() {
     if (!url) return
     update(p.id, { loading: true, loadError: '' })
     try {
-      const data = await getProviderModels(url, state.apiKey)
+      const data = await getProviderModels(url, state.apiKey, p.id)
       const models = data.models || []
+      const keep = state.selectedModel && models.includes(state.selectedModel)
       update(p.id, {
         loadedModels: models,
-        selectedModel: models[0] || state.selectedModel,
+        selectedModel: keep ? state.selectedModel : (models[0] || state.selectedModel),
         loading: false,
       })
     } catch (e) {
@@ -434,6 +436,11 @@ export default function CustomPrompt() {
                                     {state.loading ? '…' : 'Load models'}
                                   </button>
                                 )}
+                                {state.loadedModels.length > 0 && (
+                                  <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                    {state.loadedModels.length} models
+                                  </span>
+                                )}
                               </div>
                               {state.loadError && (
                                 <span className="error-text">{state.loadError}</span>
@@ -466,18 +473,12 @@ export default function CustomPrompt() {
                             return (
                               <div className="field">
                                 <label>Model</label>
-                                <input
-                                  type="text"
-                                  className="input"
-                                  placeholder="e.g. llama3.1:8b"
+                                <ModelPicker
+                                  models={merged}
                                   value={state.selectedModel}
-                                  onChange={e => update(p.id, { selectedModel: e.target.value })}
-                                  list={`cp-models-${p.id}`}
-                                  style={{ maxWidth: 340 }}
+                                  onChange={v => update(p.id, { selectedModel: v })}
+                                  placeholder="e.g. llama3.1:8b"
                                 />
-                                <datalist id={`cp-models-${p.id}`}>
-                                  {merged.map(m => <option key={m} value={m} />)}
-                                </datalist>
                               </div>
                             )
                           })()}

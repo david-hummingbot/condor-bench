@@ -10,8 +10,9 @@ async function handle(res) {
 export const getConfig = () => fetch('/api/config').then(handle)
 export const getProviders = () => fetch('/api/providers').then(handle)
 
-export function getProviderModels(baseUrl, apiKey = '') {
+export function getProviderModels(baseUrl, apiKey = '', provider = '') {
   const params = new URLSearchParams({ base_url: baseUrl, api_key: apiKey })
+  if (provider) params.set('provider', provider)
   return fetch('/api/provider-models?' + params).then(handle)
 }
 

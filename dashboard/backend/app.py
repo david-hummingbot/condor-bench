@@ -3,7 +3,7 @@
 Endpoints:
   GET  /api/config            judge key status + resolved staging target
   GET  /api/providers         provider catalog
-  GET  /api/provider-models   probe OpenAI-compat /v1/models
+  GET  /api/provider-models   probe OpenAI-compat /v1/models (+ native fallbacks)
   GET  /api/staging           staging pre-flight report (fail-closed checks)
   GET  /api/datasets          case counts by layer / domain / risk level
   POST /api/runs              start benchmark run (returns run_id)
@@ -857,23 +857,80 @@ async def get_acp_models(provider: str = "claude-code"):
     }
 
 
-@app.get("/api/provider-models")
-async def get_provider_models(base_url: str, api_key: str = ""):
+def _model_ids_from_payload(data: object) -> list[str]:
+    """Pull model ids out of OpenAI-compat, Ollama, or LM Studio list payloads.
+
+    OpenAI / LM Studio ``/v1/models`` use ``data[].id``. Ollama ``/api/tags``
+    uses ``models[].name``. LM Studio ``/api/v1/models`` uses ``models[].key``.
+    A missing ``id`` on one row used to 500 the whole list.
+    """
+    if not isinstance(data, dict):
+        return []
+    ids: list[str] = []
+    for key in ("data", "models"):
+        rows = data.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, str) and row.strip():
+                ids.append(row.strip())
+                continue
+            if not isinstance(row, dict):
+                continue
+            mid = row.get("id") or row.get("name") or row.get("key") or row.get("model")
+            if mid:
+                ids.append(str(mid))
+    return sorted(set(ids))
+
+
+def _openai_compat_models_url(base_url: str) -> str:
     base = base_url.rstrip("/")
-    # Don't double-add /v1 when the base already ends with it
-    url = base + "/models" if base.endswith("/v1") else base + "/v1/models"
+    return base + "/models" if base.endswith("/v1") else base + "/v1/models"
+
+
+def _fallback_model_urls(base_url: str, provider: str = "") -> list[str]:
+    """Native list endpoints that often include models the OpenAI path omits."""
+    origin = base_url.strip().rstrip("/")
+    if origin.endswith("/v1"):
+        origin = origin[: -len("/v1")]
+    out: list[str] = []
+    if provider == "ollama" or origin.endswith(":11434"):
+        out.append(origin + "/api/tags")
+    if provider == "lmstudio" or origin.endswith(":1234"):
+        out.append(origin + "/api/v1/models")
+        out.append(origin + "/api/v0/models")
+    return out
+
+
+@app.get("/api/provider-models")
+async def get_provider_models(base_url: str, api_key: str = "", provider: str = ""):
     headers: dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
+    urls = [_openai_compat_models_url(base_url), *_fallback_model_urls(base_url, provider)]
+
+    async def _one(client: httpx.AsyncClient, url: str) -> tuple[set[str], Exception | None]:
+        try:
             r = await client.get(url, headers=headers)
             r.raise_for_status()
-            data = r.json()
-            models = sorted(m["id"] for m in data.get("data", []))
-            return {"models": models}
+            return set(_model_ids_from_payload(r.json())), None
+        except Exception as exc:
+            return set(), exc
+
+    collected: set[str] = set()
+    last_error: Exception | None = None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            parts = await asyncio.gather(*(_one(client, url) for url in urls))
+        for ids, err in parts:
+            collected.update(ids)
+            if err is not None:
+                last_error = err
     except Exception as exc:
         raise HTTPException(400, str(exc))
+    if collected:
+        return {"models": sorted(collected)}
+    raise HTTPException(400, str(last_error) if last_error else "no models returned")
 
 
 class ModelConfig(BaseModel):
