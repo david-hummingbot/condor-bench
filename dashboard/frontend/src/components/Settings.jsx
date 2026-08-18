@@ -125,17 +125,21 @@ export default function Settings({ onSaved }) {
                   </span>
                   {f.choices ? (
                     <select
-                      value={draft[f.key] || ''}
+                      value={draft[f.key] || f.default || ''}
                       onChange={(e) =>
                         setDraft((d) => ({ ...d, [f.key]: e.target.value }))
                       }
                     >
-                      <option value="">(unset)</option>
-                      {f.choices.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
+                      {!f.default && <option value="">(unset)</option>}
+                      {f.choices.map((c) => {
+                        const value = typeof c === 'string' ? c : c.value
+                        const label = typeof c === 'string' ? c : c.label
+                        return (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        )
+                      })}
                     </select>
                   ) : (
                     <input

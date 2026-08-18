@@ -101,7 +101,7 @@ export default function App() {
     fetch('/api/config')
       .then((r) => r.json())
       .then((d) => {
-        setJudgeOk(d.judge_key_configured)
+        setJudgeOk(d.judge_ready ?? d.judge_key_configured)
         setConfig(d)
       })
       .catch(() => {})
@@ -155,8 +155,15 @@ export default function App() {
             </span>
           )}
           {!judgeOk && (
-            <span className="warn-badge" title="Set ANTHROPIC_API_KEY in Settings">
-              ⚠ No judge key
+            <span
+              className="warn-badge"
+              title={
+                config?.judge_backend === 'acp'
+                  ? 'Claude Code ACP judge is selected but not ready'
+                  : 'Set ANTHROPIC_API_KEY in Settings, or switch Judge transport to Claude Code (ACP)'
+              }
+            >
+              ⚠ No judge
             </span>
           )}
         </div>

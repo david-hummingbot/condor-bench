@@ -610,12 +610,16 @@ async def get_config():
         SCORE_WEIGHTS,
         TOOL_PASS_RATE,
         condor_path,
+        judge_backend,
+        judge_ready,
         staging_config,
     )
 
     staging = staging_config()
     return {
         "judge_key_configured": _judge_key_configured(),
+        "judge_backend": judge_backend(),
+        "judge_ready": judge_ready(),
         "target_banner": target_banner(),
         "condor_path": str(condor_path()) if condor_path() else None,
         "staging": {

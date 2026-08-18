@@ -23,7 +23,7 @@ SETTINGS_FIELDS: list[dict[str, Any]] = [
         "label": "Anthropic API key",
         "group": "API keys",
         "secret": True,
-        "hint": "Required for the answer-quality judge (and Anthropic models).",
+        "hint": "Required for Anthropic models, and for the judge when transport is API.",
     },
     {
         "key": "OPENROUTER_API_KEY",
@@ -54,11 +54,29 @@ SETTINGS_FIELDS: list[dict[str, Any]] = [
         "hint": "Latency reference for scoring (e.g. anthropic:claude-sonnet-5).",
     },
     {
+        "key": "BENCH_JUDGE_BACKEND",
+        "label": "Judge transport",
+        "group": "Benchmark",
+        "secret": False,
+        "default": "api",
+        "choices": [
+            {"value": "api", "label": "Anthropic API"},
+            {"value": "acp", "label": "Claude Code (ACP)"},
+        ],
+        "hint": (
+            "How the answer-quality judge is called. ACP uses the local Claude Code "
+            "login and does not need ANTHROPIC_API_KEY."
+        ),
+    },
+    {
         "key": "BENCH_JUDGE_MODEL",
         "label": "Judge model",
         "group": "Benchmark",
         "secret": False,
-        "hint": "Anthropic model id for answer quality (e.g. claude-sonnet-5).",
+        "hint": (
+            "API: Anthropic model id (e.g. claude-sonnet-5). "
+            "ACP: Claude Code alias (default, sonnet, opus[1m]) or leave as-is for the CLI default."
+        ),
     },
     {
         "key": "CONDOR_PATH",
@@ -172,6 +190,8 @@ def get_settings() -> dict[str, Any]:
         raw = os.environ.get(key)
         if raw is None:
             raw = file_vals.get(key, "")
+        if not raw and spec.get("default"):
+            raw = str(spec["default"])
         configured = bool(raw)
         display = _mask(raw) if spec.get("secret") else raw
         fields.append(
@@ -235,6 +255,16 @@ def update_settings(updates: dict[str, str | None]) -> dict[str, Any]:
                     f"Telegram chat id must be a number (got {text!r}). Group chats are "
                     "negative; leave it empty to keep the synthetic default."
                 )
+        if key == "BENCH_JUDGE_BACKEND" and text:
+            normalized = text.strip().lower()
+            if normalized in ("claude-code", "claude-acp"):
+                normalized = "acp"
+            if normalized not in ("api", "acp"):
+                raise SettingsError(
+                    f"Judge transport must be 'api' or 'acp' (got {text!r})."
+                )
+            current[key] = normalized
+            continue
         current[key] = text
 
     # Drop operator-facing identity overrides — bench owns these.

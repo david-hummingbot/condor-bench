@@ -3,6 +3,9 @@
 .env
 *.env
 
+# Isolated cwd for the ACP judge — must not inherit condor's .mcp.json
+.judge-acp/
+
 # Results (not tracked — too large; track baselines separately)
 results/
 !results/.gitkeep

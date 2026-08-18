@@ -33,6 +33,38 @@ ENVIRONMENTS_DIR = SUITES_DIR / "environments"
 
 BASELINE_MODEL = os.environ.get("BENCH_BASELINE_MODEL", "anthropic:claude-sonnet-5")
 JUDGE_MODEL = os.environ.get("BENCH_JUDGE_MODEL", "claude-sonnet-5")
+JUDGE_BACKEND_API = "api"
+JUDGE_BACKEND_ACP = "acp"
+
+
+def judge_backend() -> str:
+    """How the answer-quality judge is invoked.
+
+    Re-read from the process env on every call so a Settings save takes effect
+    without restarting the dashboard. ``api`` is the Anthropic SDK (needs
+    ``ANTHROPIC_API_KEY``); ``acp`` is local Claude Code via ``claude-agent-acp``.
+    """
+    raw = (os.environ.get("BENCH_JUDGE_BACKEND") or JUDGE_BACKEND_API).strip().lower()
+    if raw in (JUDGE_BACKEND_ACP, "claude-code", "claude-acp"):
+        return JUDGE_BACKEND_ACP
+    return JUDGE_BACKEND_API
+
+
+def judge_model() -> str:
+    """Anthropic model id (API) or Claude Code model alias (ACP). Live from env."""
+    return (os.environ.get("BENCH_JUDGE_MODEL") or "claude-sonnet-5").strip() or "claude-sonnet-5"
+
+
+def judge_ready() -> bool:
+    """True when the configured judge transport can be attempted.
+
+    ACP readiness is the local Claude Code login, which is not knowable without
+    spawning the bridge — so ACP is treated as ready here and fails at first
+    judge call if the CLI is not installed or logged in. The API path needs a key.
+    """
+    if judge_backend() == JUDGE_BACKEND_ACP:
+        return True
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
 def condor_path() -> Path | None:
