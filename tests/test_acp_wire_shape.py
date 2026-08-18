@@ -130,6 +130,30 @@ def _client() -> ACPClient:
     return ACPClient(command="true", working_dir="/tmp")
 
 
+def test_claude_acp_drops_inherited_api_key(monkeypatch):
+    """The bench key is for the SDK. Passing it into Claude Code bills the API."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-empty")
+    client = ACPClient(command="claude-agent-acp", working_dir="/tmp")
+    env = client._subprocess_env()
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_claude_acp_keeps_an_explicit_api_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-parent")
+    client = ACPClient(
+        command="claude-agent-acp",
+        working_dir="/tmp",
+        extra_env={"ANTHROPIC_API_KEY": "sk-ant-explicit"},
+    )
+    assert client._subprocess_env()["ANTHROPIC_API_KEY"] == "sk-ant-explicit"
+
+
+def test_non_claude_acp_still_inherits_the_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-parent")
+    client = ACPClient(command="npx @google/gemini-cli --acp", working_dir="/tmp")
+    assert client._subprocess_env()["ANTHROPIC_API_KEY"] == "sk-ant-parent"
+
+
 def test_the_opening_frame_yields_a_named_call():
     from condor_compat.acp.client import ToolCallEvent
 

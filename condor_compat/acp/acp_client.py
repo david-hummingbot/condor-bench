@@ -4,6 +4,8 @@ Changes from production:
 - Permission requests are auto-approved (no Telegram confirmation).
 - reap_stale_acp_trees() and _ps_rows() retained for completeness but not called by bench.
 - ACP_COMMANDS and resolve_acp() included for model-key routing.
+- Claude Code ACP subprocesses drop inherited ANTHROPIC_API_KEY so they use the
+  CLI login instead of the bench's (possibly empty-credit) API key.
 """
 from __future__ import annotations
 
@@ -211,10 +213,28 @@ class ACPClient:
         self._peer.register_handler("session/update", self._on_session_update)
         self._peer.register_handler("session/request_permission", self._on_request_permission)
 
-    async def start(self) -> None:
+    def _subprocess_env(self) -> dict[str, str]:
+        """Env for the ACP bridge. Claude Code must not inherit the bench API key.
+
+        ``ANTHROPIC_API_KEY`` in the parent is for the Anthropic SDK (judge, and
+        ``anthropic:`` models). Claude Code treats that variable as "bill this
+        API account" and ignores the CLI login. An empty-credit key then fails
+        every prompt with "Credit balance is too low" — the error that looks
+        like ACP itself is broken when the operator chose ACP to avoid the API.
+        Explicit ``extra_env`` still wins, so a run that *wants* the API key can
+        pass it through.
+        """
         env = dict(os.environ)
+        if self.command == ACP_COMMANDS["claude-code"]:
+            extra = self.extra_env or {}
+            if "ANTHROPIC_API_KEY" not in extra:
+                env.pop("ANTHROPIC_API_KEY", None)
         if self.extra_env:
             env.update(self.extra_env)
+        return env
+
+    async def start(self) -> None:
+        env = self._subprocess_env()
         self._process = await asyncio.create_subprocess_shell(
             self.command,
             stdin=asyncio.subprocess.PIPE,
