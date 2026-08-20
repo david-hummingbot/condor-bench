@@ -36,7 +36,7 @@ export default function CaseTable({ cases }) {
   }
 
   return (
-    <div style={{ overflowX: 'auto' }}>
+    <div className="table-scroll case-table-scroll">
       <table className="case-table">
         <thead>
           <tr>

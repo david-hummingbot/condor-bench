@@ -50,7 +50,7 @@ const SECTIONS = [
 
 const DEFAULT_ROUTE = { section: 'overview', page: null }
 // Wide data views need more than the reading-width canvas.
-const WIDE_PAGES = new Set(['results/matrix', 'results/router'])
+const WIDE_PAGES = new Set(['results/matrix', 'results/router', 'results/runs', 'live'])
 
 function parseHash() {
   const raw = (window.location.hash || '').replace(/^#\/?/, '')
