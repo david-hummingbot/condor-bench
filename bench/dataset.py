@@ -431,6 +431,7 @@ def filter_cases(
     category: str | None = None,
     layers: Iterable[str] | None = None,
     risk_levels: Iterable[str] | None = None,
+    tags: Iterable[str] | None = None,
 ) -> list[Case]:
     """Apply the CLI/dashboard filters in one place.
 
@@ -443,6 +444,9 @@ def filter_cases(
     reach 18 of the 24 tools with one call each, which is the cheapest honest answer
     to "can this model drive an MCP tool at all" — and there was no way to ask for
     them, because risk cuts across every other axis.
+
+    ``tags`` is AND — ``--tags core`` keeps cases that carry every named tag. The
+    ``core`` tag is the floor-valid iteration subset; see docs/CASE_LIST.md.
     """
     out = list(cases)
     if layers:
@@ -455,4 +459,11 @@ def filter_cases(
     if risk_levels:
         risks = set(risk_levels)
         out = [c for c in out if c.risk_level in risks]
+    if tags:
+        wanted_tags = set(tags)
+        out = [
+            c
+            for c in out
+            if wanted_tags.issubset(set(getattr(c, "tags", None) or []))
+        ]
     return out

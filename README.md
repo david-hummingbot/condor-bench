@@ -58,7 +58,8 @@ glance away.
    take a host URL and a **Load models** click; CLI agents (Claude Code, Gemini)
    just toggle.
 3. **Dataset layers** — any combination of consult / tick / tools / agents.
-   None selected means all four.
+   None selected means all four. **Core sweep** is the floor-valid iteration
+   subset (same floors as the full library; not for publishing routing).
 4. **Routing domain** and **category** filters.
 5. **▶ Start Benchmark**.
 
@@ -202,6 +203,8 @@ uv run python runner.py test ollama:qwen2.5:14b --layers tool,agent
 uv run python runner.py test ollama:qwen2.5:14b -d market_making_expert
 uv run python runner.py test ollama:qwen2.5:14b --tick-only -c risk-blocked
 uv run python runner.py test anthropic:claude-sonnet-5 --consult-only
+uv run python runner.py test ollama:qwen2.5:14b --tags core   # iteration subset; still floor-valid
+uv run python runner.py sweep --tags core
 
 # Force a mode for one run
 uv run python runner.py test ollama:qwen2.5:14b --mode live
@@ -229,11 +232,13 @@ Three layers.
 
 | File | Cases | What it measures |
 |---|---|---|
-| `datasets/consult.jsonl` | 15 | **Layer 1** — "everyday usage": the high-frequency status lookups real users ask most (portfolio balance, active server, market price, open orders, bots, executors, trade history, skills, model in use). Each resolves to exactly one tool call; single-turn. |
-| `datasets/tick.jsonl` | 6 | **Layer 1** — strategy ticks: normal, profit-taking, risk-blocked, near-capacity, error recovery, dry-run. Agent-scoped. |
-| `datasets/tools.jsonl` | — | **Layer 2** — at least one focused case per MCP tool. The whole production surface is covered; a drift test fails if a tool isn't. |
-| `datasets/agents.jsonl` | — | **Layer 3** — routed to a specific Condor agent with its own prompt and stores. |
+| `datasets/consult.jsonl` | 12 | **Layer 1** — coordinator jobs: user/server/agent lookups, routine authoring, conversation-only design, journal roundtrips. Everyday portfolio/bots/history lookups live on the tool and specialist layers instead. |
+| `datasets/tick.jsonl` | 8 | **Layer 1** — strategy ticks: normal, profit-taking, risk-blocked, near-capacity, error recovery, dry-run, wide-spread stand-down, learnings adherence. Agent-scoped. |
+| `datasets/tools.jsonl` | 38 | **Layer 2** — focused cases per MCP tool. The whole production surface is covered; a drift test fails if a tool isn't. |
+| `datasets/agents.jsonl` | 22 | **Layer 3** — routed to a specific Condor agent with its own prompt and stores. |
 | `datasets/models.json` | — | Model registry with parameter counts. Drives sweep order and routing. |
+
+Tag `core` (65 cases) still meets the routing floors and is the cheap iteration sweep — see [docs/CASE_LIST.md](docs/CASE_LIST.md). Publish routing from the full 80.
 
 Every case carries a `risk_level` (`read_only` / `mutating` / `destructive`) and
 resolves to a **routing domain**. Every risk level runs — the level drives teardown

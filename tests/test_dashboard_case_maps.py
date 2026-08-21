@@ -120,6 +120,32 @@ def test_combos_reproduce_filter_cases_exactly():
         )
 
 
+def test_core_combo_counts_match_the_tagged_subset():
+    """The run form's Core checkbox has to count the same rows ``--tags core`` runs."""
+    from bench.dataset import filter_cases
+
+    cases = load_all_cases()
+    core = filter_cases(cases, tags=["core"])
+    combos: dict[tuple[str, str, str, str], dict[str, int]] = {}
+    for case in cases:
+        key = (
+            str(case.type),
+            str(case.domain),
+            str(case.category or ""),
+            str(case.risk_level),
+        )
+        slot = combos.setdefault(key, {"count": 0, "core_count": 0})
+        slot["count"] += 1
+        if "core" in (getattr(case, "tags", None) or []):
+            slot["core_count"] += 1
+
+    assert sum(s["core_count"] for s in combos.values()) == len(core)
+    assert all(s["core_count"] <= s["count"] for s in combos.values())
+    assert filter_cases(cases, tags=["core"], risk_levels=["read_only"]) == [
+        c for c in core if c.risk_level == "read_only"
+    ]
+
+
 def test_no_layer_shares_a_domain_with_the_tool_buckets():
     """The specific impossibility the form used to offer."""
     cases = load_all_cases()

@@ -244,6 +244,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             category=req.category,
             layers=layers,
             risk_levels=req.risk_levels,
+            tags=req.tags,
         )
         if not cases:
             raise ValueError("No cases matched the selected filters.")
@@ -699,7 +700,7 @@ async def get_datasets():
     # other axis (a `tool:leverage` case is destructive, a `tool:servers` one is
     # read-only), so a separate count would let the form offer "Tools + read_only"
     # and then report a total that ignored the risk selection.
-    combos: dict[tuple[str, str, str, str], int] = {}
+    combos: dict[tuple[str, str, str, str], dict[str, int]] = {}
     for case in cases:
         key = (
             str(case.type),
@@ -707,10 +708,14 @@ async def get_datasets():
             str(case.category or ""),
             str(case.risk_level),
         )
-        combos[key] = combos.get(key, 0) + 1
+        slot = combos.setdefault(key, {"count": 0, "core_count": 0})
+        slot["count"] += 1
+        if "core" in (getattr(case, "tags", None) or []):
+            slot["core_count"] += 1
 
     return {
         "total": len(cases),
+        "core": sum(1 for c in cases if "core" in (getattr(c, "tags", None) or [])),
         "layers": _tally(lambda c: c.type),
         "domains": _tally(lambda c: c.domain),
         "layer_domains": {k: dict(sorted(v.items())) for k, v in sorted(layer_domains.items())},
@@ -720,9 +725,10 @@ async def get_datasets():
                 "domain": domain,
                 "category": category,
                 "risk_level": risk,
-                "count": count,
+                "count": slot["count"],
+                "core_count": slot["core_count"],
             }
-            for (layer, domain, category, risk), count in sorted(combos.items())
+            for (layer, domain, category, risk), slot in sorted(combos.items())
         ],
         "routing_domains": sorted(
             {c.domain for c in cases if is_routing_domain(c.domain)}
@@ -952,6 +958,8 @@ class RunRequest(BaseModel):
     # read_only | mutating | destructive. None means all three — a set, not a
     # ceiling, so "read_only + destructive" is expressible.
     risk_levels: list[str] | None = None
+    # AND over case tags. ``["core"]`` is the floor-valid iteration subset.
+    tags: list[str] | None = None
     consult_only: bool = False
     tick_only: bool = False
 

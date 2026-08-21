@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import collections
 
-from bench.dataset import is_routing_domain, load_all_cases
+from bench.dataset import filter_cases, is_routing_domain, load_all_cases
 from config import DOMAIN_PASS_RATE, MIN_TOOL_CASES, TOOL_PASS_RATE
 
 # The smallest domain that can absorb one failed case. Derived below rather than
@@ -79,6 +79,51 @@ def test_every_routing_domain_can_absorb_one_failed_case():
         f"{DOMAIN_PASS_RATE:.0%} requires a perfect score, so one unlucky case reads "
         "as 'no model can own this job'. Keep at least "
         f"{floor} cases per domain."
+    )
+
+
+def test_core_subset_clears_the_same_floors():
+    """``--tags core`` is for iteration, not a licence to reprint thin verdicts."""
+    core = filter_cases(load_all_cases(), tags=["core"])
+    assert core, "no cases tagged core — the iteration sweep would run nothing"
+
+    floor = _min_domain_cases()
+    tool_counts: collections.Counter[str] = collections.Counter()
+    domain_counts: collections.Counter[str] = collections.Counter()
+    for case in core:
+        for tool in case.expected_tools or []:
+            tool_counts[tool] += 1
+        if is_routing_domain(case.domain):
+            domain_counts[case.domain] += 1
+
+    # Every tool the full library measures must still be measured in core. A tool
+    # that only appears outside core would look handled on a full run and thin on
+    # the cheap one, which is the failure this tag exists to prevent.
+    library_tools = {
+        tool
+        for case in load_all_cases()
+        for tool in (case.expected_tools or [])
+    }
+    thin = {
+        t: tool_counts[t]
+        for t in library_tools
+        if tool_counts[t] < MIN_TOOL_CASES
+    }
+    assert not thin, (
+        f"core subset tools below MIN_TOOL_CASES={MIN_TOOL_CASES}: {thin}. "
+        "Tag another case that calls the tool, or drop it from the full library."
+    )
+
+    library_domains = {
+        c.domain for c in load_all_cases() if is_routing_domain(c.domain)
+    }
+    brittle = {
+        d: domain_counts[d]
+        for d in library_domains
+        if domain_counts[d] < floor
+    }
+    assert not brittle, (
+        f"core subset routing domains below {floor} cases: {brittle}"
     )
 
 

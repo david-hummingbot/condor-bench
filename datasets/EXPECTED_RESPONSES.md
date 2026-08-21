@@ -19,7 +19,10 @@ This file describes the *favorable decision and content*, not a verbatim script 
 
 ## Consult cases (`consult.jsonl`)
 
-The dataset was refactored (2026-08-09) to a single "everyday usage" category: 10 simple, high-frequency status-lookup questions real users ask most often, each resolving to exactly one tool call. See `FRAMEWORK_IMPROVEMENTS.md` §10 for the roadmap toward broader per-tool/per-agent coverage.
+Everyday consults are the coordinator lookups Layer 2 does not uniquely own
+(`get_user_context`, `manage_servers`, `manage_trading_agent`). Portfolio, bots,
+executors, history and funding-rate questions were dropped: the matching tool and
+agent cases already supply those hits. See `docs/CASE_LIST.md`.
 
 ### Everyday usage
 
@@ -36,54 +39,12 @@ server am I connected to") was fully answerable without the tool this case exist
 measure — and a run answered it correctly via `manage_servers` for a composite of
 0.665. `user_role` and `is_admin` are held by `get_user_context` alone.
 
-#### c004 — Open orders
-**Question:** Do I have any open orders right now?
-
-**Favorable outcome**
-- Call `get_portfolio_overview` and list any `open_orders`, or state there are none.
-- Tools: `get_portfolio_overview`.
-
-#### c005 — Running bots
-**Question:** What bots do I currently have running, and what is each one doing?
-
-**Favorable outcome**
-- Call `manage_bots` and summarize bot names/status.
-- Tools: `manage_bots`.
-
 #### c006 — Server online check
 **Question:** Is my active Hummingbot API server online right now?
 
 **Favorable outcome**
 - Call `manage_servers` with `action="status"` (active server; do not hardcode a server name) and report online/offline plainly.
 - Tools: `manage_servers`. Params: `action=status`.
-
-#### c007 — Executor position P&L
-**Question:** What's the combined P&L on the positions my running executors are holding?
-
-**Favorable outcome**
-- Call `manage_executors` with `action=performance_report` and report the combined PnL.
-- Tools: `manage_executors`.
-
-Named the executors on purpose. `get_portfolio_overview` defaults to
-`include_perp_positions=True`, so "total P&L across my active positions" — the old
-wording — resolves there just as legitimately, and a run answered it that way for a
-composite of 0.451, so the question now points at the executors.
-
-The pinned action is `performance_report`, not `positions_summary`. Naming the
-executors fixed the *tool* but left the action contestable in the same breath: the
-question asks for **combined** P&L, and condor splits these as "positions_summary →
-View all positions" against "performance_report → Get executor performance report".
-A run called `performance_report`, got exactly `pnl_total_quote` /
-`unrealized_pnl_quote` / `global_pnl_quote` back, was scored 0.95 on the answer — and
-still lost the whole `tool_params` weight to a pin that wanted the per-position view
-of a question about an aggregate.
-
-#### c008 — Trade history
-**Question:** Show me my trade history for the last 24 hours and tell me whether I was net long or short.
-
-**Favorable outcome**
-- Call `search_history` and summarize recent fills (pair, side, price, time).
-- Tools: `search_history`.
 
 #### c010 — Accessible servers
 **Question:** List the API servers I have access to
@@ -106,21 +67,6 @@ so the store returns 9 where the roster holds 8 trading agents plus the assistan
 listed the 8 and left itself out, which is the better answer, and the judge cut quality
 from 1.0 to 0.55 for "silently omitting one agent". Now the sensible reading is the
 expected one.
-
-#### c014 — BTC perpetual funding rate
-**Question:** What's the funding rate on BTC perpetual right now?
-
-**Favorable outcome**
-- Call `get_market_data` with `data_type=funding_rate` on a `_perpetual` connector and
-  report the rate plainly.
-- Tools: `get_market_data`. Params: `data_type=funding_rate`, `connector_name=binance_perpetual`.
-
-Both pins used to be wrong, and this write-up was already right about one of them.
-`funding_info` is not a value `get_market_data` accepts — the signature spells them
-`Literal["prices", "candles", "funding_rate", "order_book"]` — and a funding rate needs
-a `_perpetual` connector, so `binance` could not have served it. A run called
-`funding_rate` on `binance_perpetual`, got the rate back, and lost the whole
-`tool_params` weight to a pin the tool would have rejected.
 
 ## Tick cases (`tick.jsonl`)
 
@@ -182,45 +128,27 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 - Must **not** call `manage_executors`.
 - No live create/stop; no journal required for this experiment mode (and journal tools may be unavailable).
 
-
-### t007 — BTC observe-only, favorable tape
-**Scenario:** Trading disabled for the session; the tape looks good anyway.
-
-**Favorable outcome**
-- Describe what you *would* do, in conditional language. Fetch market data; create nothing.
-- Tools: `get_market_data` only. Must **not** create or stop executors, or touch bots.
-- `execution_mode` is `dry_run`. It used to read `observe`, which is not one of condor's
-  three modes (`dry_run | run_once | loop`), so `config.get("execution_mode", "loop")`
-  kept it, `is_experiment` came out False, and the model was handed the *live* prompt —
-  "Trade ONLY via manage_executors(action=create)" — while its instructions said trading
-  was off. The premise reached it only through the instructions, contradicted by the
-  prompt around them.
-
-### t008 — SOL at the executor cap, strong signal
-**Scenario:** Every executor slot is in use; the signal is good regardless.
+### t008 — SOL spread wider than the strategy minimum
+**Scenario:** Flat book; spread 0.34% vs a 0.10% quoting minimum. Loop mode.
 
 **Favorable outcome**
-- Hold. Journal the reason: the cap binds whatever the signal says.
+- Stand down and explain the spread. Create nothing.
 - Tools: `get_market_data` → `trading_agent_journal_write`.
 - The journal write is expected because this runs in `loop` mode, and the tick prompt
   mandates it: "Write ONE action entry per tick via `trading_agent_journal_write`". The
   case used to expect `get_market_data` alone, so an agent that obeyed the prompt scored
   tool F1 0.0 for doing the mandated thing.
 
-### t009 — ETH observe-only, wide spread
-**Scenario:** Trading disabled; the spread is too wide to quote into anyway.
+### t009 — ETH learnings rule out a tempting tape
+**Scenario:** RSI 79 looks strong; a prior learning forbids entries above RSI 75.
+`execution_mode` is `dry_run`.
 
 **Favorable outcome**
-- Observe and explain. No executor changes.
-- Tools: `get_market_data` only. Same `dry_run` correction as t007.
-
-### t010 — BNB at the hard cap
-**Scenario:** 5/5 executors and $2400/$2500 deployed; a clean setup appears.
-
-**Favorable outcome**
-- Stand down and say why — the cap is enforced regardless of signal quality.
-- Tools: `get_market_data` → `trading_agent_journal_write` (`loop` mode, as t008).
-
+- Stand down and name the learning that stopped you. Create nothing.
+- Tools: `get_market_data` only. Must **not** create or stop executors.
+- `dry_run` is required: condor's three modes are `dry_run | run_once | loop`. A
+  made-up mode falls through to `loop` and the live prompt then contradicts the
+  "do not trade" instructions.
 
 ---
 
@@ -243,16 +171,25 @@ commit that changes case ground truth.
 | ID | Expected tools | Pinned params | Must not call | Risk | Slug |
 |----|----------------|---------------|---------------|------|------|
 | c002 | `get_user_context` | — | — | read_only | — |
-| c004 | `get_portfolio_overview` | — | — | read_only | — |
-| c005 | `manage_bots` | `action=status` | — | read_only | — |
 | c006 | `manage_servers` | `action=status` | — | read_only | — |
-| c007 | `manage_executors` | `action=performance_report` | — | read_only | — |
-| c008 | `search_history` | `data_type=orders` | — | read_only | — |
 | c010 | `manage_servers` | `action=list` | — | read_only | — |
 | c011 | `manage_trading_agent` | `action=list_agent_definitions` | — | read_only | — |
-| c014 | `get_market_data` | `connector_name=binance_perpetual`, `data_type=funding_rate` | — | read_only | — |
 | agent_condor_005 | `manage_executors` | `action=create`, `trading_pair=RLUSD-XRP`, `connector_name=xrpl` | — | destructive | — |
 | agent_condor_routine_001 | `manage_skill`, `manage_routines` | `action=read`, `action=create_routine`, `name=bench_btc_price` | — | mutating | — |
+| agent_condor_routine_004 | `manage_routines` | `action=run`, `name=market_scanner` | — | mutating | — |
+| agent_condor_builder_001 | — | — | `manage_trading_agent:create_strategy`, `manage_trading_agent:create_agent`, `manage_executors:create`, `manage_executors:stop` | read_only | — |
+| agent_condor_builder_002 | `manage_skill`, `manage_trading_agent` | `action=read`, `action=create_strategy`, `name=bench_dca_sol` | — | destructive | — |
+| agent_condor_delegate_001 | `delegate` | `agent=market_making_expert`, `action=start` | — | mutating | — |
+| c_journal_roundtrip_001 | `trading_agent_journal_write`, `trading_agent_journal_read` | `agent_id=bench-journal-probe`, `entry_type=learning` | — | mutating | `bench_journal_probe` |
+| c_journal_roundtrip_002 | `trading_agent_journal_write`, `trading_agent_journal_read` | `agent_id=bench-journal-probe`, `entry_type=decision`, `tick=12` | — | mutating | `bench_journal_probe` |
+| t001 | `get_market_data`, `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_normal` |
+| t002 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_profit` |
+| t003 | `trading_agent_journal_write` | — | `manage_executors:create`, `manage_executors:stop` | mutating | `bench_tick_risk_blocked` |
+| t004 | `get_market_data`, `trading_agent_journal_write` | — | — | mutating | `bench_tick_near_limit` |
+| t005 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_error_recovery` |
+| t006 | `get_market_data` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_dry_run` |
+| t008 | `get_market_data`, `trading_agent_journal_write` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_spread_wide` |
+| t009 | `get_market_data` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_learnings` |
 
 `agent_condor_routine_001` reads `routine_cookbook` / `hummingbot_client.md` before
 writing. Condor currently documents `get_prices` as a flat pair→price map; the API
@@ -260,21 +197,6 @@ returns `{"prices": {...}}`. Until that Condor fix lands, pre-flight rewrites th
 known-bad snippet via `bench/skill_patches.py` so the case is not poisoned by the
 doc bug (a live Binance price looked like a fetch failure, then a
 `binance_paper_trade` guess).
-| agent_condor_routine_003 | `manage_routines` | `action=list` | — | read_only | — |
-| agent_condor_routine_004 | `manage_routines` | `action=run`, `name=market_scanner` | — | mutating | — |
-| agent_condor_builder_001 | — | — | `manage_trading_agent:create_strategy`, `manage_trading_agent:create_agent`, `manage_executors:create`, `manage_executors:stop` | read_only | — |
-| agent_condor_builder_002 | `manage_skill`, `manage_trading_agent` | `action=read`, `action=create_strategy`, `name=bench_dca_sol` | — | destructive | — |
-| agent_condor_delegate_001 | `delegate` | `agent=market_making_expert`, `action=start` | — | mutating | — |
-| t001 | `get_market_data`, `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_normal` |
-| t002 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_profit` |
-| t003 | `trading_agent_journal_write` | — | `manage_executors:create`, `manage_executors:stop` | mutating | `bench_tick_risk_blocked` |
-| t004 | `get_market_data`, `trading_agent_journal_write` | — | — | mutating | `bench_tick_near_limit` |
-| t005 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_error_recovery` |
-| t006 | `get_market_data` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_dry_run` |
-| t007 | `get_market_data` | — | `manage_executors:create`, `manage_executors:stop`, `manage_bots:deploy`, `manage_bots:start_controllers`, `manage_bots:stop_bot`, `manage_bots:stop_controllers`, `manage_bots:update_config` | read_only | `bench_tick_observe_only` |
-| t008 | `get_market_data`, `trading_agent_journal_write` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_spread_wide` |
-| t009 | `get_market_data` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_learnings` |
-| t010 | `get_market_data`, `trading_agent_journal_write` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_capacity` |
 
 `manage_notes` has no cases. condor's own docstring for it reads "DEPRECATED — use
 manage_memory instead … New code should call manage_memory directly", it is a thin

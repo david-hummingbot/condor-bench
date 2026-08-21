@@ -19,6 +19,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   const [domain, setDomain] = useState('')
   const [category, setCategory] = useState('')
   const [riskLevels, setRiskLevels] = useState([])  // empty = all risk levels
+  const [coreOnly, setCoreOnly] = useState(false)
   const [datasets, setDatasets] = useState(null)
   const [staging, setStaging] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -176,6 +177,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
         domain: domain || null,
         category: category.trim() || null,
         risk_levels: riskLevels.length ? riskLevels : null,
+        tags: coreOnly ? ['core'] : null,
       }
       const data = await createRun(body)
       onRunStarted(data.run_id)
@@ -207,21 +209,24 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
     const wantDomain = opts.domain ?? domain
     const wantCategory = opts.category ?? category.trim()
     const wantRisk = opts.riskLevels ?? riskLevels
+    const wantCore = opts.coreOnly ?? coreOnly
     return combos.filter(c =>
       (!wantLayers.length || wantLayers.includes(c.layer)) &&
       (!wantDomain || c.domain === wantDomain) &&
       (!wantCategory || c.category === wantCategory) &&
-      (!wantRisk.length || wantRisk.includes(c.risk_level))
+      (!wantRisk.length || wantRisk.includes(c.risk_level)) &&
+      (!wantCore || (c.core_count || 0) > 0)
     )
   }
-  const countOf = (rows) => rows.reduce((n, c) => n + c.count, 0)
+  const comboN = (c) => (coreOnly ? (c.core_count || 0) : c.count)
+  const countOf = (rows) => rows.reduce((n, c) => n + comboN(c), 0)
 
   // Domains available under the chosen layers, ignoring the category so narrowing
   // the category can never empty the domain list you picked from.
   const domainOptions = (() => {
     const seen = new Map()
     for (const c of matching({ domain: '', category: '', riskLevels: [] })) {
-      seen.set(c.domain, (seen.get(c.domain) || 0) + c.count)
+      seen.set(c.domain, (seen.get(c.domain) || 0) + comboN(c))
     }
     return [...seen.entries()].sort((a, b) => a[0].localeCompare(b[0]))
   })()
@@ -229,7 +234,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   const categoryOptions = (() => {
     const seen = new Map()
     for (const c of matching({ category: '', riskLevels: [] })) {
-      if (c.category) seen.set(c.category, (seen.get(c.category) || 0) + c.count)
+      if (c.category) seen.set(c.category, (seen.get(c.category) || 0) + comboN(c))
     }
     return [...seen.entries()].sort((a, b) => a[0].localeCompare(b[0]))
   })()
@@ -239,7 +244,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   const riskOptions = (() => {
     const seen = new Map()
     for (const c of matching({ riskLevels: [] })) {
-      if (c.risk_level) seen.set(c.risk_level, (seen.get(c.risk_level) || 0) + c.count)
+      if (c.risk_level) seen.set(c.risk_level, (seen.get(c.risk_level) || 0) + comboN(c))
     }
     return ['read_only', 'mutating', 'destructive']
       .filter(r => seen.has(r))
@@ -259,7 +264,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
       <PageHeader
         title="Benchmark"
         description="A throwaway run against the shared case library — pick models, narrow the dataset, and go. For a saved, repeatable definition that A/Bs two Condor checkouts, use Suites instead."
-        meta={datasets ? `${datasets.total} cases · ${datasets.agent_scoped} agent-scoped` : null}
+        meta={datasets ? `${datasets.total} cases · ${datasets.core ?? 0} core · ${datasets.agent_scoped} agent-scoped` : null}
       />
 
       {/* Shown above the model picker on purpose: which API the run will hit
@@ -453,6 +458,22 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
 
       <div className="card">
         <div className="card-title">Options</div>
+
+        <div className="field" style={{ marginBottom: 14 }}>
+          <label>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={coreOnly}
+                onChange={e => setCoreOnly(e.target.checked)}
+              />
+              Core sweep
+            </span>
+            <span className="run-meta">
+              {' '}— floor-valid iteration subset ({datasets?.core ?? '…'} cases). Publish routing from the full library.
+            </span>
+          </label>
+        </div>
 
         <div className="field" style={{ marginBottom: 14 }}>
           <label>Dataset layers {layers.length === 0 && <span className="run-meta">(all)</span>}</label>

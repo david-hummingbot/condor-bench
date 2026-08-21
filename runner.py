@@ -57,6 +57,14 @@ def _resolve_risk_levels(risk: Optional[str]) -> Optional[list[str]]:
     return chosen
 
 
+def _resolve_tags(tags: Optional[str]) -> Optional[list[str]]:
+    """Parse ``--tags core`` into a list, or None for the full library."""
+    if not tags:
+        return None
+    chosen = [tag.strip() for tag in tags.split(",") if tag.strip()]
+    return chosen or None
+
+
 @app.command()
 def baseline(
     overwrite: bool = typer.Option(False, help="Regenerate existing baselines"),
@@ -107,6 +115,11 @@ def test(
         help="Comma-separated risk levels (read_only, mutating, destructive). "
         "A set, not a ceiling — '--risk read_only' is the cheap tool-calling probe.",
     ),
+    tags: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated case tags to require (AND). '--tags core' is the "
+        "floor-valid iteration subset — publish routing from the full library.",
+    ),
     consult_only: bool = typer.Option(False, help="Only consult cases"),
     tick_only: bool = typer.Option(False, help="Only tick cases"),
 ) -> None:
@@ -132,6 +145,7 @@ def test(
         category=category,
         layers=_resolve_layers(consult_only, tick_only, layers),
         risk_levels=_resolve_risk_levels(risk),
+        tags=_resolve_tags(tags),
     )
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
@@ -263,6 +277,11 @@ def sweep(
         help="Comma-separated risk levels (read_only, mutating, destructive). "
         "A set, not a ceiling — '--risk read_only' is the cheap tool-calling probe.",
     ),
+    tags: Optional[str] = typer.Option(
+        None,
+        help="Comma-separated case tags to require (AND). '--tags core' is the "
+        "floor-valid iteration subset — publish routing from the full library.",
+    ),
     only: Optional[str] = typer.Option(
         None, help="Comma-separated model keys — sweep just these from the registry"
     ),
@@ -309,6 +328,7 @@ def sweep(
         domain=domain,
         layers=_resolve_layers(False, False, layers),
         risk_levels=_resolve_risk_levels(risk),
+        tags=_resolve_tags(tags),
     )
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
