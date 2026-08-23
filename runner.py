@@ -102,6 +102,52 @@ def staging_check() -> None:
     console.print("\n[green]Staging pre-flight passed.[/green]")
 
 
+@app.command("market-check")
+def market_check(
+    json_out: bool = typer.Option(False, "--json", help="Emit the report as JSON"),
+    all_cases: bool = typer.Option(
+        False, "--all", help="List every case, not just the ones that cannot run"
+    ),
+) -> None:
+    """Report which cases the target's connectors can actually support.
+
+    Read-only. Exits non-zero when any case cannot run as written, so it works as
+    a gate — but unlike ``staging-check`` a failure here is a *dataset* problem
+    (a literal connector that does not exist on this box), not a target problem.
+    """
+    import json as _json
+
+    from bench.market_preflight import format_report, check_cases
+
+    report = asyncio.run(check_cases())
+    if json_out:
+        console.print_json(_json.dumps(report.as_dict()))
+    else:
+        console.print(format_report(report))
+        if all_cases:
+            table = Table(title="All cases")
+            for column in ("case", "type", "risk", "verdict", "detail"):
+                table.add_column(column)
+            for row in report.verdicts:
+                table.add_row(
+                    row.case_id, row.case_type, row.risk_level, row.verdict, row.detail
+                )
+            console.print(table)
+    # Exit codes carry the verdict for both modes, but the prose summary would
+    # corrupt --json output for anything piping it.
+    if not report.registry.ok:
+        raise typer.Exit(2)
+    if report.affected:
+        if not json_out:
+            console.print(
+                f"\n[yellow]{len(report.affected)} case(s) cannot run as written "
+                f"against {report.registry.api_url}.[/yellow]"
+            )
+        raise typer.Exit(1)
+    if not json_out:
+        console.print("\n[green]Every case's connectors are available here.[/green]")
+
+
 @app.command()
 def test(
     model: str = typer.Argument(..., help="Model to benchmark, e.g. ollama:llama3.1:8b"),
@@ -122,12 +168,20 @@ def test(
     ),
     consult_only: bool = typer.Option(False, help="Only consult cases"),
     tick_only: bool = typer.Option(False, help="Only tick cases"),
+    skip_unavailable: bool = typer.Option(
+        False,
+        "--skip-unavailable",
+        help="Record cases whose declared markets cannot bind as harness "
+        "artifacts instead of refusing the run. Opt-in: the run is thinner than "
+        "it looks, so routing published from it under-covers those domains.",
+    ),
 ) -> None:
     """Run benchmarks against a model and score vs baseline latency."""
     import uuid
 
     from bench.baseline import BaselineStore
     from bench.dataset import case_prompt_map, filter_cases, load_all_cases
+    from bench.market_resolver import bindings_summary, unresolvable_card
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.staging_health import StagingUnhealthy, assert_ready
@@ -151,8 +205,20 @@ def test(
         console.print("[red]No cases matched the filters.[/red]")
         raise typer.Exit(1)
 
+    cases, resolutions, market_skips = _bind_markets(cases, skip_unavailable)
+    _print_bindings(resolutions)
+
     store = BaselineStore()
+    # Prompts come from the resolved cases: a results file that recorded the
+    # template would show "{perp.label}" where the model was asked about a real
+    # connector.
     prompts = case_prompt_map()
+    prompts.update(
+        {
+            c.id: (c.scenario_name if c.type == "tick" else getattr(c, "question", ""))
+            for c in cases
+        }
+    )
     missing = store.missing([c.id for c in cases])
     if missing:
         console.print(
@@ -166,6 +232,9 @@ def test(
     console.print(f"  target: {target_banner()}\n")
 
     scorecards, responses = asyncio.run(_run_cases(cases, model, store))
+    scorecards = [
+        unresolvable_card(case, model, resolutions[case.id]) for case in market_skips
+    ] + scorecards
 
     pin = build_run_pin(
         run_type="adhoc",
@@ -173,6 +242,7 @@ def test(
         models=[model],
         shared_loaded=True,
     )
+    pin["market_bindings"] = bindings_summary(resolutions)
     run_dir = save_run(
         model,
         scorecards,
@@ -263,6 +333,64 @@ async def _run_cases(cases, model: str, store):
     return scorecards, responses
 
 
+def _bind_markets(cases: list, skip_unavailable: bool) -> tuple[list, dict, list]:
+    """Bind declared markets, refusing the run unless told to skip.
+
+    Returns (cases_to_run, resolutions, cases_to_record_as_skipped). The refusal
+    is the default because a run that quietly dropped the leverage cases still
+    publishes a routing recommendation, and nothing in the summary would say the
+    evidence for that domain is missing.
+    """
+    from bench.market_resolver import (
+        MarketsUnavailable,
+        prepare_cases,
+        resolve_cases,
+        split_resolvable,
+    )
+
+    if not skip_unavailable:
+        try:
+            bound, resolutions = asyncio.run(prepare_cases(cases))
+        except MarketsUnavailable as exc:
+            console.print(f"[red]{exc}[/red]")
+            console.print(
+                "[dim]--skip-unavailable records them as harness artifacts "
+                "instead.[/dim]"
+            )
+            raise typer.Exit(1) from exc
+        return bound, resolutions, []
+
+    bound, resolutions = asyncio.run(resolve_cases(cases))
+    runnable, skipped = split_resolvable(bound, resolutions)
+    if skipped:
+        console.print(
+            f"[yellow]{len(skipped)} case(s) skipped — declared markets "
+            f"unavailable:[/yellow]"
+        )
+        for case in skipped:
+            console.print(f"    [yellow]{case.id}: {resolutions[case.id].reason()}[/yellow]")
+    return runnable, resolutions, skipped
+
+
+def _print_bindings(resolutions: dict) -> None:
+    """Show what each declared market bound to, so the run is self-documenting."""
+    bound = {cid: r for cid, r in resolutions.items() if r.bindings}
+    if not bound:
+        return
+    console.print(f"  [dim]markets bound for {len(bound)} case(s):[/dim]")
+    for cid, resolution in sorted(bound.items()):
+        for name, binding in sorted(resolution.bindings.items()):
+            pair = f"/{binding.trading_pair}" if binding.trading_pair else ""
+            warn = (
+                f" [yellow](crossed {binding.kind_change})[/yellow]"
+                if binding.kind_change
+                else ""
+            )
+            console.print(
+                f"    [dim]{cid}: {name} → {binding.connector}{pair}[/dim]{warn}"
+            )
+
+
 @app.command()
 def sweep(
     models: Path = typer.Option(
@@ -288,12 +416,19 @@ def sweep(
     max_params_b: Optional[float] = typer.Option(
         None, help="Skip models larger than this (cloud models are never skipped)"
     ),
+    skip_unavailable: bool = typer.Option(
+        False,
+        "--skip-unavailable",
+        help="Record cases whose declared markets cannot bind as harness "
+        "artifacts instead of refusing the run.",
+    ),
 ) -> None:
     """Benchmark every model in the registry, smallest first."""
     import uuid
 
     from bench.baseline import BaselineStore
     from bench.dataset import case_prompt_map, filter_cases, load_all_cases
+    from bench.market_resolver import bindings_summary, unresolvable_card
     from bench.matrix import load_models
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
@@ -334,8 +469,17 @@ def sweep(
         console.print("[red]No cases matched the filters.[/red]")
         raise typer.Exit(1)
 
+    cases, resolutions, market_skips = _bind_markets(cases, skip_unavailable)
+    _print_bindings(resolutions)
+
     store = BaselineStore()
     prompts = case_prompt_map()
+    prompts.update(
+        {
+            c.id: (c.scenario_name if c.type == "tick" else getattr(c, "question", ""))
+            for c in cases
+        }
+    )
     console.print(
         f"\nSweeping [bold]{len(registry)}[/bold] model(s) × {len(cases)} case(s)"
     )
@@ -346,6 +490,10 @@ def sweep(
         size = f"{entry.params_b}B" if entry.params_b else entry.provider
         console.print(f"[bold]{entry.key}[/bold] ({size})")
         scorecards, responses = asyncio.run(_run_cases(cases, entry.key, store))
+        scorecards = [
+            unresolvable_card(case, entry.key, resolutions[case.id])
+            for case in market_skips
+        ] + scorecards
         if not scorecards:
             console.print("  [yellow]no cases scored — skipping save[/yellow]")
             continue
@@ -356,6 +504,7 @@ def sweep(
                 shared_loaded=True,
         )
         pin["sweep"] = True
+        pin["market_bindings"] = bindings_summary(resolutions)
         run_dir = save_run(
             entry.key,
             scorecards,

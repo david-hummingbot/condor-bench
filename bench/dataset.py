@@ -142,6 +142,9 @@ class ConsultCase:
     # shape as live_expected but the tool is called by bench, not the model:
     # {"manage_routines": {"action": "list", "contains": ["bench_btc_price"]}}
     post_conditions: dict[str, Any] = field(default_factory=dict)
+    # Declared market requirements, bound to real connectors before the run.
+    # See bench/market_resolver.py; MARKETS_FIELD_DOC there is the schema.
+    markets: dict[str, Any] = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -181,6 +184,9 @@ class TickCase:
     # shape as live_expected but the tool is called by bench, not the model:
     # {"manage_routines": {"action": "list", "contains": ["bench_btc_price"]}}
     post_conditions: dict[str, Any] = field(default_factory=dict)
+    # Declared market requirements, bound to real connectors before the run.
+    # See bench/market_resolver.py; MARKETS_FIELD_DOC there is the schema.
+    markets: dict[str, Any] = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -209,6 +215,9 @@ class ToolCase:
     tags: list[str] = field(default_factory=list)
     category: str = "tool"
     type: str = "tool"
+    # Declared market requirements, bound to real connectors before the run.
+    # See bench/market_resolver.py; MARKETS_FIELD_DOC there is the schema.
+    markets: dict[str, Any] = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -249,6 +258,9 @@ class AgentCase:
     # shape as live_expected but the tool is called by bench, not the model:
     # {"manage_routines": {"action": "list", "contains": ["bench_btc_price"]}}
     post_conditions: dict[str, Any] = field(default_factory=dict)
+    # Declared market requirements, bound to real connectors before the run.
+    # See bench/market_resolver.py; MARKETS_FIELD_DOC there is the schema.
+    markets: dict[str, Any] = field(default_factory=dict)
 
     @property
     def domain(self) -> str:
@@ -301,6 +313,7 @@ def load_consult_cases(path: Path | None = None) -> list[ConsultCase]:
             live_expected=data.get("live_expected", {}),
             risk_level=_normalize_risk(data.get("risk_level")),
             agent_slug=data.get("agent_slug"),
+            markets=data.get("markets", {}),
         )
         for data in _iter_jsonl(path)
     ]
@@ -336,6 +349,7 @@ def load_tick_cases(path: Path | None = None) -> list[TickCase]:
                 # memory instead of the agent's, so fall back to a per-case slug
                 # rather than to None.
                 agent_slug=data.get("agent_slug") or f"bench_{data['id']}",
+                markets=data.get("markets", {}),
             )
         )
     return cases
@@ -358,6 +372,7 @@ def load_tool_cases(path: Path | None = None) -> list[ToolCase]:
             risk_level=_normalize_risk(data.get("risk_level")),
             agent_slug=data.get("agent_slug"),
             tags=data.get("tags", []),
+            markets=data.get("markets", {}),
         )
         for data in _iter_jsonl(path)
     ]
@@ -382,6 +397,7 @@ def load_agent_cases(path: Path | None = None) -> list[AgentCase]:
             post_conditions=data.get("post_conditions", {}),
             risk_level=_normalize_risk(data.get("risk_level")),
             tags=data.get("tags", []),
+            markets=data.get("markets", {}),
         )
         for data in _iter_jsonl(path)
     ]
@@ -391,7 +407,14 @@ def load_all_cases(*, layers: Iterable[str] | None = None) -> list[Case]:
     """Load every dataset layer, or just the named ones.
 
     ``layers`` accepts any of ``consult``, ``tick``, ``tool``, ``agent``.
+
+    ``{agent_id}`` is bound here rather than at run time so the question, the
+    ground truth and the fixture all carry one id that condor can actually
+    resolve — see :mod:`bench.probe_journal`. Deterministic and offline: the id
+    is derived from the case, not from the target.
     """
+    from bench.probe_journal import bind_agent_id
+
     wanted = set(layers) if layers else {"consult", "tick", "tool", "agent"}
     cases: list[Case] = []
     if "consult" in wanted:
@@ -402,15 +425,28 @@ def load_all_cases(*, layers: Iterable[str] | None = None) -> list[Case]:
         cases += load_tool_cases()
     if "agent" in wanted:
         cases += load_agent_cases()
-    return cases
+    return [bind_agent_id(case) for case in cases]
 
 
 def case_prompt_map() -> dict[str, str]:
-    """Map case_id → user-facing question / scenario name for UI + persistence."""
+    """Map case_id → user-facing question / scenario name for UI + persistence.
+
+    Cases that declare ``markets`` are rendered from their declared preferences
+    rather than resolved against a target: this map is generated offline (see
+    ``scripts/sync_case_prompts.py``) and read by the dashboard as a fallback for
+    older runs, so it must not depend on a live box — and a UI showing a literal
+    ``{perp.label}`` would be worse than one showing the nominal venue. A live run
+    overwrites these with the questions it actually asked.
+    """
+    from bench.market_resolver import render_nominal
+
     prompts: dict[str, str] = {}
     for case in load_all_cases():
+        rendered = render_nominal(case)
         prompts[case.id] = (
-            case.scenario_name if case.type == "tick" else getattr(case, "question", "")
+            rendered.scenario_name
+            if rendered.type == "tick"
+            else getattr(rendered, "question", "")
         )
     return prompts
 

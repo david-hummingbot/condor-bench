@@ -212,6 +212,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.cleanup import teardown
     from bench.client import case_input_text, run_case
     from bench.dataset import case_prompt_map, filter_cases, is_mutating, load_all_cases
+    from bench.market_resolver import bindings_summary, prepare_cases
     from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.mcp_provider import target_banner
     from bench.probe_journal import ensure_probe_journal
@@ -249,7 +250,22 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
         if not cases:
             raise ValueError("No cases matched the selected filters.")
 
+        # Declared markets bind here, before the first case. MarketsUnavailable
+        # propagates to the run's error state for the same reason the staging
+        # check does: a partially meaningless run is worse than none.
+        cases, resolutions = await prepare_cases(cases)
+
         prompts = case_prompt_map()
+        # The resolved question, not the template — the dashboard shows what the
+        # model was actually asked.
+        prompts.update(
+            {
+                c.id: (
+                    c.scenario_name if c.type == "tick" else getattr(c, "question", "")
+                )
+                for c in cases
+            }
+        )
         store = BaselineStore()
         total = len(req.models) * len(cases)
         state["total"] = total
@@ -294,6 +310,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     models=[norm_key],
                     shared_loaded=True,
                 )
+                pin["market_bindings"] = bindings_summary(resolutions)
                 if partial:
                     pin["partial"] = True
                     pin["cases_planned"] = len(cases)

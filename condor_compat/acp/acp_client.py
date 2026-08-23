@@ -82,6 +82,21 @@ def is_acp_model(model_key: str) -> bool:
 # condor fixed the input half upstream in `normalize_tool_call` (SEC-093) for the
 # same reason on the danger-gate side; the output half it does not need, because
 # condor only renders tool output while bench scores it.
+# Opt-in frame log. The failures this file exists to prevent are all "the wire
+# said something other than what we read", and they are invisible in a scorecard —
+# so there has to be a way to see the frames without instrumenting the code again
+# from scratch. Set BENCH_ACP_TRACE=/path/to/frames.jsonl.
+def _trace_frame(update: dict[str, Any]) -> None:
+    path = os.environ.get("BENCH_ACP_TRACE")
+    if not path:
+        return
+    try:
+        with open(path, "a") as fh:
+            fh.write(json.dumps(update, default=str) + "\n")
+    except Exception:
+        pass  # Diagnostics must never break a run.
+
+
 def acp_tool_input(payload: dict[str, Any]) -> Any:
     """A tool call's arguments. ``rawInput`` on the wire, ``input`` in older frames.
 
@@ -425,6 +440,7 @@ class ACPClient:
 
     def _on_session_update(self, sessionId: str = "", update: dict[str, Any] | None = None, _meta: dict | None = None, **kw: Any) -> None:
         update = update or {}
+        _trace_frame(update)
         kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
             text = update.get("content", {}).get("text", "")

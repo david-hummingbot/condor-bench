@@ -503,9 +503,29 @@ async def _stream_turn(
                 # update — so a call's args are completed here, not only at open.
                 # Without this the params metric scores every ACP case 0.0 against a
                 # trace of empty argument sets.
+                #
+                # The arguments arrive *incrementally*, one key at a time, and the
+                # last frames carry `rawInput: null`. Verbatim from the wire:
+                #
+                #   tool_call        rawInput={}
+                #   tool_call_update rawInput={"data_type": "prices"}
+                #   tool_call_update rawInput={"data_type": …, "connector_name": …}
+                #   tool_call_update rawInput={"data_type": …, "connector_name": …,
+                #                              "trading_pairs": ["BTC-USDT"]}
+                #   tool_call_update rawInput=null
+                #
+                # So "fill only while empty" locks in the first fragment and throws
+                # the real argument set away: every ACP call was recorded with
+                # exactly one argument, and `tool_params` scored the rest as
+                # `actual: null`. Merge instead, later keys winning, which also
+                # survives a bridge that re-sends the whole set each frame.
                 if event.input and event.tool_call_id in call_index:
                     call = tool_calls[call_index[event.tool_call_id]]
-                    if not call.get("args"):
+                    if isinstance(event.input, dict):
+                        merged = dict(call.get("args") or {})
+                        merged.update(event.input)
+                        call["args"] = merged
+                    elif not call.get("args"):
                         call["args"] = event.input
                 if event.status:
                     idx = call_index.get(event.tool_call_id)
@@ -809,8 +829,11 @@ def tick_agent_id(case: Any) -> str:
     the failure is about provisioning rather than about a malformed string, and
     :func:`bench.scorer._detect_harness_artifact` can name it.
     """
-    slug = getattr(case, "agent_slug", None) or "bench_tick"
-    return f"{slug}.{case.id}_1"
+    from bench.probe_journal import probe_agent_id  # noqa: PLC0415
+
+    # One definition of the format, shared with the non-tick journal cases and
+    # with the fixture that provisions the directory it points at.
+    return probe_agent_id(case) or f"bench_tick.{case.id}_1"
 
 
 def build_tick_prompt_for_case(case: Any, model: str) -> str:
@@ -869,6 +892,46 @@ async def run_case(case: Any, model: str) -> BenchmarkResult:
     return result
 
 
+# Cap for the tick context handed to the judge. `metrics.answer_quality`
+# truncates USER INPUT at JUDGE_QUESTION_CHARS (2500), so this stays well inside
+# it: the point is the facts the model was given, not the whole prompt.
+_TICK_CONTEXT_CHARS = 1800
+
+
 def case_input_text(case: Any) -> str:
-    """The text the judge is shown as "what the user asked"."""
-    return case.scenario_name if case.type == "tick" else getattr(case, "question", "")
+    """The text the judge is shown as "what the user asked".
+
+    For a tick this has to carry the context the tick prompt injected, not just
+    the scenario name. A tick is handed its market snapshot, risk state and
+    strategy up front — condor pre-fetches them — so a model reasoning from
+    "RSI 48, spread 0.04%" is quoting its own input. Showing the judge only
+    "BTC Grid - First Tick, No Position" made every such figure look unsourced,
+    and the judge did exactly what it is told to do with unsourced figures:
+    `t001` lost half its answer-quality score to "cites specific market checks
+    (RSI 48, spread 0.04%) that aren't backed by any tool call", and `t006` to
+    "lacks concrete tool-call evidence for the market data cited". Answer quality
+    is the heaviest term in the composite, and all eight tick cases paid it.
+    """
+    if case.type != "tick":
+        return getattr(case, "question", "")
+
+    parts = [f"[TICK {getattr(case, 'tick_number', 1)}] {case.scenario_name}"]
+    strategy = str(getattr(case, "strategy_instructions", "") or "").strip()
+    if strategy:
+        parts.append(f"STRATEGY: {strategy}")
+    core = getattr(case, "core_data", None) or {}
+    if isinstance(core, dict) and core:
+        given = "; ".join(f"{k}: {v}" for k, v in core.items())
+        # Named explicitly, because the distinction the judge keeps getting wrong
+        # is "quoted from the prompt" versus "invented".
+        parts.append(f"DATA ALREADY PROVIDED TO THE AGENT (no tool call needed): {given}")
+    risk = getattr(case, "risk_state", None) or {}
+    if isinstance(risk, dict) and risk:
+        parts.append(f"RISK STATE: {json.dumps(risk)}")
+    learnings = str(getattr(case, "learnings", "") or "").strip()
+    if learnings:
+        parts.append(f"PRIOR LEARNINGS: {learnings}")
+    recent = str(getattr(case, "recent_decisions", "") or "").strip()
+    if recent:
+        parts.append(f"RECENT DECISIONS: {recent}")
+    return "\n".join(parts)[:_TICK_CONTEXT_CHARS]

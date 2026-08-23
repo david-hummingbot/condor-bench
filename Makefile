@@ -1,5 +1,5 @@
 .PHONY: install test-suite baseline test report dashboard dashboard-dev clean \
-        tool-surface check-drift case-prompts staging-check register-server \
+        tool-surface check-drift case-prompts staging-check market-check register-server \
         clean-journals \
         sweep matrix route
 
@@ -43,6 +43,11 @@ case-prompts:
 # gate before any run. See docs/STAGING.md.
 staging-check:
 	uv run python runner.py staging-check
+
+# Which cases the target's connectors can support. Read-only; exits non-zero
+# when a case names a connector this box does not have keys for.
+market-check:
+	uv run python runner.py market-check
 
 # Register BENCH_SERVER_NAME in condor's config.yml from bench's env vars.
 register-server:

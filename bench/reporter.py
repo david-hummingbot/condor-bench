@@ -158,6 +158,9 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
     with_validity = [s for s in valid if s.live_validity is not None]
     infra_excluded = sum(1 for sc in scorecards if sc.error and str(sc.error).startswith("infra:"))
     artifacts = [sc for sc in scorecards if sc.harness_artifact]
+    # Caveats are scored, so they are counted separately — a reader still needs to
+    # know that every row in an ACP run was offered one extra tool.
+    notes = [sc for sc in scorecards if getattr(sc, "harness_note", None)]
     unbuilt = [sc for sc in scorecards if getattr(sc, "post_condition_failed", None)]
 
     return {
@@ -170,6 +173,11 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
         "harness_artifact_cases": [
             {"case_id": sc.case_id, "reason": sc.harness_artifact} for sc in artifacts
         ],
+        # Scored, unlike artifacts — a comparability caveat, not an exclusion.
+        "harness_notes": len(notes),
+        "harness_note_reasons": sorted(
+            {str(sc.harness_note) for sc in notes}
+        ),
         # Cases that asserted an end state which was not there afterwards. Counted
         # separately from harness artifacts: those are excluded from routing, these
         # are genuine model failures whose composite was capped.

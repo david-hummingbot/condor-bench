@@ -214,6 +214,105 @@ counts across paths are comparable.
 
 ---
 
+## Connector availability (`make market-check`)
+
+A case names a venue in prose (*"Set Binance perpetuals to 3x leverage"*) and
+sometimes pins one in `expected_tool_params`. Both are claims about the target
+box. When the claim is wrong the model still gets scored: it calls
+`binance_perpetual`, the API answers `missing 2 required positional arguments:
+'binance_api_key'`, and `metrics/live_validity.py` reads that as a failed tool
+call. Nothing distinguishes it in the results from a model that picked the wrong
+tool.
+
+`make market-check` is the read-only report that finds those cases before a run:
+
+```bash
+make market-check          # or: uv run python runner.py market-check [--json] [--all]
+```
+
+It reads three tiers off the target, which must not be conflated:
+
+| Tier | Endpoint | Gates |
+|---|---|---|
+| supported | `GET /connectors/` | that the build can construct the connector — true for ~60 on a stock install |
+| **credentialed** | `GET /accounts/{account}/credentials` | anything acting *as* the account: leverage, position mode, executors, bots |
+| pairs | `GET /connectors/{name}/trading-rules` | public, so a pair can look available on a connector that cannot trade |
+
+Plus `GET /gateway/connectors` for DEX/AMM connectors, which is a separate
+service on a separate namespace — a gateway connector is never interchangeable
+with an exchange, and a down gateway makes every `manage_amm` /
+`explore_dex_pools` case unrunnable whether or not it names a connector.
+
+Each case comes back as one of:
+
+* **ok** — every connector it names is available at the tier it needs
+* **rebindable** — the named connector has no keys but an equivalent one does
+  (`binance_perpetual` → `binance_perpetual_testnet`). The case is fine; the
+  literal in it is not
+* **unrunnable** — nothing on this target satisfies it. No substitution helps
+* **unknown** — the target or a namespace could not be read, so nothing is
+  provable. Never reported as a dataset problem
+* **no_dependency** — names no connector
+
+Which tool a case calls decides what it needs, and that is derived from
+`datasets/tool_surface.json` rather than hardcoded: a singular `account_name`
+param means the call acts on one account and needs credentials, where the plural
+`account_names` is a read filter that merely returns less. A tool taking both
+`connector` and `network` is addressing a chain, so its connector is a gateway
+one.
+
+Exit codes: `0` clean, `1` some case cannot run as written, `2` the target could
+not be read at all. Unlike `staging-check`, a failure here is usually a *dataset*
+problem, not a target one.
+
+`bench/market_registry.py` holds the box-side probe and the binding logic;
+`bench/market_preflight.py` holds the case-side analysis.
+
+---
+
+## Declared markets and the run gate
+
+Cases can declare the market they need instead of hardcoding one — schema and
+authoring rules in [docs/CASE_LIST.md](CASE_LIST.md#declaring-markets-instead-of-hardcoding-one).
+What matters operationally is what happens when a declaration cannot be
+satisfied.
+
+`bench/market_resolver.py` binds every declared requirement once, after filtering
+and before the first case runs, and **refuses the run** if any of them binds to
+nothing:
+
+```
+6 case(s) declare markets this target cannot provide:
+  agent_meteora_launch_lp_001: dex: gateway namespace unreadable: gateway returned HTTP 503
+  ...
+Start the gateway service, or narrow the run (--layers / --tags / --risk) to
+exclude these cases. `make market-check` reports the whole dataset.
+```
+
+Fail-closed for the same reason the staging check is: a run that quietly dropped
+the leverage cases still publishes a routing recommendation, and nothing in the
+summary would say the evidence for that domain is missing.
+
+The gate applies to the **selected** cases, so narrowing the run is a legitimate
+way past it — a box without a gateway can still sweep the CEX layers. When you
+need the whole set anyway, `--skip-unavailable` records the unbindable cases as
+harness artifacts instead (excluded from routing, reason attached) rather than
+refusing:
+
+```bash
+uv run python runner.py test ollama:qwen2.5:14b --skip-unavailable
+```
+
+That is an opt-in for a reason: the run is thinner than its case count suggests.
+
+What bound is printed at run start and recorded in the run's summary under
+`market_bindings`. That record is not bookkeeping — a leverage score earned
+against `binance_perpetual_testnet` is not the same measurement as one earned
+against `binance_perpetual`, and the binding is the only thing that makes the
+difference visible when two runs are compared.
+
+---
+
 ## Market warmup
 
 Before each case, bench warms every `(connector, trading_pair)` pinned in

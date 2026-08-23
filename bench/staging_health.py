@@ -310,6 +310,33 @@ async def check_staging(*, timeout: float = 10.0) -> HealthReport:
     # 7. Orphaned executors from a prior run. Blocking for every run: any case may
     #    create an executor, and teardown then runs against this instance — a
     #    teardown that stops "everything running" would kill unrelated positions.
+    # 5. bench's own chat and user id have to agree, or `delegate` 403s.
+    #
+    #    condor's guard (condor/web/routes/agents.py) early-returns when
+    #    `chat_id == user_id` — a DM chat — and otherwise asks Telegram whether
+    #    the user is a member of that chat. bench's synthetic user id is not a
+    #    real Telegram account, so the membership lookup fails and every delegate
+    #    call comes back `403 chat_id is not a chat you belong to`. That cost
+    #    `agent_condor_delegate_001` its whole live-validity score, reported as a
+    #    model failure. Non-blocking: it only breaks the delegate/notification
+    #    cases, and which id to align on is the operator's call.
+    chat_id, user_id = staging["chat_id"], staging["user_id"]
+    report.checks.append(
+        Check(
+            "bench_identity_consistent",
+            chat_id == user_id,
+            f"chat_id and user_id both {chat_id}"
+            if chat_id == user_id
+            else (
+                f"BENCH_CHAT_ID={chat_id} but BENCH_USER_ID={user_id} — condor will "
+                f"403 every delegate call ('chat_id is not a chat you belong to'). "
+                f"Set both the same, or unset BENCH_CHAT_ID to use the isolated "
+                f"default."
+            ),
+            blocking=False,
+        )
+    )
+
     orphans = await _probe_active_executors(
         resolved, str(staging["username"]), str(staging["password"]), timeout
     )

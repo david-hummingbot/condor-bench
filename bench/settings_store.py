@@ -129,6 +129,18 @@ SETTINGS_FIELDS: list[dict[str, Any]] = [
             "id makes notification cases scorable, and means a run messages you."
         ),
     },
+    {
+        "key": "BENCH_USER_ID",
+        "label": "Telegram user id",
+        "group": "Staging",
+        "secret": False,
+        "hint": (
+            "Who bench acts as. Auto-filled from the chat id on save, which is what "
+            "you want for a DM — Telegram keys a private chat by its user, and Condor "
+            "waves through delegate when the two match. Set them apart only for a "
+            "group chat you are genuinely a member of."
+        ),
+    },
 ]
 
 # Keys owned by bench (or retired) — cleared from .env on save so old values cannot
@@ -141,9 +153,15 @@ SETTINGS_FIELDS: list[dict[str, Any]] = [
 # cases could not earn live_validity for a reason no amount of bot configuration fixed.
 # It is now an ordinary editable setting; `config.staging_config` already read the env
 # override, so nothing downstream changes.
+# BENCH_USER_ID left this list for the same reason BENCH_CHAT_ID did. It was
+# "owned by bench" at the synthetic 999001, and the moment BENCH_CHAT_ID became a
+# real Telegram id the two no longer matched — so Condor's delegate guard
+# (condor/web/routes/agents.py) stopped short-circuiting on "this is the user's
+# own DM", tried to verify that user 999001 belongs to a real chat, and answered
+# `403 chat_id is not a chat you belong to` on every delegate call. Worse, a save
+# used to *delete* an operator's correct override and put the 403 back.
 _INTERNAL_STAGING_KEYS = (
     "BENCH_SERVER_NAME",
-    "BENCH_USER_ID",
     "BENCH_STAGING_ACCOUNT",
 )
 _KNOWN = {f["key"] for f in SETTINGS_FIELDS} | set(_INTERNAL_STAGING_KEYS)
@@ -248,11 +266,12 @@ def update_settings(updates: dict[str, str | None]) -> dict[str, Any]:
         # `staging_config` does `int(...)` on this, and it is read by every run and by
         # the pre-flight — so a typo here would surface as a ValueError traceback from
         # somewhere unrelated. Reject it while the operator is still looking at the form.
-        if key == "BENCH_CHAT_ID" and text:
+        if key in ("BENCH_CHAT_ID", "BENCH_USER_ID") and text:
             candidate = text[1:] if text.startswith("-") else text
             if not candidate.isdigit():
+                label = "chat id" if key == "BENCH_CHAT_ID" else "user id"
                 raise SettingsError(
-                    f"Telegram chat id must be a number (got {text!r}). Group chats are "
+                    f"Telegram {label} must be a number (got {text!r}). Group chats are "
                     "negative; leave it empty to keep the synthetic default."
                 )
         if key == "BENCH_JUDGE_BACKEND" and text:
@@ -276,6 +295,12 @@ def update_settings(updates: dict[str, str | None]) -> dict[str, Any]:
     expected = (current.get("BENCH_EXPECTED_API_URL") or "").rstrip("/")
     if api_url and not expected:
         current["BENCH_EXPECTED_API_URL"] = api_url
+
+    # A real chat id with no user id is the 403 configuration. Mirroring is right
+    # for a DM (Telegram keys it by its user) and is what an operator who filled in
+    # one field meant; a group chat needs both set, which this does not override.
+    if current.get("BENCH_CHAT_ID") and not current.get("BENCH_USER_ID"):
+        current["BENCH_USER_ID"] = current["BENCH_CHAT_ID"]
 
     # Drop empty known keys from the written file (clear).
     to_write = {k: v for k, v in current.items() if v != "" or k not in _KNOWN}
@@ -307,24 +332,64 @@ def update_settings(updates: dict[str, str | None]) -> dict[str, Any]:
 def _write_env_file(
     path: Path, values: dict[str, str], *, preserve_unknown_from: dict[str, str]
 ) -> None:
-    """Rewrite .env: keep comments/blank structure lightly; upsert known keys."""
+    """Rewrite .env: keep comments/blank structure lightly; upsert known keys.
+
+    One key, one line. Every save used to *append* every unknown key it had
+    parsed — on the theory that they "weren't in the file lines" — but the
+    pass-through below has always emitted them already, so each save added a
+    second copy of BENCH_MODE, a third, a fourth. A real .env reached four copies
+    of two keys before anyone noticed, and nothing broke loudly because dotenv
+    takes the last occurrence: the file just grew, and the value you saw in an
+    editor was not necessarily the one in force.
+
+    So duplicates are now collapsed on write, whoever created them, and the
+    surviving line keeps the value that was *effective* before the save — the
+    last occurrence, matching dotenv — not the first one seen.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     existing_lines = path.read_text().splitlines() if path.is_file() else []
 
-    written: set[str] = set()
+    def key_of(raw: str) -> str | None:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            return None
+        m = _LINE_RE.match(stripped)
+        return m.group(1) if m else None
+
+    # How many times each key appears, so a key that appears once keeps its line
+    # verbatim (comments, spacing and quoting untouched) and only a duplicated one
+    # gets normalised.
+    counts: dict[str, int] = {}
+    for raw in existing_lines:
+        key = key_of(raw)
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+
+    written: set[str] = set()   # known keys given their new value
+    seen: set[str] = set()      # every key already emitted or deliberately dropped
     out_lines: list[str] = []
 
     for raw in existing_lines:
-        stripped = raw.strip()
-        m = _LINE_RE.match(stripped) if stripped and not stripped.startswith("#") else None
-        if m and m.group(1) in _KNOWN:
-            key = m.group(1)
+        key = key_of(raw)
+        if key is None:
+            out_lines.append(raw)
+            continue
+        if key in seen:
+            continue  # a duplicate of a key already emitted — drop it
+        if key in _KNOWN:
+            seen.add(key)
             if key in values and values[key] != "":
                 out_lines.append(f"{key}={_quote(values[key])}")
                 written.add(key)
-            # else: cleared — skip the line
+            # else: cleared — the line is dropped, and `seen` stops a later
+            # duplicate from resurrecting the old value.
             continue
-        out_lines.append(raw)
+        seen.add(key)
+        if counts.get(key, 1) > 1:
+            # Collapse to the effective (last) value rather than this first line.
+            out_lines.append(f"{key}={_quote(preserve_unknown_from.get(key, ''))}")
+        else:
+            out_lines.append(raw)
 
     # Append known keys that weren't in the file yet.
     missing = [k for k in _KNOWN if k in values and values[k] != "" and k not in written]
@@ -337,12 +402,15 @@ def _write_env_file(
             if k in missing:
                 out_lines.append(f"{k}={_quote(values[k])}")
                 written.add(k)
+                seen.add(k)
 
-    # Preserve unknown keys from the previous parse that weren't in the file lines
-    # (shouldn't happen often).
+    # Unknown keys that really were absent from the file lines — a value that came
+    # from the process env, not from disk. `seen` is what makes this an append of
+    # last resort instead of a duplicate of every line above.
     for key, val in preserve_unknown_from.items():
-        if key not in _KNOWN and key not in written and val:
+        if key not in _KNOWN and key not in seen and val:
             out_lines.append(f"{key}={_quote(val)}")
+            seen.add(key)
 
     from bench.atomic_io import atomic_write_text
 

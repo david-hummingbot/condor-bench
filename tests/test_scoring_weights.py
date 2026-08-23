@@ -127,12 +127,76 @@ def test_run_without_a_resolved_url_is_an_artifact():
     assert reason and "API URL" in reason
 
 
-def test_playwright_autodiscovery_is_an_artifact():
-    """Extra tools shift the small-model tool cut, so the run isn't comparable."""
+def test_playwright_autodiscovery_is_a_note_not_an_artifact():
+    """A caveat, not an exclusion — the row is still evidence about the model.
+
+    This was an artifact on the theory that extra tools shift the small-model
+    tool cut. But `_TOOL_LIMITS` lives in `condor_compat.acp.pydantic_ai_client`
+    and is never applied on the ACP path, which is the only path that gets
+    autodiscovery extras — so the mechanism cannot occur on the affected runs,
+    while the exclusion applied to *every* row of them. A full 80-case
+    claude-code run reported `cases_scored: 0`, `composite_avg: 0.0` and an empty
+    matrix: no routing recommendation could be produced at all.
+
+    The real risk it was reaching for — an expected tool pushed out of view — has
+    its own precise rule below, per case, on `offered_tools`.
+    """
+    from bench.scorer import _detect_harness_note
+
+    wiring = {"api_url": "http://staging:8000", "autodiscovery_extras": ["playwright"]}
+    assert _detect_harness_artifact(_result(wiring)) is None
+    note = _detect_harness_note(_result(wiring))
+    assert note and "playwright" in note
+
+
+def test_an_expected_tool_never_offered_is_still_an_artifact():
+    """The genuine harm keeps its exclusion, per case rather than per transport."""
     reason = _detect_harness_artifact(
-        _result({"api_url": "http://staging:8000", "autodiscovery_extras": ["playwright"]})
+        _result(
+            {
+                "api_url": "http://staging:8000",
+                "autodiscovery_extras": ["playwright"],
+                "offered_tools": ["get_market_data"],
+            }
+        ),
+        ["manage_executors"],
     )
-    assert reason and "playwright" in reason
+    assert reason and "manage_executors" in reason
+
+
+def test_a_bench_probe_prompt_fallback_is_not_an_artifact():
+    """`bench_journal_probe` is a journal fixture, not an assistant.
+
+    It has no AGENT.md by design, so the generic Condor prompt is the correct
+    prompt for it. Flagging the fallback excluded all four journal cases from
+    every run for lacking instructions they were never meant to have.
+    """
+    assert (
+        _detect_harness_artifact(
+            _result(
+                {
+                    "api_url": "http://staging:8000",
+                    "agent_slug": "bench_journal_probe",
+                    "assistant_prompt": "fallback:vendored (no prompt found)",
+                }
+            )
+        )
+        is None
+    )
+
+
+def test_a_real_agent_prompt_fallback_is_still_an_artifact():
+    """A Layer 3 case on the generic prompt is not a test of that assistant."""
+    reason = _detect_harness_artifact(
+        _result(
+            {
+                "api_url": "http://staging:8000",
+                "agent_slug": "market_making_expert",
+                "assistant_prompt": "fallback:vendored (no prompt found)",
+            }
+        )
+    )
+    assert reason and "fell back" in reason
 
 
 def test_clean_wiring_is_not_an_artifact():

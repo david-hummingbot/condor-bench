@@ -94,6 +94,13 @@ class ScoreCard:
     # Set when the harness — not the model — is why this row is bad. Excluded
     # from routing so a misconfiguration can't become a model recommendation.
     harness_artifact: str | None = None
+    # Set when the measurement is valid but carries a caveat — something worth
+    # knowing when comparing runs, not a reason to throw the row away. Kept
+    # separate from `harness_artifact` because exclusion is total: a full ACP run
+    # flagged all 80 cases for having one extra unused tool available, so
+    # `cases_scored` was 0, `composite_avg` 0.0, and the matrix had nothing to
+    # route from. A caveat is reported and still scored.
+    harness_note: str | None = None
     # Bans the run violated, as `tool` or `tool:action`. Empty on a clean run — a
     # tool_accuracy of 0.0 with no explanation is exactly the debugging dead end the
     # first smoke run hit.
@@ -135,6 +142,7 @@ class ScoreCard:
             "baseline_latency_s": round(self.baseline_latency_s, 2),
             "error": self.error,
             "harness_artifact": self.harness_artifact,
+            "harness_note": self.harness_note,
             "post_condition_failed": self.post_condition_failed,
             "forbidden_violations": self.forbidden_violations,
             "agent_internal_calls": self.agent_internal_calls,
@@ -220,6 +228,7 @@ async def score(
     judge_before = JUDGE_USAGE.snapshot()
 
     harness_artifact = _detect_harness_artifact(result, expected_tools)
+    harness_note = _detect_harness_note(result)
 
     def _card(**overrides: Any) -> ScoreCard:
         base: dict[str, Any] = {
@@ -239,6 +248,7 @@ async def score(
             "baseline_latency_s": baseline_latency_s,
             "latency_s": result.latency_s,
             "harness_artifact": harness_artifact,
+            "harness_note": harness_note,
         }
         base.update(overrides)
         return ScoreCard(**base)
@@ -418,6 +428,33 @@ def timeout_card(case: Any, model: str, timeout_s: float, baseline_latency_s: fl
     )
 
 
+def _detect_harness_note(result: BenchmarkResult) -> str | None:
+    """A caveat worth recording that does not invalidate the measurement.
+
+    The distinction this exists to make: an ACP run auto-discovers whatever stdio
+    servers ``condor/.mcp.json`` declares, so every case gets ``playwright``
+    offered alongside the 24 condor/hummingbot tools. bench cannot suppress it
+    from its side (see ``bench.mcp_provider.wiring_metadata``), and the tool count
+    genuinely differs from the PydanticAI path — so a cross-path comparison of
+    tool scores needs to know. But the model still ran against the right target
+    with the right tools, and no case needs a browser.
+
+    Treating that as a harness *artifact* excluded every row: a full 80-case
+    claude-code run reported ``cases_scored: 0``, ``composite_avg: 0.0`` and an
+    empty matrix, so the run could not produce a routing recommendation at all.
+    """
+    wiring = result.wiring or {}
+    extras = wiring.get("autodiscovery_extras")
+    if extras:
+        names = ", ".join(str(e) for e in extras)
+        return (
+            f"ACP auto-discovery added {names} from condor/.mcp.json — the offered "
+            "tool set is larger than the PydanticAI path's, so tool scores are not "
+            "directly comparable across transports"
+        )
+    return None
+
+
 def _detect_harness_artifact(
     result: BenchmarkResult, expected_tools: list[str] | None = None
 ) -> str | None:
@@ -432,8 +469,19 @@ def _detect_harness_artifact(
 
     # A Layer 3 case measured against the generic Condor prompt instead of its
     # own assistant's is not a test of that assistant.
+    #
+    # Bench's own probe agents are the exception: `bench_journal_probe` is a
+    # journal fixture, not an assistant, and it has no AGENT.md by design — the
+    # generic Condor prompt is the *correct* prompt for it. Flagging it excluded
+    # all four journal cases from every run for having no instructions they were
+    # never supposed to have.
     prompt_source = wiring.get("assistant_prompt")
-    if isinstance(prompt_source, str) and prompt_source.startswith("fallback:"):
+    slug = str(wiring.get("agent_slug") or "")
+    if (
+        isinstance(prompt_source, str)
+        and prompt_source.startswith("fallback:")
+        and not slug.startswith("bench_")
+    ):
         return (
             f"assistant prompt fell back ({prompt_source}) — the model was given "
             "the generic Condor prompt, not this agent's instructions"
@@ -441,12 +489,6 @@ def _detect_harness_artifact(
 
     if not wiring.get("api_url"):
         return "run resolved no API URL — MCP wiring did not report a target"
-    if wiring.get("autodiscovery_extras"):
-        extras = ", ".join(str(e) for e in wiring["autodiscovery_extras"])
-        return (
-            f"ACP auto-discovery added {extras} from condor/.mcp.json — the tool "
-            "set differs from the PydanticAI path, so tool scores are not comparable"
-        )
 
     from metrics.tool_accuracy import normalize_tool_name
 

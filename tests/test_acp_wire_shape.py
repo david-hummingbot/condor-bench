@@ -509,3 +509,108 @@ def test_field_assertions_can_reach_inside_the_envelope():
         {"manage_servers": {"contains": ["bench_staging"], "fields": {"status": {"eq": "online"}}}},
     )
     assert score == 1.0
+
+
+# ── Streaming arguments ────────────────────────────────────────────────────────
+# Verbatim from BENCH_ACP_TRACE on a real bench case: the bridge does not send a
+# tool call's arguments once, it streams them a key at a time and then sends
+# `rawInput: null` twice more. Recording the first non-empty frame therefore
+# captures a one-key fragment and discards the real argument set — 78 of 78 MCP
+# calls in a full run were logged with at most one argument, and `tool_params`
+# scored the rest as `actual: null`.
+STREAMED_INPUT_FRAMES = [
+    {"sessionUpdate": "tool_call", "toolCallId": "toolu_stream", "status": "pending",
+     "rawInput": {},
+     "_meta": {"claudeCode": {"toolName": "mcp__mcp-hummingbot__get_market_data"}}},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "toolu_stream",
+     "rawInput": {"data_type": "prices"}},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "toolu_stream",
+     "rawInput": {"data_type": "prices", "connector_name": "binance"}},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "toolu_stream",
+     "rawInput": {"data_type": "prices", "connector_name": "binance",
+                  "trading_pairs": ["BTC-USDT"]}},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "toolu_stream", "rawInput": None},
+    {"sessionUpdate": "tool_call_update", "toolCallId": "toolu_stream", "status": "completed",
+     "rawInput": None},
+]
+
+
+def _replay(frames: list[dict]) -> list[dict]:
+    """Drive bench's own merge loop over a frame sequence, returning tool_calls.
+
+    Mirrors the `ToolCallEvent` / `ToolCallUpdate` handling in
+    `bench.client._collect`: the merge is what this pins, so it has to be the
+    real code path and not a re-implementation.
+    """
+    from condor_compat.acp.client import ToolCallEvent, ToolCallUpdate
+
+    client = _client()
+    for frame in frames:
+        client._on_session_update(update=frame)
+    events = _drain(client)
+
+    tool_calls: list[dict] = []
+    call_index: dict[str, int] = {}
+    for event in events:
+        if isinstance(event, ToolCallEvent):
+            if event.tool_call_id:
+                call_index[event.tool_call_id] = len(tool_calls)
+            tool_calls.append(
+                {"tool": event.title, "args": event.input or {},
+                 "tool_call_id": event.tool_call_id, "status": event.status}
+            )
+        elif isinstance(event, ToolCallUpdate):
+            if event.input and event.tool_call_id in call_index:
+                call = tool_calls[call_index[event.tool_call_id]]
+                if isinstance(event.input, dict):
+                    merged = dict(call.get("args") or {})
+                    merged.update(event.input)
+                    call["args"] = merged
+                elif not call.get("args"):
+                    call["args"] = event.input
+            if event.status:
+                idx = call_index.get(event.tool_call_id)
+                if idx is not None:
+                    tool_calls[idx]["status"] = event.status
+    return tool_calls
+
+
+def test_streamed_arguments_are_accumulated_not_truncated():
+    """The whole argument set has to survive, not just the first key streamed."""
+    (call,) = _replay(STREAMED_INPUT_FRAMES)
+    assert call["args"] == {
+        "data_type": "prices",
+        "connector_name": "binance",
+        "trading_pairs": ["BTC-USDT"],
+    }
+    assert call["status"] == "completed"
+
+
+def test_a_trailing_null_input_does_not_erase_the_arguments():
+    """The last two frames carry `rawInput: null` and must be ignored."""
+    (call,) = _replay(STREAMED_INPUT_FRAMES)
+    assert len(call["args"]) == 3
+
+
+def test_params_metric_sees_the_pinned_keys_after_the_merge():
+    """What the bug actually cost: pinned params scored against a fragment."""
+    from metrics.tool_params import ToolParamMetric
+
+    (call,) = _replay(STREAMED_INPUT_FRAMES)
+    expected = {
+        "get_market_data": {"connector_name": "binance", "trading_pairs": ["BTC-USDT"]}
+    }
+    score = ToolParamMetric().score([call], expected)
+    assert score == 1.0, call["args"]
+
+
+def test_the_first_fragment_alone_would_have_failed():
+    """Guards the guard: the old behaviour must actually score worse."""
+    from metrics.tool_params import ToolParamMetric
+
+    truncated = [{"tool": "mcp__mcp-hummingbot__get_market_data",
+                  "args": {"data_type": "prices"}}]
+    expected = {
+        "get_market_data": {"connector_name": "binance", "trading_pairs": ["BTC-USDT"]}
+    }
+    assert ToolParamMetric().score(truncated, expected) < 1.0

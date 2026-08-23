@@ -2,6 +2,10 @@
 .venv/
 .env
 *.env
+# Timestamped .env backups (`.env.bak-1787517654`) do not end in `.env`, so the
+# patterns above miss them — and they hold the same API keys and passwords.
+.env.bak*
+.env.*.bak
 
 # Isolated cwd for the ACP judge — must not inherit condor's .mcp.json
 .judge-acp/

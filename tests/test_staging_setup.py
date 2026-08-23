@@ -131,21 +131,21 @@ def test_update_settings_clears_identity_overrides_and_syncs(tmp_path, monkeypat
     )
     text = env_path.read_text()
     assert "BENCH_SERVER_NAME" not in text
-    assert "BENCH_USER_ID" not in text
     assert "HUMMINGBOT_API_URL=http://staging.example:8000" in text
     assert result.get("staging_sync", {}).get("ok") is True, result.get("staging_sync")
     assert result["bench_identity"]["server_name"] == BENCH_SERVER_NAME
-    # BENCH_CHAT_ID is no longer an internal identity constant. It was stripped here
-    # along with server/user, but its constant is 999001 — a synthetic id, not a Telegram
-    # chat — so `send_notification` could only ever answer "chat not found" and four
-    # cases could not earn live_validity. It is now an ordinary editable setting; an
-    # untouched save must leave whatever the operator set alone rather than wipe it.
+    # Neither BENCH_CHAT_ID nor BENCH_USER_ID is an internal identity constant any
+    # more, for the same reason: the constants are synthetic (999001), and a
+    # synthetic identity cannot do the job. A synthetic chat id made
+    # `send_notification` answer "chat not found"; a synthetic *user* id against a
+    # real chat id made Condor answer `403 chat_id is not a chat you belong to` on
+    # every delegate call — and a save used to delete the operator's correct
+    # override and reinstate that 403. An unrelated save must leave both alone.
     assert "BENCH_CHAT_ID=1" in text, "an unrelated save cleared the operator's chat id"
-    assert all(
-        f["key"] not in {"BENCH_SERVER_NAME", "BENCH_USER_ID"}
-        for f in result["fields"]
-    )
+    assert "BENCH_USER_ID=1" in text, "an unrelated save cleared the operator's user id"
+    assert all(f["key"] != "BENCH_SERVER_NAME" for f in result["fields"])
     assert any(f["key"] == "BENCH_CHAT_ID" for f in result["fields"])
+    assert any(f["key"] == "BENCH_USER_ID" for f in result["fields"])
 
 
 def test_the_telegram_chat_id_is_editable_and_validated(monkeypatch, tmp_path):
@@ -197,3 +197,99 @@ def test_a_hand_edited_chat_id_does_not_break_every_run():
     assert _int_or("not-a-number", BENCH_CHAT_ID) == BENCH_CHAT_ID
     assert _int_or("", BENCH_CHAT_ID) == BENCH_CHAT_ID
     assert _int_or(None, BENCH_CHAT_ID) == BENCH_CHAT_ID
+
+
+# ── .env writing: one key, one line ───────────────────────────────────────────
+
+
+def _store(tmp_path, monkeypatch, text: str):
+    from bench import settings_store
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(text)
+    monkeypatch.setattr(settings_store, "ENV_PATH", env_path)
+    return settings_store, env_path
+
+
+def _count(text: str, key: str) -> int:
+    return sum(1 for line in text.splitlines() if line.startswith(f"{key}="))
+
+
+def test_a_save_does_not_duplicate_unknown_keys(tmp_path, monkeypatch):
+    """The growth bug: every save appended every unknown key it had parsed.
+
+    They were already emitted by the pass-through, so each save added another
+    copy. A real .env reached four copies of BENCH_MODE, and nothing failed
+    loudly — dotenv takes the last one, so the file just grew.
+    """
+    store, env_path = _store(
+        tmp_path,
+        monkeypatch,
+        "BENCH_MODE=live\nBENCH_ALLOW_MUTATING=false\nCONDOR_PATH=/tmp/condor\n",
+    )
+    for _ in range(3):
+        store.update_settings({"BENCH_BASELINE_MODEL": "anthropic:claude-sonnet-5"})
+    text = env_path.read_text()
+    assert _count(text, "BENCH_MODE") == 1, text
+    assert _count(text, "BENCH_ALLOW_MUTATING") == 1, text
+    assert _count(text, "BENCH_BASELINE_MODEL") == 1, text
+
+
+def test_existing_duplicates_are_collapsed_on_save(tmp_path, monkeypatch):
+    """Self-healing: a file that already grew gets tidied by the next save."""
+    store, env_path = _store(
+        tmp_path,
+        monkeypatch,
+        "BENCH_MODE=live\nCONDOR_PATH=/a\nBENCH_MODE=live\nBENCH_MODE=live\n",
+    )
+    store.update_settings({"BENCH_BASELINE_MODEL": "x"})
+    assert _count(env_path.read_text(), "BENCH_MODE") == 1
+
+
+def test_the_surviving_line_keeps_the_effective_value(tmp_path, monkeypatch):
+    """dotenv takes the last occurrence, so collapsing must keep the last value.
+
+    Keeping the first would silently change configuration while tidying it.
+    """
+    store, env_path = _store(tmp_path, monkeypatch, "BENCH_MODE=stale\nBENCH_MODE=live\n")
+    store.update_settings({"BENCH_BASELINE_MODEL": "x"})
+    text = env_path.read_text()
+    assert "BENCH_MODE=live" in text
+    assert "BENCH_MODE=stale" not in text
+
+
+def test_a_single_unknown_key_keeps_its_line_verbatim(tmp_path, monkeypatch):
+    """Only duplicated keys get normalised; everything else is left as written."""
+    store, env_path = _store(
+        tmp_path, monkeypatch, '# a comment\nWEIRD_KEY="spaced value"\n'
+    )
+    store.update_settings({"BENCH_BASELINE_MODEL": "x"})
+    text = env_path.read_text()
+    assert "# a comment" in text
+    assert '"spaced value"' in text
+
+
+def test_a_real_chat_id_mirrors_into_the_user_id(tmp_path, monkeypatch):
+    """The 403 configuration cannot be produced by filling in one field."""
+    store, env_path = _store(tmp_path, monkeypatch, "")
+    store.update_settings({"BENCH_CHAT_ID": "1883786161"})
+    text = env_path.read_text()
+    assert "BENCH_CHAT_ID=1883786161" in text
+    assert "BENCH_USER_ID=1883786161" in text, "a real chat id needs a matching user id"
+
+
+def test_an_explicit_user_id_is_not_overwritten(tmp_path, monkeypatch):
+    """A group chat legitimately has chat_id != user_id."""
+    store, env_path = _store(tmp_path, monkeypatch, "")
+    store.update_settings({"BENCH_CHAT_ID": "-100123", "BENCH_USER_ID": "555"})
+    text = env_path.read_text()
+    assert "BENCH_CHAT_ID=-100123" in text
+    assert "BENCH_USER_ID=555" in text
+
+
+def test_a_non_numeric_user_id_is_rejected(tmp_path, monkeypatch):
+    import pytest
+
+    store, _ = _store(tmp_path, monkeypatch, "")
+    with pytest.raises(store.SettingsError):
+        store.update_settings({"BENCH_USER_ID": "me"})
