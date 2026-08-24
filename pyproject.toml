@@ -44,3 +44,8 @@ asyncio_mode = "auto"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["bench*", "metrics*", "mock_mcp*", "dashboard*", "condor_compat*", "config*", "runner*"]
+
+[dependency-groups]
+dev = [
+    "python-telegram-bot[job-queue]>=22.8",
+]

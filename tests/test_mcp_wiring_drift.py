@@ -161,6 +161,19 @@ def wiring(condor_repo: Path, tmp_path_factory):
 
     cfg_dir = tmp_path_factory.mktemp("condor_config")
     cfg_path = cfg_dir / "config.yml"
+    # `server_access` is not optional scaffolding. condor resolves the session's
+    # server through `usable()` in `condor/runtime/toolsets.py`, which requires
+    # `get_server(name)` *and* `has_server_access(user_id, name)` — the subject is
+    # always the authenticated user_id, never the chat (SEC-178). A config with the
+    # server present but nobody owning it therefore yields no mcp-hummingbot at
+    # all, and every assertion here failed on a fixture that predated the check
+    # rather than on anything about the wiring.
+    #
+    # The shape mirrors `bench.staging_setup._ensure_ownership`, which is what a
+    # real run relies on: own the entry outright rather than depend on an admin
+    # share grant. Ownership rather than `users: {admin}` on purpose — making the
+    # probe an admin would satisfy `get_server_permission` unconditionally and
+    # stop this fixture from exercising the access path at all.
     cfg_path.write_text(
         yaml.safe_dump(
             {
@@ -173,7 +186,9 @@ def wiring(condor_repo: Path, tmp_path_factory):
                     }
                 },
                 "users": {},
-                "server_access": {},
+                "server_access": {
+                    SERVER: {"owner_id": USER_ID, "shared_with": {}}
+                },
                 "chat_defaults": {},
             }
         )
@@ -197,8 +212,16 @@ def wiring(condor_repo: Path, tmp_path_factory):
     # load_condor_shared() re-instantiates the singleton; it is a no-op when one
     # already exists, so our temp config stays in force. Assert that, because a
     # silent switch back to the real config.yml would make this test meaningless.
-    assert config_manager.get_config_manager().get_server(SERVER) is not None, (
+    cm = config_manager.get_config_manager()
+    assert cm.get_server(SERVER) is not None, (
         "temp condor config did not take effect — the probe server is not visible"
+    )
+    # Both halves of condor's `usable()` predicate, asserted separately: without
+    # the access half the wiring silently drops mcp-hummingbot and every failure
+    # downstream points at the wrong thing.
+    assert cm.has_server_access(USER_ID, SERVER), (
+        f"probe user {USER_ID} has no access to '{SERVER}' — condor would build "
+        "no mcp-hummingbot server, so the comparisons below would be vacuous"
     )
 
     yield shared, mcp_provider
