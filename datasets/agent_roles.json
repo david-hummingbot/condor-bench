@@ -24,46 +24,56 @@
     "read it there and keep this file only for overrides."
   ],
   "agents": {
+    "adaptive_grid_trader": {
+      "role": "strategy",
+      "base": "directional_trader",
+      "notes": "Grid trading, but the loop is directional: multi-timeframe analysis picks LONG/SHORT/TWO_SIDED and re-picks it as conditions move, so the grid is the execution shape rather than the job. Based on directional_trader over market_making_expert on grants too — its 9 tools are a strict subset of the directional base (which declares tools: [] and inherits all 24), while market making covers only 6 of them and adds manage_controllers and manage_bots, which this agent is not granted."
+    },
     "condor": {
       "role": "expert",
       "domain": "general_consult",
       "notes": "The chat assistant. Full surface, and the only domain whose name differs from its slug."
     },
-    "market_making_expert": {
-      "role": "expert",
-      "notes": "Scoped to 8 tools. Base for connector-specific market-making strategies."
-    },
-    "directional_trader": {
-      "role": "expert",
-      "notes": "Declares tools: [] so it inherits all 24. Base for directional strategies."
-    },
-    "solana_dex_lp_expert": {
-      "role": "expert",
-      "notes": "Scoped to 8 tools. Base for chain- or venue-specific LP strategies."
-    },
-    "meteora_launch_lp": {
-      "role": "expert",
-      "notes": "Scoped to 7 tools and holds the only exclusive grant in the roster (manage_amm), so no other domain's evidence covers its core tool."
-    },
-    "adaptive_grid_trader": {
+    "dca_accumulator": {
       "role": "strategy",
       "base": "directional_trader",
-      "notes": "Grid trading, but the loop is directional: multi-timeframe analysis picks LONG/SHORT/TWO_SIDED and re-picks it as conditions move, so the grid is the execution shape rather than the job. Based on directional_trader over market_making_expert on grants too — its 9 tools are a strict subset of the directional base (which declares tools: [] and inherits all 24), while market making covers only 6 of them and adds manage_controllers and manage_bots, which this agent is not granted."
+      "notes": "Laddered spot accumulation via dca_executor — level spacing, per-level size, budget, and re-laddering after a move. Directional rather than market-making: it is one-sided accumulation with a long bias, explicitly not grids or two-sided quoting. Grants agree with the job, on the same reasoning as adaptive_grid_trader: its 9 tools are a strict subset of the directional base (which declares tools: [] and inherits all 24), while market making covers only 7 of them and misses trading_agent_journal_write and send_notification."
     },
     "delta_neutral_funding_agent": {
       "role": "strategy",
       "base": "market_making_expert",
       "notes": "Beta-weighted pair market making. Same tools as the market-making base plus manage_routines."
     },
-    "xrpl_market_maker": {
+    "directional_trader": {
+      "role": "expert",
+      "notes": "Declares tools: [] so it inherits all 24. Base for directional strategies."
+    },
+    "market_making_expert": {
+      "role": "expert",
+      "notes": "Scoped to 8 tools. Base for connector-specific market-making strategies."
+    },
+    "meteora_launch_lp": {
+      "role": "expert",
+      "notes": "Scoped to 7 tools and holds the only exclusive grant in the roster (manage_amm), so no other domain's evidence covers its core tool."
+    },
+    "orca_lp_expert": {
       "role": "strategy",
-      "base": "market_making_expert",
-      "notes": "Market making specialised to the XRPL CLOB connector."
+      "base": "solana_dex_lp_expert",
+      "notes": "Concentrated-liquidity LP on Solana specialised to Orca CLMM pools and tokenized RWAs (SPCX, GME, SILV). Same job as the Solana LP base — pool attractiveness, range selection, IL and exit calls — pointed at one venue and one asset class, which is what makes it a strategy rather than a domain of its own. Note the grant runs the other way from the usual subset argument: it declares tools: [] and inherits all 24 while the base is scoped to 11, so the inherited assignment rests on evidence narrower than its surface."
     },
     "smart_money_flow": {
       "role": "strategy",
       "base": "directional_trader",
       "notes": "Directional perp trading on Derive. Declares tools: [] like its base."
+    },
+    "solana_dex_lp_expert": {
+      "role": "expert",
+      "notes": "Scoped to 8 tools. Base for chain- or venue-specific LP strategies."
+    },
+    "xrpl_market_maker": {
+      "role": "strategy",
+      "base": "market_making_expert",
+      "notes": "Market making specialised to the XRPL CLOB connector."
     }
   }
 }

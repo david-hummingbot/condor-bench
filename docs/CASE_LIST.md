@@ -25,6 +25,14 @@ goes `thin` on one flaky live call.
 `manage_memory`. `manage_amm` is covered by `meteora_launch_lp` jobs, not a
 dedicated Layer 2 triple.
 
+`run_code` has no cases on purpose either. It arrived with condor's ARCH-177
+admin grant for code execution, and it is not a trading capability a routing
+recommendation turns on — sizing a model for "can it run arbitrary code" is a
+different question from "can it drive the trading surface", and exercising it in
+a benchmark means executing generated code against the staging box on every run.
+`make tool-surface` will keep reporting it in the snapshot; the absence here is a
+decision, not a gap.
+
 ## Core sweep
 
 Cases tagged `core` (65) still meet both floors. Use them for harness/prompt
