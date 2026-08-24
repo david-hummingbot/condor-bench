@@ -28,6 +28,7 @@ case:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -458,6 +459,113 @@ def case_domain(case: Case) -> str:
 
 def is_mutating(case: Case) -> bool:
     return _normalize_risk(getattr(case, "risk_level", None)) != "read_only"
+
+
+# Case ordering ────────────────────────────────────────────────────────────────
+# Cheap read-only probes first, destructive multi-tool ticks last. Two things
+# this buys: a model that cannot do the easy work shows it in minutes instead of
+# an hour, and the read-only measurements happen before anything has mutated the
+# target — a run cancelled halfway leaves less behind.
+ORDERS = ("easiest-first", "dataset")
+
+# Difficulty has no field in the dataset (`risk_level` is about side effects, not
+# effort), so it is inferred from stable structure plus the baseline latency. It
+# is deliberately *not* inferred from historical pass rates: that would make case
+# order a function of previous results, so the order would drift as models change
+# and no two runs would be reproducible.
+_LAYER_EFFORT = {"tool": 0, "consult": 1, "agent": 2, "tick": 3}
+_RISK_EFFORT = {"read_only": 0, "mutating": 1, "destructive": 2}
+
+# `tool_set_leverage_003` ("put it *back* to 2x") only means anything after
+# `_001` set it to 3x. That is the one ordering dependency in the library, and it
+# fails quietly — reverting a value that was never changed still returns success,
+# so the case passes while measuring nothing.
+_FAMILY_RE = re.compile(r"^(.+?)_?(\d+)$")
+
+
+def case_family(case_id: str) -> tuple[str, int]:
+    """``("tool_set_leverage", 3)`` — the numbered series a case belongs to."""
+    m = _FAMILY_RE.match(str(case_id))
+    return (m.group(1), int(m.group(2))) if m else (str(case_id), 0)
+
+
+def _is_sequence(members: list[Case]) -> bool:
+    """Whether a numbered family can affect itself, so its order must hold.
+
+    Shared scope is the test. Cases under one ``agent_slug`` read and write the
+    same condor stores — memory, skills, journal — and chat-scoped cases share the
+    chat's, so a later number can depend on an earlier one having run. That is the
+    ``tool_set_leverage_003`` case: "put it *back* to 2x" needs ``_001`` to have
+    set 3x.
+
+    Distinct slugs mean distinct stores and no interaction, so those families are
+    left alone. Applying the rule to them actively hurt: ``t001``–``t009`` are
+    independent tick scenarios with a slug each, and forcing numeric order pushed
+    the three read-only ticks to positions 78-80 while pulling destructive
+    ``t001`` up to 51 — the opposite of what the ordering is for.
+    """
+    slugs = {getattr(c, "agent_slug", None) for c in members}
+    return len(slugs) == 1
+
+
+def _effort(case: Case, baseline_s: float = 0.0) -> tuple:
+    expected = set(getattr(case, "expected_tools", None) or []) | set(
+        getattr(case, "expected_tool_calls", None) or []
+    )
+    shape = (
+        bool(getattr(case, "steps", None))
+        + bool(getattr(case, "turns", None))
+        + bool(getattr(case, "post_conditions", None))
+    )
+    return (
+        _RISK_EFFORT.get(case.risk_level, 0),
+        _LAYER_EFFORT.get(case.type, 9),
+        len(expected),
+        shape,
+        round(baseline_s),
+        case.id,
+    )
+
+
+def order_cases(
+    cases: list[Case],
+    order: str = "easiest-first",
+    *,
+    baselines: dict[str, float] | None = None,
+) -> list[Case]:
+    """Easiest first, without ever inverting a numbered series.
+
+    Families keep the *slots* the difficulty sort gave them and are filled in
+    numeric order, rather than being made contiguous. Contiguity would have
+    dragged whole families to one difficulty: eight of the twenty-one
+    multi-member families here span more than one risk level — the eight tick
+    cases run from read_only to destructive under one stem — so clumping them
+    would undo the ordering it was meant to protect. This way each case keeps its
+    own position and only the order *within* a family is corrected.
+    """
+    if order == "dataset":
+        return list(cases)
+    if order not in ORDERS:
+        raise ValueError(f"unknown order {order!r} — choose from {', '.join(ORDERS)}")
+
+    baselines = baselines or {}
+    ranked = sorted(cases, key=lambda c: _effort(c, baselines.get(c.id, 0.0)))
+
+    # slot -> case, then rewrite each family's slots in numeric order.
+    slots: list[Case] = list(ranked)
+    by_family: dict[str, list[int]] = {}
+    for position, case in enumerate(ranked):
+        by_family.setdefault(case_family(case.id)[0], []).append(position)
+    for stem, positions in by_family.items():
+        if len(positions) < 2:
+            continue
+        members = [ranked[p] for p in positions]
+        if not _is_sequence(members):
+            continue
+        members = sorted(members, key=lambda c: case_family(c.id)[1])
+        for position, case in zip(sorted(positions), members):
+            slots[position] = case
+    return slots
 
 
 def filter_cases(

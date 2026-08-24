@@ -175,6 +175,12 @@ def test(
         "artifacts instead of refusing the run. Opt-in: the run is thinner than "
         "it looks, so routing published from it under-covers those domains.",
     ),
+    order: str = typer.Option(
+        "easiest-first",
+        help="Case order: 'easiest-first' (cheap read-only probes first, "
+        "destructive ticks last) or 'dataset' (file order). Numbered series that "
+        "share a scope keep their sequence either way.",
+    ),
 ) -> None:
     """Run benchmarks against a model and score vs baseline latency."""
     import uuid
@@ -209,6 +215,7 @@ def test(
     _print_bindings(resolutions)
 
     store = BaselineStore()
+    cases = _order_cases(cases, order, store)
     # Prompts come from the resolved cases: a results file that recorded the
     # template would show "{perp.label}" where the model was asked about a real
     # connector.
@@ -243,6 +250,9 @@ def test(
         shared_loaded=True,
     )
     pin["market_bindings"] = bindings_summary(resolutions)
+    # Two runs ordered differently cover different prefixes when cut short, so the
+    # order belongs with the evidence.
+    pin["case_order"] = order
     run_dir = save_run(
         model,
         scorecards,
@@ -331,6 +341,28 @@ async def _run_cases(cases, model: str, store):
         except Exception as exc:
             console.print(f"[red]ERROR: {exc}[/red]")
     return scorecards, responses
+
+
+def _order_cases(cases: list, order: str, store) -> list:
+    """Apply the case order, using baseline latencies as the effort tiebreak."""
+    from bench.dataset import ORDERS, order_cases
+
+    if order not in ORDERS:
+        console.print(
+            f"[red]Unknown --order {order!r}. Choose from {', '.join(ORDERS)}.[/red]"
+        )
+        raise typer.Exit(2)
+    baselines = {}
+    for case in cases:
+        record = store.load(case.id)
+        if record is not None:
+            baselines[case.id] = record.latency_s
+    ordered = order_cases(cases, order, baselines=baselines)
+    if order != "dataset" and ordered:
+        console.print(
+            f"  [dim]order: {order} — first {ordered[0].id}, last {ordered[-1].id}[/dim]"
+        )
+    return ordered
 
 
 def _bind_markets(cases: list, skip_unavailable: bool) -> tuple[list, dict, list]:
@@ -422,6 +454,10 @@ def sweep(
         help="Record cases whose declared markets cannot bind as harness "
         "artifacts instead of refusing the run.",
     ),
+    order: str = typer.Option(
+        "easiest-first",
+        help="Case order: 'easiest-first' or 'dataset'. See `test --help`.",
+    ),
 ) -> None:
     """Benchmark every model in the registry, smallest first."""
     import uuid
@@ -473,6 +509,7 @@ def sweep(
     _print_bindings(resolutions)
 
     store = BaselineStore()
+    cases = _order_cases(cases, order, store)
     prompts = case_prompt_map()
     prompts.update(
         {
@@ -505,6 +542,7 @@ def sweep(
         )
         pin["sweep"] = True
         pin["market_bindings"] = bindings_summary(resolutions)
+        pin["case_order"] = order
         run_dir = save_run(
             entry.key,
             scorecards,

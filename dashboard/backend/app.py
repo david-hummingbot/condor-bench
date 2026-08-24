@@ -267,6 +267,19 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             }
         )
         store = BaselineStore()
+        # Cheap read-only probes first, destructive ticks last: a model that
+        # cannot do the easy work shows it early, and a run stopped from the UI
+        # (which happens often) has mutated less by the time it stops. Numbered
+        # series that share a scope keep their order — see bench.dataset.
+        from bench.dataset import order_cases
+
+        baselines = {}
+        for case in cases:
+            record = store.load(case.id)
+            if record is not None:
+                baselines[case.id] = record.latency_s
+        cases = order_cases(cases, "easiest-first", baselines=baselines)
+
         total = len(req.models) * len(cases)
         state["total"] = total
         await _emit(run_id, {
@@ -311,6 +324,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     shared_loaded=True,
                 )
                 pin["market_bindings"] = bindings_summary(resolutions)
+                pin["case_order"] = "easiest-first"
                 if partial:
                     pin["partial"] = True
                     pin["cases_planned"] = len(cases)
