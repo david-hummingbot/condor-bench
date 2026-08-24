@@ -105,9 +105,17 @@ class Cell:
     destructive_failures: list[str] = field(default_factory=list)
     excluded_reasons: list[str] = field(default_factory=list)
     run_dir: str = ""
+    # Cases whose tool surface was cut by the per-mode cap. A tool the model was
+    # never shown cannot be evidence about the model, and "we withheld it" has to
+    # be distinguishable from "it failed" — under `moderate` (12 of 25 tools) that
+    # is 42 of the 80 cases, and the positional cut means the same half of the
+    # surface is invisible to every capped model.
+    withheld: int = 0
 
     def add(self, case: dict) -> None:
         self.cases += 1
+        if (case.get("wiring") or {}).get("tools_truncated"):
+            self.withheld += 1
         reason = _exclusion_reason(case)
         if reason:
             self.excluded += 1
@@ -136,6 +144,7 @@ class Cell:
             "scored": self.scored,
             "excluded": self.excluded,
             "excluded_reasons": self.excluded_reasons[:8],
+            "withheld": self.withheld,
             "passed": self.passed,
             "pass_rate": round(self.passed / self.scored, 4) if self.scored else None,
             "avg_composite": _round_mean(self.composites, 4),

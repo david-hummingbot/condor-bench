@@ -382,6 +382,10 @@ class PydanticAIClient:
         # actually offered, after the allowlist and the count cap. None until then,
         # which is distinct from "offered nothing".
         self.offered_tools: list[str] | None = None
+        # True when the per-mode cap actually cut tools away, as opposed to the
+        # model simply being offered fewer by its grant. The distinction decides
+        # whether a domain's thin coverage is a statement about the model.
+        self.tools_truncated: bool = False
         # Auto-detect filter mode based on model if not explicitly set
         self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
@@ -685,6 +689,16 @@ class PydanticAIClient:
                 )
 
         limit = self._TOOL_LIMITS.get(self.tool_filter_mode, 999)
+        # An allowlist is a *curated* set — condor's own per-agent grant, which is
+        # how production keeps the schema count down (market_making_expert grants
+        # 11 tools, meteora_launch_lp 10). Truncating it further by position throws
+        # away tools the agent is defined by, for no reduction the grant had not
+        # already achieved: six agent-scoped cases were recorded as harness
+        # artifacts ("expected tool was never offered") while their grant fit
+        # inside the cap the whole time. The cap exists to bound how many schemas
+        # a local model sees; a grant that already satisfies it needs no cut.
+        if self.allowed_tools and len(tool_defs) <= limit:
+            limit = len(tool_defs)
         if len(tool_defs) > limit:
             log.debug(
                 "Tool filter mode '%s': trimming %d tools to %d for model '%s'",
@@ -693,6 +707,11 @@ class PydanticAIClient:
                 limit,
                 self.model_name,
             )
+            # Positional truncation is arbitrary — discovery order decides which
+            # half of the surface a model never sees, so the same tools are
+            # invisible to every capped model regardless of the case. Record it so
+            # the matrix can tell "never offered" apart from "chose badly".
+            self.tools_truncated = True
         tool_defs = tool_defs[:limit]
         # Bench-only: record what the model was actually offered, after both the
         # allowlist and the count cap. Scoring needs the real list, not the

@@ -742,6 +742,7 @@ async def run_consult(
             allowed_tools=allowed_tools,
             tool_scope=agent_tool_scope(agent_slug, allowed_tools),
             offered_tools=getattr(client, "offered_tools", None),
+            tools_truncated=bool(getattr(client, "tools_truncated", False)),
         )
         | {"assistant_prompt": assistant_prompt_source(agent_slug) if agent_slug else None},
     )
@@ -804,6 +805,7 @@ async def run_tick(
             allowed_tools=allowed_tools,
             tool_scope=agent_tool_scope(agent_slug, allowed_tools),
             offered_tools=getattr(client, "offered_tools", None),
+            tools_truncated=bool(getattr(client, "tools_truncated", False)),
         ),
     )
 

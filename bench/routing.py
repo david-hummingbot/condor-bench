@@ -82,6 +82,9 @@ class Candidate:
     avg_cost_usd: float | None
     avg_latency_s: float | None
     destructive_failures: list[str] = field(default_factory=list)
+    # Cases where the per-mode tool cap cut the surface. A model that was never
+    # shown a tool did not fail at it.
+    withheld: int = 0
     run_dir: str = ""
 
     def blockers(self, *, min_pass_rate: float, min_cases: int) -> list[str]:
@@ -141,6 +144,7 @@ def _candidates(
                 avg_cost_usd=cell.get("avg_cost_usd"),
                 avg_latency_s=cell.get("avg_latency_s"),
                 destructive_failures=list(cell.get("destructive_failures") or []),
+                withheld=int(cell.get("withheld") or 0),
                 run_dir=str(cell.get("run_dir") or ""),
             )
         )
@@ -401,6 +405,7 @@ def _tool_gaps(
     smallest: dict[str, Any] = {}
     unhandled: list[str] = []
     thin: dict[str, Any] = {}
+    withheld: dict[str, Any] = {}
     for tool, cells in (matrix.get("tools") or {}).items():
         candidates = _candidates(cells, registry)
         evidenced = [c for c in candidates if c.scored >= min_tool_cases]
@@ -421,6 +426,20 @@ def _tool_gaps(
             }
         elif evidenced:
             unhandled.append(tool)
+        elif candidates and all(c.scored == 0 and c.withheld for c in candidates):
+            # Every model measured on this tool had its surface cut, so the tool
+            # was never actually offered. Calling that "unhandled" or even "thin"
+            # states something about the models; the honest statement is that the
+            # harness withheld the tool and nothing was measured.
+            withheld[tool] = {
+                "models_measured": len(candidates),
+                "cases_withheld": sum(c.withheld for c in candidates),
+                "note": (
+                    "never offered — the per-mode tool cap "
+                    "(condor_compat/acp/pydantic_ai_client._TOOL_LIMITS) trimmed it "
+                    "away, so no model here was given the chance"
+                ),
+            }
         elif candidates:
             # Measured, but not enough per model to call it either way.
             best = max(candidates, key=lambda c: c.scored)
@@ -433,6 +452,8 @@ def _tool_gaps(
         "smallest_passing": smallest,
         "unhandled": sorted(unhandled),
         "thin": thin,
+        # Not a verdict about any model — see the note on each entry.
+        "withheld": withheld,
         "criteria": {
             "min_tool_pass_rate": min_tool_pass_rate,
             "min_tool_cases": min_tool_cases,

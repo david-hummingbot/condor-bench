@@ -246,3 +246,82 @@ def test_specialist_cases_only_expect_tools_the_agent_is_granted():
         f"call them: {broken}. Either rewrite the case against the grant, or check "
         "whether condor's AGENT.md tools: list actually changed."
     )
+
+
+# ── The per-mode cap vs the agent's grant ─────────────────────────────────────
+# An allowlist is condor's own curated grant (market_making_expert: 11 tools,
+# meteora_launch_lp: 10) — already how production keeps the schema count down.
+# Truncating it further by *position* threw away tools the agent is defined by
+# for no reduction the grant had not already achieved: six agent-scoped cases
+# were recorded as "expected tool was never offered" while their grant fit inside
+# the cap the whole time.
+
+import asyncio  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from condor_compat.acp.pydantic_ai_client import PydanticAIClient  # noqa: E402
+
+_ALL_TOOLS = sorted(
+    [
+        "configure_server", "consult", "delegate", "explore_dex_pools",
+        "explore_geckoterminal", "get_available_models", "get_market_data",
+        "get_portfolio_overview", "get_user_context", "manage_amm", "manage_bots",
+        "manage_controllers", "manage_executors", "manage_memory", "manage_notes",
+        "manage_routines", "manage_servers", "manage_skill", "manage_trading_agent",
+        "search_history", "send_notification",
+        "set_account_position_mode_and_leverage", "trading_agent_journal_read",
+        "trading_agent_journal_write",
+    ]
+)
+# market_making_expert's real grant: 11 tools, several of which sort past a
+# 12-tool positional cut of the full 24.
+_MM_GRANT = [
+    "get_market_data", "get_portfolio_overview", "manage_bots", "manage_controllers",
+    "manage_executors", "manage_memory", "manage_routines", "manage_skill",
+    "manage_trading_agent", "search_history", "trading_agent_journal_read",
+]
+
+
+def _prepared(allowed: list[str] | None, mode: str) -> tuple[list[str], bool]:
+    client = PydanticAIClient.__new__(PydanticAIClient)
+    client.allowed_tools = allowed
+    client.tool_filter_mode = mode
+    client.model_name = "openai:local-26b"
+    client.offered_tools = None
+    client.tools_truncated = False
+    defs = [SimpleNamespace(name=f"mcp__condor__{n}") for n in _ALL_TOOLS]
+    asyncio.run(client._prepare_tools(None, defs))
+    return client.offered_tools, client.tools_truncated
+
+
+def test_a_grant_inside_the_cap_is_not_trimmed_further():
+    """The bug: 11 granted tools cut to 12-of-24's alphabetical prefix."""
+    offered, truncated = _prepared(_MM_GRANT, "moderate")
+    assert sorted(offered) == sorted(_MM_GRANT)
+    assert not truncated, "a grant that already fits the cap is not a truncation"
+
+
+def test_every_granted_tool_survives_the_cap():
+    """These are the tools the agent is *defined* by — none may be withheld."""
+    offered, _ = _prepared(_MM_GRANT, "moderate")
+    assert not set(_MM_GRANT) - set(offered)
+
+
+def test_a_grant_over_the_cap_is_still_trimmed():
+    """The cap is a real constraint for local models, not advisory."""
+    offered, truncated = _prepared(_ALL_TOOLS, "essential")
+    assert len(offered) == 6
+    assert truncated
+
+
+def test_chat_scoped_runs_still_hit_the_cap_and_say_so():
+    """No grant means production offers all 24, so the cut is real — and flagged."""
+    offered, truncated = _prepared(None, "moderate")
+    assert len(offered) == 12
+    assert truncated, "a real cut must be recorded, or thin coverage reads as failure"
+
+
+def test_full_mode_offers_everything_untruncated():
+    offered, truncated = _prepared(None, "full")
+    assert len(offered) == len(_ALL_TOOLS)
+    assert not truncated

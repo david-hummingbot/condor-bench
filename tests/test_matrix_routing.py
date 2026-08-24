@@ -711,3 +711,84 @@ def test_every_strategy_names_the_base_it_derives_from():
             f"{slug} derives from {base!r}, which is not an expert. A strategy must "
             "inherit from something bench actually sizes a model for."
         )
+
+
+# ── Withheld tools are not a verdict about a model ────────────────────────────
+# Under `moderate` a local model sees 12 of 25 tools, and the cut is positional,
+# so the same half of the surface is invisible to every capped model. Reporting
+# those tools as `unhandled` — or even as `thin` — states something about the
+# models. The honest statement is that the harness never offered them.
+
+
+def _tool_cell(**over):
+    base = dict(
+        cases=3, scored=3, excluded=0, withheld=0, passed=3,
+        pass_rate=1.0, avg_composite=0.9, run_dir="results/r1",
+        destructive_failures=[],
+    )
+    base.update(over)
+    return base
+
+
+def test_a_tool_no_model_was_offered_is_reported_as_withheld():
+    from bench.routing import _tool_gaps
+    from bench.matrix import load_models
+
+    registry = {m.key: m for m in load_models()}
+    model = next(iter(registry))
+    matrix = {
+        "tools": {
+            "manage_skill": {
+                model: _tool_cell(cases=4, scored=0, excluded=4, withheld=4,
+                                  passed=0, pass_rate=None, avg_composite=None)
+            }
+        }
+    }
+    gaps = _tool_gaps(matrix, registry)
+    assert "manage_skill" in gaps["withheld"], gaps
+    assert "manage_skill" not in gaps["unhandled"]
+    assert "manage_skill" not in gaps["thin"]
+    assert gaps["withheld"]["manage_skill"]["cases_withheld"] == 4
+
+
+def test_a_tool_the_model_actually_failed_is_still_unhandled():
+    """The distinction must not become an excuse for real failures."""
+    from bench.routing import _tool_gaps
+    from bench.matrix import load_models
+
+    registry = {m.key: m for m in load_models()}
+    model = next(iter(registry))
+    matrix = {
+        "tools": {
+            "manage_executors": {
+                model: _tool_cell(scored=3, passed=0, pass_rate=0.0, avg_composite=0.2)
+            }
+        }
+    }
+    gaps = _tool_gaps(matrix, registry)
+    assert "manage_executors" in gaps["unhandled"]
+    assert "manage_executors" not in gaps["withheld"]
+
+
+def test_thin_still_means_thin_when_nothing_was_withheld():
+    from bench.routing import _tool_gaps
+    from bench.matrix import load_models
+
+    registry = {m.key: m for m in load_models()}
+    model = next(iter(registry))
+    matrix = {"tools": {"consult": {model: _tool_cell(cases=1, scored=1, passed=0,
+                                                      pass_rate=0.0, avg_composite=0.3)}}}
+    gaps = _tool_gaps(matrix, registry)
+    assert "consult" in gaps["thin"] or "consult" in gaps["unhandled"]
+    assert "consult" not in gaps["withheld"]
+
+
+def test_the_matrix_cell_counts_withheld_cases():
+    from bench.matrix import Cell
+
+    cell = Cell()
+    cell.add({"case_id": "a", "composite": 0.9, "wiring": {"tools_truncated": True}})
+    cell.add({"case_id": "b", "composite": 0.9, "wiring": {}})
+    out = cell.as_dict()
+    assert out["withheld"] == 1
+    assert out["scored"] == 2, "a truncated surface does not stop a case being scored"

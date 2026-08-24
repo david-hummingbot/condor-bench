@@ -251,6 +251,7 @@ def wiring_metadata(
     allowed_tools: list[str] | None = None,
     tool_scope: str | None = None,
     offered_tools: list[str] | None = None,
+    tools_truncated: bool = False,
 ) -> dict[str, Any]:
     """Describe the wiring a case ran under, for results + matrix comparisons.
 
@@ -297,6 +298,10 @@ def wiring_metadata(
         "tool_scope": "unscoped_acp" if unscoped_acp else scope,
         "allowed_tools": sorted(allowed_tools) if allowed_tools else None,
         "offered_tools": sorted(offered_tools) if offered_tools else None,
+        # The per-mode cap cut tools away, so any tool this case needed and did
+        # not get was withheld by the harness. A domain that reads thin under a
+        # truncated surface says nothing about the model.
+        "tools_truncated": bool(tools_truncated),
     }
 
 
