@@ -174,7 +174,7 @@ def test_a_failed_call_is_not_valid_live_data(output):
     ],
 )
 def test_an_absent_record_is_a_result_not_a_transport_error(output):
-    """`tool_manage_bots_002` — live_validity 0.0 on a call that worked perfectly.
+    r"""`tool_manage_bots_002` — live_validity 0.0 on a call that worked perfectly.
 
     The case asks for the logs of a bot named `eth-maker`. `manage_bots` answered
     in full: the bot does not exist, and here is the list of the ones that do.
@@ -534,3 +534,53 @@ def test_a_model_narrating_its_own_rate_limit_recovery_is_not_an_outage():
     # An outage that happens to be wordy is still caught by the anchored patterns,
     # so length alone never launders a real failure.
     assert is_infra_failure("(error: rate-limited)\n" + "x" * 5000)
+
+
+# ── 6. Reaching past an MCP tool for a built-in read as a capability gap ──────
+def test_a_native_builtin_standing_in_for_an_mcp_tool_is_named():
+    """Six claude-code rows read as inability and were not.
+
+    `agent_directional_trader_002`/`_003` were told to read a skill and read the
+    files straight off disk; `_008` was told to remember a rule and used `Write`;
+    `tool_configure_server_003` answered "which username" by `cat`-ing config.yml.
+    Each scored tool_accuracy 0.0 against judge scores of 0.82-0.90, and
+    directional_trader finished as the run's weakest domain at 0.40 pass on three
+    failures that were all this.
+    """
+    from bench.scorer import _detect_tool_substitutions
+
+    subs = _detect_tool_substitutions(["manage_memory"], [], ["Bash", "Read", "Write"])
+    assert subs == [{"expected": "manage_memory", "native": ["Bash", "Read", "Write"]}]
+
+
+def test_no_diagnostic_when_the_tool_was_actually_called():
+    from bench.scorer import _detect_tool_substitutions
+
+    # Called it — the MCP prefix must not hide that.
+    assert _detect_tool_substitutions(
+        ["manage_memory"], ["mcp__condor__manage_memory"], ["Write"]
+    ) == []
+    # Missed it, but reached for nothing that could stand in.
+    assert _detect_tool_substitutions(["manage_memory"], [], ["ToolSearch"]) == []
+    # No built-in overlaps a live trading call, so a real miss stays a real miss.
+    assert _detect_tool_substitutions(["manage_executors"], [], ["Bash", "Write"]) == []
+    assert _detect_tool_substitutions(None, [], ["Bash"]) == []
+
+
+def test_the_diagnostic_does_not_move_the_score():
+    """`_008` is why: its post-condition went looking in condor and found nothing.
+
+    A local file is not a condor memory and the next tick will not see it, so
+    routing around the tool is a real outcome and here a failing one. Only the
+    reading was wrong — the row said nothing about *why* the tool score was 0.0.
+    """
+    from bench.scorer import _composite
+
+    components = {
+        "answer_quality": 0.9,
+        "tool_accuracy": 0.0,
+        "tool_params": 0.0,
+        "live_validity": 0.5,
+        "latency_score": 0.4594,
+    }
+    assert _composite(components) == pytest.approx(0.5, abs=0.01)

@@ -28,6 +28,7 @@ from metrics.latency import LatencyMetric
 from metrics.live_validity import LiveValidityMetric, validity_breakdown
 from metrics.tool_accuracy import (
     ToolAccuracyMetric,
+    normalize_tool_name,
     phase_breakdown,
     score_phases,
     score_recall,
@@ -114,6 +115,12 @@ class ScoreCard:
     # Unlike harness_artifact this *is* the model's failure: the composite is capped
     # so the case cannot pass.
     post_condition_failed: str | None = None
+    # Expected MCP tools the agent appears to have served with one of its own
+    # built-ins instead — `[{"expected": "manage_memory", "native": ["Write"]}]`.
+    # Diagnostic only: the score is unchanged, because routing around the tool is
+    # a real outcome and sometimes a failed one. What this fixes is the *reading*.
+    # See :func:`_detect_tool_substitutions`.
+    tool_substitutions: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -144,6 +151,7 @@ class ScoreCard:
             "harness_artifact": self.harness_artifact,
             "harness_note": self.harness_note,
             "post_condition_failed": self.post_condition_failed,
+            "tool_substitutions": self.tool_substitutions,
             "forbidden_violations": self.forbidden_violations,
             "agent_internal_calls": self.agent_internal_calls,
             "tool_calls": self.tool_calls,
@@ -374,6 +382,9 @@ async def score(
         answer_quality=answer_quality,
         answer_reason=answer_reason,
         post_condition_failed=post_condition_failed,
+        tool_substitutions=_detect_tool_substitutions(
+            required, tool_names, internal_calls
+        ),
         forbidden_violations=violations,
         tool_accuracy=tool_accuracy,
         phase_detail=phase_detail,
@@ -426,6 +437,60 @@ def timeout_card(case: Any, model: str, timeout_s: float, baseline_latency_s: fl
         ),
         error=f"timeout after {timeout_s:.0f}s",
     )
+
+
+# Which of the agent's own built-ins can stand in for which condor tool. Keyed by
+# the MCP tool the case asked for; the values are the built-ins that reach the same
+# state by another road. Only names that genuinely overlap belong here — this drives
+# a diagnostic, so a loose entry produces a misleading one.
+_NATIVE_SUBSTITUTES: dict[str, tuple[str, ...]] = {
+    "manage_skill": ("Read", "Bash", "Glob", "Grep", "Skill"),
+    "manage_memory": ("Write", "Edit", "Read", "Bash"),
+    "manage_notes": ("Write", "Edit", "Read", "Bash"),
+    "configure_server": ("Bash", "Read"),
+    "manage_servers": ("Bash", "Read"),
+    "get_available_models": ("Skill", "Bash", "WebFetch"),
+    "get_user_context": ("Bash", "Read"),
+    "run_code": ("Bash",),
+}
+
+
+def _detect_tool_substitutions(
+    required: list[str] | None,
+    called: list[str],
+    internal_calls: list[str],
+) -> list[dict[str, Any]]:
+    """Expected MCP tools the agent served with one of its own built-ins instead.
+
+    Six rows of the 80-case claude-code run read as capability gaps and were not.
+    `agent_directional_trader_002` and `_003` were told to read a skill and read the
+    files off disk with `Read`; `_008` was told to remember a rule and wrote a file
+    with `Write`; `tool_configure_server_003` answered "which username" by `cat`-ing
+    config.yml; `tool_get_available_models_003` answered from a `Skill` instead of
+    asking the tool. Each scored tool_accuracy 0.0 while the judge scored the prose
+    0.82-0.90, and directional_trader came out the weakest domain in the run at 0.40
+    pass — on three failures that were all this.
+
+    The score deliberately does not move. Routing around the tool is a real outcome
+    and sometimes a failing one: `_008`'s post-condition probe went looking for the
+    memory in condor and did not find it, because a local file is not a condor
+    memory and the next tick will not see it. What was wrong was only the *reading* —
+    nothing in the row said "the model reached past the tool", so the number looked
+    like an inability to do the job. This says it.
+    """
+    if not required:
+        return []
+    called_set = {normalize_tool_name(t) for t in called}
+    internal_set = set(internal_calls)
+    rows: list[dict[str, Any]] = []
+    for tool in required:
+        name = normalize_tool_name(tool)
+        if name in called_set:
+            continue
+        used = [n for n in _NATIVE_SUBSTITUTES.get(name, ()) if n in internal_set]
+        if used:
+            rows.append({"expected": name, "native": sorted(used)})
+    return rows
 
 
 def _detect_harness_note(result: BenchmarkResult) -> str | None:

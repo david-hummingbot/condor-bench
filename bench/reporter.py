@@ -162,6 +162,12 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
     # know that every row in an ACP run was offered one extra tool.
     notes = [sc for sc in scorecards if getattr(sc, "harness_note", None)]
     unbuilt = [sc for sc in scorecards if getattr(sc, "post_condition_failed", None)]
+    # Rows whose tool score reflects the agent reaching past an expected MCP tool
+    # for one of its own built-ins. Scored as-is — see
+    # `bench.scorer._detect_tool_substitutions` for why the number should not move —
+    # but surfaced here, because six of these read as a capability gap in the
+    # claude-code run and made directional_trader look like its weakest domain.
+    substituted = [sc for sc in scorecards if getattr(sc, "tool_substitutions", None)]
 
     return {
         "model": model,
@@ -184,6 +190,13 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
         "post_condition_failures": len(unbuilt),
         "post_condition_failure_cases": [
             {"case_id": sc.case_id, "reason": sc.post_condition_failed} for sc in unbuilt
+        ],
+        # Diagnostic, not an exclusion: the tool score stands, but a reader can see
+        # that the miss was "used its own built-in" rather than "could not do it".
+        "tool_substitutions": len(substituted),
+        "tool_substitution_cases": [
+            {"case_id": sc.case_id, "substituted": sc.tool_substitutions}
+            for sc in substituted
         ],
         "answer_quality_avg": round(_mean([s.answer_quality for s in valid]), 4) if valid else 0.0,
         "tool_accuracy_avg": round(_mean([s.tool_accuracy for s in with_tools]), 4)
