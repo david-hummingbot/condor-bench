@@ -156,11 +156,44 @@ def test_the_judge_can_read_the_rows_it_is_asked_to_verify():
         "Routine 'market_scanner' could not be run: API error (401): Invalid token",
         # These already worked; keep them working.
         "Error: Failed to get schema for grid_strike: 404",
-        "Bot 'eth-maker' not found. Available bots: []",
+        # A 404 with nothing to offer in its place is still a failed call.
+        "Bot 'eth-maker' not found",
+        "404 Client Error: Not Found for url: http://localhost:8000/bots",
     ],
 )
 def test_a_failed_call_is_not_valid_live_data(output):
     assert _error_reason(output), f"scored as success: {output[:60]}"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Bot 'eth-maker' not found. Available bots: []",
+        "Bot 'x' not found. Available bots: [eth-maker, sol-maker]",
+        "Server 'staging' not found. Valid servers: local, bench_staging",
+    ],
+)
+def test_an_absent_record_is_a_result_not_a_transport_error(output):
+    """`tool_manage_bots_002` — live_validity 0.0 on a call that worked perfectly.
+
+    The case asks for the logs of a bot named `eth-maker`. `manage_bots` answered
+    in full: the bot does not exist, and here is the list of the ones that do.
+    The API was reached and it told the truth. `\bnot\s+found\b` called that a
+    failed call, so the one metric whose job is "did this really work against the
+    real API" said no about a call that plainly did — while the judge, reading the
+    same response, gave the model 0.95 for reporting the absence instead of
+    inventing logs.
+
+    Missing *data* is not a broken *transport*, and live_validity already has the
+    right instruments for data — `nonempty`, `contains`, `fields`. Routing an empty
+    fixture through the error path mislabels it: the real defect here is that
+    `bench.staging_setup` provisions servers and users but never a bot, and a run
+    should say that rather than blame the connection.
+
+    Genuine 404s stay caught: they have no alternatives to offer, and the HTTP
+    patterns match them regardless (see the test above).
+    """
+    assert _error_reason(output) is None, f"false positive: {output[:60]}"
 
 
 @pytest.mark.parametrize(
@@ -468,3 +501,36 @@ def test_nesting_deeper_than_one_level_is_still_summarised():
     payload = {"a": {"b": {"c": {"d": 1}}}}
     digest = digest_tool_output("x", json.dumps(payload))
     assert "object with" in digest, "deep nesting should stop being expanded"
+
+
+def test_a_model_narrating_its_own_rate_limit_recovery_is_not_an_outage():
+    """`agent_solana_dex_lp_expert_004` — a complete answer voided to composite 0.0.
+
+    The gate was moved off the transcript and onto the model's own response, which
+    fixed the case above. But the *model* uses the same words when it reports
+    handling a limit: "Rate-limited — I'll wait briefly then retry sequentially",
+    then "switch to the Gateway pool listing (not rate-limited)". GeckoTerminal
+    throttled it, it backed off, retried, and returned a finished ten-pool ranking
+    with real addresses and TVL. The row was dropped from the matrix anyway, and the
+    solana axis thinned from 6 cases to 5 while still reporting `pass_rate: 1.0`.
+
+    So a hint needs an absent answer, not just a match. The two real rows sit 58x
+    apart in length — 64 characters of bare error against 3,725 of pool ranking.
+    """
+    bare_error = "(error: Tool 'manage_executors' exceeded max retries count of 1)"
+    assert is_infra_failure(bare_error), "a real outage is still an outage"
+
+    narrated_recovery = (
+        "GeckoTerminal returned several SOL/USDC pools mixed with unrelated ones. "
+        "Rate-limited — I'll wait briefly then retry sequentially. I'll switch to "
+        "the Gateway pool listing (not rate-limited) for Meteora and Orca, filtering "
+        "for SOL-USDC manually. Let me retry the per-DEX queries now that time has "
+        "passed since the rate limit.\n\n## SOL-USDC pool ranking\n\n"
+        + "Meteora 5rCf1DM8 (bin_step=4, 0.04% fee) ranks first on fee yield. " * 12
+    )
+    assert len(narrated_recovery) > 600
+    assert not is_infra_failure(narrated_recovery)
+
+    # An outage that happens to be wordy is still caught by the anchored patterns,
+    # so length alone never launders a real failure.
+    assert is_infra_failure("(error: rate-limited)\n" + "x" * 5000)

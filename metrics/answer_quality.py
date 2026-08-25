@@ -37,11 +37,10 @@ or fails to meaningfully address the question. \
 DO NOT reward hedging or vagueness — a clear, correct, detailed answer is better \
 than a cautious non-answer."""
 
+# Unambiguous harness/provider strings: a response containing one of these *is*
+# the failure, however long it runs.
 _INFRA_PATTERNS = (
-    re.compile(r"request_limit", re.I),
-    re.compile(r"token limit", re.I),
     re.compile(r"exceeded before any response", re.I),
-    re.compile(r"rate[- ]?limit", re.I),
     re.compile(r"^\(error:", re.I | re.M),
     # An ACP prompt that never ran — the bridge rejected the request or died. The
     # model produced nothing because it was never asked, so this is infra: judging
@@ -49,6 +48,23 @@ _INFRA_PATTERNS = (
     # ("No response produced", composite 0.0) and average it into the matrix.
     re.compile(r"^ACP prompt failed", re.I | re.M),
 )
+
+# Words a *provider outage* puts in a response — and that a model narrating its own
+# recovery also uses. These only mean "infra" when there is no real answer around
+# them; see :func:`is_infra_failure`.
+_INFRA_HINTS = (
+    re.compile(r"request_limit", re.I),
+    re.compile(r"token limit", re.I),
+    re.compile(r"rate[- ]?limit", re.I),
+)
+
+# Above this many characters a response is an answer that happens to mention a
+# limit, not a bare error string. Calibrated on the two real cases: the genuine
+# infra row in the gemma run is 64 characters ("(error: Tool 'manage_executors'
+# exceeded max retries count of 1)", which the anchored patterns above catch on
+# its own), while the false positive it was voiding is 3,725 characters of
+# finished pool ranking — a 58x gap, so the exact cut is not delicate.
+_SUBSTANTIVE_ANSWER_CHARS = 600
 
 
 class _ScoreResult(BaseModel):
@@ -73,10 +89,25 @@ def is_infra_failure(text: str) -> bool:
     tool merely *returned* those words was scored a provider outage —
     `agent_market_making_expert_002` went to 0.5132 and `tool_manage_skill_001` to
     0.452, both on complete, fully grounded answers with every tool call succeeding.
+
+    A hint alone is not enough. ``agent_solana_dex_lp_expert_004`` was voided —
+    answer_quality forced to None, composite 0.0, row dropped from the matrix and
+    the solana axis silently thinned from 6 cases to 5 while still reporting
+    ``pass_rate: 1.0`` — because its own narration said "Rate-limited — I'll wait
+    briefly then retry sequentially" and, later, "switch to the Gateway pool
+    listing (not rate-limited)". GeckoTerminal had throttled it, it backed off,
+    retried, and delivered a complete ten-pool ranking. Handling a transient limit
+    gracefully is the behaviour worth rewarding, and this gate was deleting the
+    evidence of it.
     """
     if not text or not text.strip():
         return False
-    return any(p.search(text) for p in _INFRA_PATTERNS)
+    if any(p.search(text) for p in _INFRA_PATTERNS):
+        return True
+    # A hint counts only when nothing answer-shaped surrounds it.
+    if len(text.strip()) > _SUBSTANTIVE_ANSWER_CHARS:
+        return False
+    return any(p.search(text) for p in _INFRA_HINTS)
 
 
 # How much of the transcript the judge is shown. The transcript leads with the

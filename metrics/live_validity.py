@@ -196,6 +196,8 @@ def _error_reason(output: Any) -> str | None:
         for match in pattern.finditer(head):
             if _is_legend_line(head, match.start()):
                 continue
+            if _is_absent_record(head, match):
+                continue
             return f"matched {pattern.pattern!r} at {match.start()}"
     return None
 
@@ -218,6 +220,36 @@ def _is_legend_line(text: str, position: int) -> bool:
     end = text.find("\n", position)
     line = text[start:] if end == -1 else text[start:end]
     return line.count("|") >= 2 and line.count("=") >= 2
+
+
+# A successful lookup reporting that the record is absent says so and then tells you
+# what there *is* instead. A real 404 has nothing to offer.
+_ALTERNATIVES_OFFERED = re.compile(
+    r"\b(?:available|existing|known|valid|did\s+you\s+mean)\b[^\n]{0,40}:", re.I
+)
+
+
+def _is_absent_record(text: str, match: "re.Match[str]") -> bool:
+    r"""True when "not found" is a query result, not a failed call.
+
+    ``tool_manage_bots_002`` asks for the logs of a bot named ``eth-maker``.
+    ``manage_bots`` answered, correctly and in full::
+
+        Bot 'eth-maker' not found. Available bots: []
+
+    The tool worked; staging simply provisions no bots (``bench.staging_setup``
+    creates servers and users, never a bot). ``\bnot\s+found\b`` scored that 0.0,
+    so the one metric whose job is "did the call really work" said no about a call
+    that worked perfectly — and the judge, seeing the same response, gave it 0.95
+    for reporting the absence honestly instead of inventing logs.
+
+    The tell is that a successful negative result enumerates the alternatives. A
+    genuine 404 has none to give, and the HTTP patterns above (``4xx, message=``,
+    ``404 client error``) still catch those regardless of this exemption.
+    """
+    if r"not\s+found" not in match.re.pattern:
+        return False
+    return bool(_ALTERNATIVES_OFFERED.search(text))
 
 
 def _is_empty(output: Any) -> bool:
