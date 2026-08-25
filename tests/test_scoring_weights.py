@@ -100,6 +100,16 @@ def _result(wiring: dict) -> BenchmarkResult:
     )
 
 
+def _called(wiring: dict, *tools: str) -> BenchmarkResult:
+    """A result whose trace actually contains the named tool calls."""
+    return BenchmarkResult(
+        case_id="x",
+        model="m",
+        turns=[TurnResult("hi", [{"tool": t, "args": {}} for t in tools], 1.0)],
+        wiring=wiring,
+    )
+
+
 def test_prompt_fallback_is_a_harness_artifact():
     """A Layer 3 case graded against the generic prompt tests nothing about the agent."""
     reason = _detect_harness_artifact(
@@ -145,8 +155,24 @@ def test_playwright_autodiscovery_is_a_note_not_an_artifact():
 
     wiring = {"api_url": "http://staging:8000", "autodiscovery_extras": ["playwright"]}
     assert _detect_harness_artifact(_result(wiring)) is None
-    note = _detect_harness_note(_result(wiring))
+    note = _detect_harness_note(_called(wiring, "mcp__playwright__browser_navigate"))
     assert note and "playwright" in note
+
+
+def test_an_offered_but_unused_extra_earns_no_note():
+    """Being *offered* a server the model never called is not a caveat.
+
+    The 80-case claude-code run stamped the autodiscovery note on all 79 scored
+    rows for a playwright server invoked exactly zero times, which flagged every
+    tool score in the run as cross-transport-incomparable on account of a tool no
+    case touched. Only a server the model actually called makes a row incomparable.
+    """
+    from bench.scorer import _detect_harness_note
+
+    wiring = {"api_url": "http://staging:8000", "autodiscovery_extras": ["playwright"]}
+    assert _detect_harness_note(_result(wiring)) is None
+    # Condor's own tools are not the extra, however many of them get called.
+    assert _detect_harness_note(_called(wiring, "mcp__condor__manage_routines")) is None
 
 
 def test_an_expected_tool_never_offered_is_still_an_artifact():

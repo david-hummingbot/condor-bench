@@ -442,17 +442,28 @@ def _detect_harness_note(result: BenchmarkResult) -> str | None:
     Treating that as a harness *artifact* excluded every row: a full 80-case
     claude-code run reported ``cases_scored: 0``, ``composite_avg: 0.0`` and an
     empty matrix, so the run could not produce a routing recommendation at all.
+
+    Merely being *offered* an extra server is not worth a note either. The
+    80-case claude-code run stamped this caveat on all 79 scored rows for a
+    playwright server that was invoked exactly zero times — flagging every tool
+    score in the run as cross-transport-incomparable on account of a tool no
+    case touched. What makes a row genuinely incomparable is an extra server the
+    model actually *called*, so that is what this looks for.
     """
     wiring = result.wiring or {}
-    extras = wiring.get("autodiscovery_extras")
-    if extras:
-        names = ", ".join(str(e) for e in extras)
-        return (
-            f"ACP auto-discovery added {names} from condor/.mcp.json — the offered "
-            "tool set is larger than the PydanticAI path's, so tool scores are not "
-            "directly comparable across transports"
-        )
-    return None
+    extras = [str(e) for e in (wiring.get("autodiscovery_extras") or [])]
+    if not extras:
+        return None
+    called = set(result.tool_names())
+    used = [e for e in extras if any(t.startswith(f"mcp__{e}__") for t in called)]
+    if not used:
+        return None
+    names = ", ".join(used)
+    return (
+        f"the model called {names}, auto-discovered from condor/.mcp.json — that "
+        "server is not on the PydanticAI path, so tool scores for this case are "
+        "not directly comparable across transports"
+    )
 
 
 def _detect_harness_artifact(

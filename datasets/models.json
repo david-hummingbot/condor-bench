@@ -67,6 +67,12 @@
       "params_b": null,
       "provider": "cloud",
       "notes": "Fallback recommendation when no local model passes a domain."
+    },
+    {
+      "key": "claude-code",
+      "params_b": null,
+      "provider": "cloud",
+      "notes": "Claude Code CLI over the ACP transport. Bare key (no provider prefix) — the CLI picks its own model. provider=cloud so it sorts last and does not count as a local pass in bench/routing.py."
     }
   ]
 }
