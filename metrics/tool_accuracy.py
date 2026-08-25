@@ -17,7 +17,25 @@ from __future__ import annotations
 
 
 class ToolAccuracyMetric:
-    """F1 score on the multiset of tool names called."""
+    """F1 score on the *set* of tool names called.
+
+    Counting a multiset punished calling a pinned tool twice, which inverted the
+    metric on the clearest possible pair. ``tool_delegate_001`` and
+    ``tool_delegate_002`` both ask for two things — hand the task off, then show
+    me its status — and both pin ``["delegate"]``. On 001 the model did both
+    (``delegate:start``, then ``delegate:get``) and scored 0.667; on 002 it did
+    only the first and scored 1.0. The model that fully answered ranked below the
+    model that half-answered.
+
+    Precision is still worth charging for, but the thing it should charge for is
+    calling tools the case did not ask for, not calling the right one more than
+    once: ``tool_manage_skill_001`` needs ``read`` then ``read_file`` to read a
+    skill at all, and ``tool_manage_routines_002`` needs list → create → run →
+    fix → run to build a routine and prove it works. No case in the library pins
+    the same tool twice, so multiset counting had no upside to trade against —
+    and a case that really does need an ordered repeat has ``steps``, which nine
+    of them use.
+    """
 
     name = "Tool Accuracy"
 
@@ -46,16 +64,12 @@ class ToolAccuracyMetric:
         if not actual_norm and not expected_norm:
             return 1.0
 
-        actual_counts = _counts(actual_norm)
-        expected_counts = _counts(expected_norm)
+        actual_set = set(actual_norm)
+        expected_set = set(expected_norm)
+        overlap = len(actual_set & expected_set)
 
-        overlap = sum(
-            min(actual_counts.get(t, 0), expected_counts[t])
-            for t in expected_counts
-        )
-
-        precision = overlap / sum(actual_counts.values()) if actual_counts else 0.0
-        recall = overlap / sum(expected_counts.values()) if expected_counts else 0.0
+        precision = overlap / len(actual_set) if actual_set else 0.0
+        recall = overlap / len(expected_set) if expected_set else 0.0
 
         if precision + recall == 0:
             return 0.0
@@ -239,10 +253,3 @@ def normalize_tool_name(tool: str) -> str:
 
 def _normalize(tool: str) -> str:
     return normalize_tool_name(tool)
-
-
-def _counts(tools: list[str]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for t in tools:
-        counts[t] = counts.get(t, 0) + 1
-    return counts

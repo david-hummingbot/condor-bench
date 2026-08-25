@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from bench.client import BenchmarkResult, TurnResult, _asks_confirmation
 from bench.scorer import normalize_expected_tools
 from metrics.answer_quality import is_infra_failure
@@ -376,3 +378,51 @@ def test_a_successful_undo_is_not_mistaken_for_an_error():
     assert tool_error(None) is None
     # A payload that merely mentions the word must not trip it.
     assert tool_error(_MCPResult("routine states: ok = fine | error = failed")) is None
+
+
+# ── Tool-name F1 counted a multiset, so repeat calls cost precision ───────────
+def test_calling_the_pinned_tool_twice_is_not_a_precision_error():
+    """`tool_delegate_001` scored 0.667 for answering; `tool_delegate_002` 1.0 for not.
+
+    Both cases ask for two things — hand the task off, then show me its status —
+    and both pin `["delegate"]`. On 001 the model did both, `delegate:start` then
+    `delegate:get`, and multiset F1 charged it for the second call: overlap
+    min(2,1)=1 over 2 actual calls is precision 0.5, F1 0.667. On 002 the model
+    did only the handoff, one call, and scored 1.0. The model that fully answered
+    ranked below the model that half-answered.
+    """
+    metric = ToolAccuracyMetric()
+    fully_answered = metric.score(["delegate", "delegate"], ["delegate"])
+    half_answered = metric.score(["delegate"], ["delegate"])
+    assert fully_answered == 1.0
+    assert fully_answered >= half_answered, "answering more must never score less"
+
+
+def test_precision_still_charges_for_unrelated_tools():
+    """The signal worth keeping: reaching for a tool the case did not ask about.
+
+    `tool_configure_server_002` called `manage_servers` alongside the pinned
+    `configure_server`. That is two distinct tools for a one-tool question and it
+    should still cost precision — what changed is only that repeats are free.
+    """
+    metric = ToolAccuracyMetric()
+    assert metric.score(["manage_servers", "configure_server"], ["configure_server"]) == pytest.approx(2 / 3)
+    # Repeats of the extra tool do not deepen the charge; the set is what counts.
+    assert metric.score(
+        ["manage_servers", "manage_servers", "configure_server"], ["configure_server"]
+    ) == pytest.approx(2 / 3)
+    # And a wholly wrong tool still scores zero.
+    assert metric.score(["manage_bots"], ["configure_server"]) == 0.0
+
+
+def test_a_multi_step_build_is_no_longer_flattened_by_precision():
+    """`tool_manage_routines_002`: list -> create -> run -> fix -> run, scored 0.20.
+
+    Building a routine and proving it works takes more than one call, and reading
+    a skill takes `read` then `read_file` (`tool_manage_skill_001`, 0.667). Neither
+    model did anything wrong.
+    """
+    metric = ToolAccuracyMetric()
+    build = ["manage_skill", "manage_routines", "manage_routines", "run_code", "manage_routines"]
+    assert metric.score(build, ["manage_routines"]) == pytest.approx(0.5)  # was 0.20
+    assert metric.score(["manage_skill", "manage_skill"], ["manage_skill"]) == 1.0
