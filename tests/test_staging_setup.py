@@ -293,3 +293,38 @@ def test_a_non_numeric_user_id_is_rejected(tmp_path, monkeypatch):
     store, _ = _store(tmp_path, monkeypatch, "")
     with pytest.raises(store.SettingsError):
         store.update_settings({"BENCH_USER_ID": "me"})
+
+
+def test_env_overridden_identity_is_the_one_that_gets_the_chat_default(
+    condor_repo, monkeypatch
+):
+    """The run's chat default has to be written for the id the run actually uses.
+
+    BENCH_CHAT_ID / BENCH_USER_ID are defaults; .env overrides them, and this repo's
+    .env does — to 1883786161. `ensure_bench_server` read the module constants while
+    every other caller reads the env-aware `staging_config()`, so it wrote
+    `chat_defaults[999001] = bench_staging` and left the id the MCP subprocess is
+    actually launched with pointing at whatever it pointed at before.
+
+    condor's `manage_servers` reports `is_active` from
+    `get_chat_default_server(settings.chat_id)`, so it answered `local` while
+    mcp-hummingbot's `configure_server` answered `bench_staging`. The three
+    configure_server cases ask which server is active and were handed two different
+    answers; tool_configure_server_002 was judged 0.20 for "reporting the wrong
+    active server".
+    """
+    from config_manager import ConfigManager
+
+    from bench.staging_setup import ensure_bench_server
+
+    monkeypatch.setenv("BENCH_CHAT_ID", "424242")
+    monkeypatch.setenv("BENCH_USER_ID", "424242")
+    ConfigManager._instance = None
+
+    result = ensure_bench_server()
+    assert result.ok, result.detail
+
+    cm = ConfigManager.instance(str(condor_repo / "config.yml"))
+    assert cm.get_chat_default_server(424242) == BENCH_SERVER_NAME
+    assert cm.has_server_access(424242, BENCH_SERVER_NAME)
+    assert "424242" in result.detail, "the report must name the id it configured"

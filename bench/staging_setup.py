@@ -66,8 +66,24 @@ def ensure_bench_server(
     username = username if username is not None else str(staging["username"] or "")
     password = password if password is not None else str(staging["password"] or "")
     name = BENCH_SERVER_NAME
-    user_id = BENCH_USER_ID
-    chat_id = BENCH_CHAT_ID
+    # From staging_config(), not the module constants: BENCH_CHAT_ID / BENCH_USER_ID
+    # are only the *defaults*, and .env overrides them. Reading the constants here
+    # while every other caller reads the env-aware config split the run's identity in
+    # two — this wrote chat_defaults[999001] = bench_staging while the MCP subprocess
+    # was launched with --chat-id 1883786161, whose default was still `local`.
+    #
+    # condor's `manage_servers` reports `is_active` from
+    # `get_chat_default_server(settings.chat_id)`, so it answered `local` while
+    # mcp-hummingbot's `configure_server` answered `bench_staging`. The three
+    # configure_server cases ask which server is active and got two different truths;
+    # the judge scored tool_configure_server_002 at 0.20 for "reporting the wrong
+    # active server" when the environment had told it both.
+    #
+    # The API target itself was never wrong: `build_mcp_servers_for_session` is passed
+    # `server_name` explicitly and prefers it over any chat default, and both entries
+    # point at the same host. This is the label, not the target.
+    user_id = int(staging["user_id"])
+    chat_id = int(staging["chat_id"])
     actions: list[str] = []
 
     if not api_url:
