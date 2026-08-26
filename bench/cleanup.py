@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from metrics.tool_accuracy import normalize_tool_name
@@ -456,3 +459,108 @@ _HUMMINGBOT_TOOLS = {
 
 def _server_for_tool(tool: str) -> str:
     return "mcp-hummingbot" if tool in _HUMMINGBOT_TOOLS else "condor"
+
+
+# ── the ACP agent's own memory, which teardown above cannot see ───────────────
+# `created_resources` reads the MCP tool trace, so it only ever finds what a case
+# built through condor's tools. An ACP agent also has a filesystem, and Claude Code
+# keeps notes of its own under `~/.claude/projects/<cwd-slug>/memory/`. Nothing in
+# the trace mentions those files, so nothing ever removed them.
+
+
+@dataclass
+class AgentMemoryReset:
+    """What a pre-run reset found and moved aside."""
+
+    directory: str = ""
+    archived: list[str] = field(default_factory=list)
+    archive_dir: str = ""
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.error
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "directory": self.directory,
+            "archived": self.archived,
+            "archive_dir": self.archive_dir,
+            "error": self.error,
+        }
+
+
+def acp_memory_dir(project_dir: "Path | str") -> "Path":
+    """Where the ACP agent keeps its own memory for a project.
+
+    Claude Code derives this from the working directory it was launched in, with
+    path separators flattened to dashes — condor at ``/home/x/dev/condor`` becomes
+    ``~/.claude/projects/-home-x-dev-condor/memory``. Both bench
+    (``bench.client``) and production condor (``condor.runtime.llm_client``, via
+    ``get_project_dir()``) launch the bridge in the condor project root, so the two
+    resolve to the same directory — which is what makes wiping it a fair
+    simulation of a cold-start production agent rather than a divergence from one.
+
+    ``CLAUDE_CONFIG_DIR`` relocates the whole tree when set.
+    """
+    from pathlib import Path
+
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+    slug = str(Path(project_dir).resolve()).replace(os.sep, "-")
+    return root / "projects" / slug / "memory"
+
+
+def reset_agent_memory(project_dir: "Path | str", archive_to: "Path") -> AgentMemoryReset:
+    """Archive the ACP agent's own memory, then clear it. Never raises.
+
+    A benchmark run must not depend on the one before it, and this directory made
+    every run depend on all of them. `agent_directional_trader_008` asks the agent
+    to remember a chop filter. In one run it wrote `feedback_chop_filter.md` here
+    instead of calling `manage_memory`; in the next it read that file back, said
+    "already saved, no changes needed", called nothing, and failed the
+    `manage_memory` post-condition. The failure is self-reinforcing — once the note
+    exists the case can never pass again, because declining to duplicate it is the
+    correct response — and the poisoned set grows run over run, which is why
+    post-condition failures went from two to four between the last two runs.
+
+    Files are archived before they are removed, never deleted outright. The
+    directory belongs to the user's Claude Code install, not to bench: today its
+    contents are all bench artifacts, but anyone who uses Claude Code on the condor
+    checkout would have real notes here, and a benchmark has no business destroying
+    them. The archive lands with the run, so a result also records the state it
+    started from.
+
+    Note what this does *not* fix: the agent will write to its own memory again on
+    the next run and fail the post-condition again. That is the honest signal, and
+    it is a finding about condor rather than about bench — condor scopes memory per
+    agent and per user (``agents/<slug>/store/user_<id>/memories``) while Claude
+    Code scopes it per project directory, so a Claude-Code-backed agent told to
+    remember something writes to a store shared across every agent and every user,
+    that condor itself cannot read back.
+    """
+    from pathlib import Path
+
+    reset = AgentMemoryReset()
+    try:
+        memory = acp_memory_dir(project_dir)
+        reset.directory = str(memory)
+        if not memory.is_dir():
+            return reset
+        files = sorted(p for p in memory.iterdir() if p.is_file())
+        if not files:
+            return reset
+
+        archive = Path(archive_to)
+        archive.mkdir(parents=True, exist_ok=True)
+        for path in files:
+            shutil.copy2(path, archive / path.name)
+        # Only unlink once every file is safely copied.
+        for path in files:
+            path.unlink()
+
+        reset.archived = [p.name for p in files]
+        reset.archive_dir = str(archive)
+    except Exception as exc:  # never let housekeeping fail a run
+        log.warning("agent memory reset failed: %s", exc)
+        reset.error = str(exc)
+    return reset

@@ -238,6 +238,8 @@ def test(
     console.print(f"\nBenchmarking [bold]{model}[/bold] on {len(cases)} cases (run {run_id})")
     console.print(f"  target: {target_banner()}\n")
 
+    memory_reset = _reset_acp_memory(model, run_id)
+
     scorecards, responses = asyncio.run(_run_cases(cases, model, store))
     scorecards = [
         unresolvable_card(case, model, resolutions[case.id]) for case in market_skips
@@ -250,6 +252,8 @@ def test(
         shared_loaded=True,
     )
     pin["market_bindings"] = bindings_summary(resolutions)
+    if memory_reset is not None:
+        pin["agent_memory_reset"] = memory_reset.as_dict()
     # Two runs ordered differently cover different prefixes when cut short, so the
     # order belongs with the evidence.
     pin["case_order"] = order
@@ -263,6 +267,49 @@ def test(
     )
     console.print(f"\n[bold]Run saved:[/bold] {run_dir}")
     _print_summary(scorecards, model, PASS_THRESHOLD)
+
+
+def _reset_acp_memory(model: str, run_id: str):
+    """Clear the ACP agent's own memory so a run does not inherit the one before it.
+
+    Only ACP models have any. The PydanticAI path (ollama, anthropic:*,
+    openrouter:*) is stateless between cases and carries nothing at all across runs
+    except what it wrote through condor's own tools, so those models start every run
+    cold whether anyone arranges it or not. Claude Code additionally keeps notes
+    under ~/.claude/projects/<cwd-slug>/memory, and reading back its own note from
+    the previous run is how `agent_directional_trader_008` came to make no tool calls
+    at all and fail its `manage_memory` post-condition.
+
+    This is what makes the two transports comparable at the start line. It is not a
+    departure from production: production condor launches the same bridge in the same
+    project root (`condor.runtime.llm_client`), so what a wipe simulates is a
+    cold-start production agent.
+
+    Archived rather than deleted — see `bench.cleanup.reset_agent_memory`.
+    """
+    from condor_compat.acp.acp_client import is_acp_model
+
+    if not is_acp_model(model):
+        return None
+
+    from bench.cleanup import reset_agent_memory
+    from config import RESULTS_DIR, condor_path
+
+    repo = condor_path()
+    if repo is None:
+        return None
+
+    safe_model = model.replace(":", "_").replace("/", "_")
+    archive = RESULTS_DIR / f"{run_id}_{safe_model}" / "preexisting_agent_memory"
+    reset = reset_agent_memory(repo, archive)
+    if reset.archived:
+        console.print(
+            f"  [yellow]cleared {len(reset.archived)} agent memory file(s) left by "
+            f"an earlier run[/yellow] → archived to {reset.archive_dir}"
+        )
+    elif not reset.ok:
+        console.print(f"  [yellow]agent memory reset skipped: {reset.error}[/yellow]")
+    return reset
 
 
 async def _run_cases(cases, model: str, store):
@@ -526,6 +573,8 @@ def sweep(
     for entry in registry:
         size = f"{entry.params_b}B" if entry.params_b else entry.provider
         console.print(f"[bold]{entry.key}[/bold] ({size})")
+        sweep_run_id = uuid.uuid4().hex[:8]
+        memory_reset = _reset_acp_memory(entry.key, sweep_run_id)
         scorecards, responses = asyncio.run(_run_cases(cases, entry.key, store))
         scorecards = [
             unresolvable_card(case, entry.key, resolutions[case.id])
@@ -542,12 +591,14 @@ def sweep(
         )
         pin["sweep"] = True
         pin["market_bindings"] = bindings_summary(resolutions)
+        if memory_reset is not None:
+            pin["agent_memory_reset"] = memory_reset.as_dict()
         pin["case_order"] = order
         run_dir = save_run(
             entry.key,
             scorecards,
             responses,
-            uuid.uuid4().hex[:8],
+            sweep_run_id,
             prompts=prompts,
             extra_summary=pin,
         )
