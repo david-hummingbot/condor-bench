@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from config import PASS_THRESHOLD, RESULTS_DIR
 from bench.scorer import ScoreCard
+
+log = logging.getLogger(__name__)
 
 
 def save_run(
@@ -26,11 +29,10 @@ def save_run(
     run_dir = RESULTS_DIR / f"{run_id}_{safe_model}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    summary = _compute_summary(model, scorecards)
-    if extra_summary:
-        summary.update(extra_summary)
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
-
+    # Cases first. They are the irreplaceable half — a summary can be recomputed
+    # from them at any time, while re-running the suite costs the better part of an
+    # hour and cannot reproduce the same responses. Writing the summary first meant
+    # one arithmetic error in the headline discarded every case file behind it.
     cases_dir = run_dir / "cases"
     cases_dir.mkdir(exist_ok=True)
     for sc in scorecards:
@@ -39,6 +41,22 @@ def save_run(
         if prompts and sc.case_id in prompts:
             record["question"] = prompts[sc.case_id]
         (cases_dir / f"{sc.case_id}.json").write_text(json.dumps(record, indent=2))
+
+    try:
+        summary = _compute_summary(model, scorecards)
+    except Exception as exc:
+        # Never trade the run for its headline. The cases are already on disk, so
+        # record what broke and leave the run loadable rather than raising through
+        # a completed run and leaving a directory that looks like a crash.
+        log.exception("summary computation failed for run %s", run_dir.name)
+        summary = {
+            "model": model,
+            "cases_total": len(scorecards),
+            "summary_error": f"{type(exc).__name__}: {exc}",
+        }
+    if extra_summary:
+        summary.update(extra_summary)
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
 
     return run_dir
 
@@ -156,6 +174,17 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
     with_tools = [s for s in valid if s.tool_accuracy is not None]
     with_params = [s for s in valid if s.tool_params is not None]
     with_validity = [s for s in valid if s.live_validity is not None]
+    # answer_quality needs the same guard the three above have, and not having it
+    # cost a whole 55-minute run. A judge that fails to answer yields None *without*
+    # setting `error` — deliberately, since the tool evidence is still good and the
+    # composite renormalises over what was measurable (bench.scorer) — so the row is
+    # `valid`, and summing it raised TypeError one line after run_dir.mkdir(). The
+    # run died with an empty directory: no summary, no cases, 80 cases of evidence
+    # gone. `metrics.answer_quality.a_score` has two such paths, "No response
+    # produced." and "Judge error (not scored): …", and one case hitting either was
+    # enough to lose everything.
+    with_quality = [s for s in valid if s.answer_quality is not None]
+    unjudged = [s.case_id for s in valid if s.answer_quality is None]
     infra_excluded = sum(1 for sc in scorecards if sc.error and str(sc.error).startswith("infra:"))
     artifacts = [sc for sc in scorecards if sc.harness_artifact]
     # Caveats are scored, so they are counted separately — a reader still needs to
@@ -198,7 +227,13 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
             {"case_id": sc.case_id, "substituted": sc.tool_substitutions}
             for sc in substituted
         ],
-        "answer_quality_avg": round(_mean([s.answer_quality for s in valid]), 4) if valid else 0.0,
+        "answer_quality_avg": round(_mean([s.answer_quality for s in with_quality]), 4)
+            if with_quality else None,
+        # Scored on everything but the prose. Named, because a silent drop from the
+        # quality average is exactly the kind of thin evidence this report exists to
+        # make visible.
+        "cases_unjudged": len(unjudged),
+        "unjudged_cases": unjudged,
         "tool_accuracy_avg": round(_mean([s.tool_accuracy for s in with_tools]), 4)
             if with_tools else None,
         "tool_params_avg": round(_mean([s.tool_params for s in with_params]), 4)

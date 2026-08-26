@@ -174,3 +174,71 @@ def test_saved_run_is_readable_by_the_report_loader(tmp_path, monkeypatch):
     runs = load_all_runs()
     assert len(runs) == 1
     assert runs[0]["cases_scored"] == 1
+
+
+# ── one unjudged case must not destroy the run ────────────────────────────────
+def test_a_case_the_judge_could_not_score_does_not_crash_the_summary():
+    """This lost a completed 55-minute run: empty directory, no summary, no cases.
+
+    `metrics.answer_quality.a_score` returns None with no `error` set on two paths —
+    "No response produced." and "Judge error (not scored): …" — and that is correct:
+    a judge that failed has said nothing about the model, so the tool evidence stands
+    and the composite renormalises over what was measurable. But `_compute_summary`
+    guarded tool_accuracy, tool_params and live_validity against None and not
+    answer_quality, so such a row entered `_mean` and raised TypeError one line after
+    `run_dir.mkdir()`. One malformed judge reply discarded all 80 case files.
+    """
+    from bench.reporter import _compute_summary
+
+    scored = _card("ok", 0.9, answer_quality=0.9)
+    unjudged = _card(
+        "boom",
+        0.55,
+        answer_quality=None,
+        answer_reason="Judge error (not scored): Expecting ',' delimiter",
+    )
+    assert unjudged.error is None, "the premise: a judge failure is not an error row"
+
+    summary = _compute_summary("m", [scored, unjudged])
+
+    assert summary["answer_quality_avg"] == 0.9, "averaged over what was judged"
+    assert summary["cases_unjudged"] == 1
+    assert summary["unjudged_cases"] == ["boom"]
+    assert summary["cases_scored"] == 2, "the row still counts everywhere else"
+
+
+def test_every_case_unjudged_leaves_the_average_empty_not_zero():
+    """None says "not measured"; 0.0 would assert the model answered badly."""
+    from bench.reporter import _compute_summary
+
+    summary = _compute_summary("m", [_card("a", 0.55, answer_quality=None)])
+    assert summary["answer_quality_avg"] is None
+    assert summary["cases_unjudged"] == 1
+
+
+def test_the_cases_survive_a_summary_that_cannot_be_computed(tmp_path, monkeypatch):
+    """The evidence is the irreplaceable half; the headline can be recomputed.
+
+    Re-running the suite costs the better part of an hour and cannot reproduce the
+    same responses, so a run must never be traded for its summary.
+    """
+    import logging
+
+    import bench.reporter as reporter
+
+    monkeypatch.setattr(reporter, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(
+        reporter,
+        "_compute_summary",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("headline math exploded")),
+    )
+    logging.disable(logging.CRITICAL)
+    try:
+        run_dir = reporter.save_run("m", [_card("c1", 0.9), _card("c2", 0.9)], {"c1": "hello"}, "rid")
+    finally:
+        logging.disable(logging.NOTSET)
+
+    assert sorted(p.stem for p in (run_dir / "cases").iterdir()) == ["c1", "c2"]
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert "headline math exploded" in summary["summary_error"]
+    assert summary["cases_total"] == 2

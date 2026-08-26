@@ -846,7 +846,9 @@ def report() -> None:
             r.get("run_dir", ""),
             r.get("model", ""),
             f"{r.get('composite_avg', 0):.2f}",
-            f"{r.get('answer_quality_avg', 0):.2f}",
+            # None now means "no case in this run was judged", which is a different
+            # statement from 0.0 — same reason the two rows below guard.
+            f"{r.get('answer_quality_avg', 0):.2f}" if r.get("answer_quality_avg") is not None else "—",
             f"{r.get('tool_accuracy_avg', 0):.2f}" if r.get("tool_accuracy_avg") is not None else "—",
             f"{r.get('tool_params_avg', 0):.2f}" if r.get("tool_params_avg") is not None else "—",
             f"{r.get('latency_score_avg', 0):.2f}",
