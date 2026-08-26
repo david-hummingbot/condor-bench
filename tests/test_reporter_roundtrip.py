@@ -242,3 +242,30 @@ def test_the_cases_survive_a_summary_that_cannot_be_computed(tmp_path, monkeypat
     summary = json.loads((run_dir / "summary.json").read_text())
     assert "headline math exploded" in summary["summary_error"]
     assert summary["cases_total"] == 2
+
+
+def test_the_summary_survives_every_nullable_metric_being_none():
+    """The class-level guard, not just the one field that cost a run.
+
+    Four metrics are `float | None` — answer_quality, tool_accuracy, tool_params,
+    live_validity — each None when there was no ground truth to score it against.
+    latency_score and composite are plain floats and no code path sets them None.
+    A row that measured nothing at all must still roll up.
+    """
+    from bench.reporter import _compute_summary
+
+    nothing_measured = _card(
+        "blank",
+        0.0,
+        answer_quality=None,
+        tool_accuracy=None,
+        tool_params=None,
+        live_validity=None,
+    )
+    summary = _compute_summary("m", [nothing_measured])
+
+    assert summary["answer_quality_avg"] is None
+    assert summary["tool_accuracy_avg"] is None
+    assert summary["tool_params_avg"] is None
+    assert summary["live_validity_avg"] is None
+    assert summary["cases_scored"] == 1
