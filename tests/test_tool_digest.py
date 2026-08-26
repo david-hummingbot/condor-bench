@@ -130,7 +130,11 @@ def test_json_list_digest_summarises_length():
     candles = [{"o": i, "h": i, "l": i, "c": i} for i in range(500)]
     digest = digest_tool_output("get_market_data", candles)
     assert "500 items" in digest
-    assert len(digest) < 500
+    # A lossy digest now says so, and the note is part of the digest. Measure the
+    # body against the original bound — "summarised, not dumped" is the claim here.
+    body = digest.split("\n[digest truncated:")[0]
+    assert len(body) < 500
+    assert "[digest truncated:" in digest, "dropping 500 candles must be declared"
 
 
 # ── the answer must reach the judge ────────────────────────────────────────────
@@ -382,3 +386,54 @@ def test_empty_nested_lists_are_still_shown():
     }
     digest = digest_tool_output("manage_trading_agent", payload)
     assert "strategies=[]" in digest
+
+
+# ── a lossy digest must say it is lossy ───────────────────────────────────────
+def test_a_truncated_digest_declares_what_it_dropped():
+    """`tool_manage_skill_001` scored 0.15 for a verifiably correct answer.
+
+    It read `routine_cookbook/report_builder.md` — 10,135 characters — and
+    summarised RoutineResult accurately: the `routines.base` import path,
+    `table_data`/`table_columns`, `chart_image`, and the
+    `{"type": "kpi", …, "trend": "up"|"down"}` section shape are all on lines
+    190-211 of the real file. The judge's share of the tool log was ~1,375
+    characters, roughly 13% of it, and that section sits near the end. Seeing none
+    of it, the judge wrote that the field descriptions "do not appear anywhere in
+    the report_builder.md digest" and scored it as fabrication.
+
+    The judge cannot be right about absence unless it knows the digest is partial.
+    """
+    from bench.tool_digest import digest_tool_output
+
+    long_doc = "\n".join(
+        f"## Section {i}\nProse about the RoutineResult return type and its fields."
+        for i in range(200)
+    )
+    digest = digest_tool_output("manage_skill", long_doc, max_chars=600)
+    assert "[digest truncated:" in digest
+    assert str(len(long_doc)) in digest, "the judge needs the scale of what it lost"
+    assert len(digest) <= 600, "the note is paid for from the budget, not added to it"
+
+
+def test_a_complete_output_is_left_unmarked():
+    """The marker is only worth anything if silence means complete.
+
+    `tool_get_user_context_001` claimed two saved memories when `manage_memory`
+    had returned `{"index": ""}` in full — 17 characters, nothing dropped. That
+    accusation was correct, and a blanket "the log may be incomplete" caveat would
+    have excused it. An unmarked output must stay unmarked so the judge can still
+    convict on one.
+    """
+    from bench.tool_digest import digest_tool_output
+
+    assert "[digest truncated:" not in digest_tool_output("manage_memory", {"index": ""})
+    assert "[digest truncated:" not in digest_tool_output("x", "short and complete")
+
+
+def test_the_judge_is_told_how_to_read_an_absence():
+    """Absence from a truncated digest is not evidence; contradiction always is."""
+    from metrics.answer_quality import _CRITERIA
+
+    assert "DIGESTED" in _CRITERIA
+    assert "digest truncated" in _CRITERIA
+    assert "CONTRADICTS" in _CRITERIA

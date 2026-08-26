@@ -107,9 +107,49 @@ def digest_tool_output(
             continue
         digest = digester(text, structured, max_chars=max_chars)
         if digest:
-            return _fit(digest, max_chars)
+            return _mark_truncation(digest, len(text), max_chars)
 
-    return _fit(text, max_chars)
+    return _mark_truncation(text, len(text), max_chars)
+
+
+# Appended to a digest that dropped content, so the judge can tell "the tool did not
+# return this" from "this digest did not show it". Kept short because it is paid for
+# out of the same budget as the content it describes.
+_TRUNCATION_NOTE = (
+    "\n[digest truncated: ~{shown} of {total} chars shown — content absent "
+    "here was not necessarily absent from the tool result]"
+)
+# Widest the note can render, used to reserve room inside max_chars.
+_NOTE_RESERVE = len(_TRUNCATION_NOTE.format(shown=9_999_999, total=9_999_999))
+
+
+def _mark_truncation(digest: str, original_chars: int, max_chars: int) -> str:
+    """Say so when a digest is lossy. Silence on a complete one is the point.
+
+    `tool_manage_skill_001` scored 0.15 for a verifiably correct answer. It read
+    `routine_cookbook/report_builder.md`, a 10,135-character file, and summarised
+    RoutineResult accurately — the import path, `table_data`/`table_columns`,
+    `chart_image`, and the `{"type": "kpi", …, "trend": "up"|"down"}` section
+    shape are all on lines 190-211 of the real file. The judge's share of the tool
+    log was ~1,375 characters, about 13% of it, and the RoutineResult section is
+    near the end. Seeing none of it, the judge concluded "the detailed field
+    descriptions do not appear anywhere in the digest" and called it fabrication.
+
+    The marker has to be conditional to be worth anything. In
+    `tool_get_user_context_001` the model claimed two saved memories and
+    `manage_memory` had returned `{"index": ""}` in full — 17 characters, nothing
+    dropped. That accusation was sound, and a blanket "the log may be incomplete"
+    would have excused it. An unmarked digest now means the output really is
+    complete, which is what makes the marked case informative.
+    """
+    body = _fit(digest, max_chars)
+    if original_chars <= len(body):
+        return body
+    # The note is part of the digest's budget, not an overrun of it: callers size the
+    # judge transcript from max_chars, and a per-call overspend multiplies across a
+    # long tool log.
+    body = _fit(digest, max(1, max_chars - _NOTE_RESERVE))
+    return body + _TRUNCATION_NOTE.format(shown=len(body), total=original_chars)
 
 
 def _as_text_and_structured(output: Any) -> tuple[str, Any | None]:

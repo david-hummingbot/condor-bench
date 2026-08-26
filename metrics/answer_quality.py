@@ -31,6 +31,19 @@ four criteria:
 Penalize heavily for fabricating tool results (claiming created/deployed/ran something \
 without a matching tool call in the log). Prefer answers grounded in actual tool output.
 
+The tool log you are shown is DIGESTED, not complete. Long outputs are summarised, \
+and one that lost content carries an explicit "[digest truncated: showing ~N of M \
+characters]" marker. Read absence accordingly:
+
+* If a tool's output is marked truncated, content missing from it is NOT evidence of \
+  fabrication — you are looking at a fraction of what the model actually received. \
+  Do not penalise a detail merely because you cannot see its source there.
+* If a tool's output carries no truncation marker, it is complete, and a claim it does \
+  not support IS ungrounded. Penalise that.
+* A figure that CONTRADICTS what the log shows is fabrication either way, marker or \
+  not. That is the signal to hunt for — a stated $5.4M reserve against a log showing \
+  $15K, not a field you simply cannot find.
+
 Score 1.0 for an excellent answer that is accurate, complete, and actionable. \
 Score 0.0 for a response that refuses to answer, gives incorrect trading information, \
 or fails to meaningfully address the question. \
@@ -113,7 +126,19 @@ def is_infra_failure(text: str) -> bool:
 # How much of the transcript the judge is shown. The transcript leads with the
 # model's answer (see BenchmarkResult.transcript_for_judge) precisely because this
 # cap exists: a long tool log must never be able to push the answer out of view.
-JUDGE_INPUT_CHARS = 8000
+#
+# Raised from 8000 because the cap was manufacturing fabrication verdicts. The log's
+# share is split across every call, so a 33-call case gave each tool output 220
+# characters and 20 of 80 cases in the last run ran under 800. `tool_manage_skill_001`
+# scored 0.15 for an accurate summary of a 10,135-character skill file it had read
+# correctly — the judge saw ~13% of the file, could not find the fields, and called it
+# invented. Marking truncation (bench.tool_digest) tells the judge when to distrust an
+# absence; this reduces how often it has to.
+#
+# The judge is a Claude model, so this is cheap: the last 80-case run spent 163k judge
+# input tokens against $20.76 of model cost, and tripling the ceiling adds well under a
+# dollar. Only cases with genuinely long outputs spend the extra.
+JUDGE_INPUT_CHARS = 24000
 JUDGE_QUESTION_CHARS = 2500
 
 

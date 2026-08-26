@@ -71,9 +71,13 @@ _AUTO_CONFIRM_MSG = "Yes, proceed. Deploy / execute with the parameters you prop
 
 # Characters the whole tool log may occupy in the judge transcript, and the smallest
 # useful per-call digest. The judge prompt caps its input at
-# `metrics.answer_quality.JUDGE_INPUT_CHARS` (8000); leaving room for the response and
-# the turn scaffolding puts the log's share near 5500.
-_JUDGE_TOOL_LOG_BUDGET = 5500
+# `metrics.answer_quality.JUDGE_INPUT_CHARS` (24000); leaving room for the response and
+# the turn scaffolding puts the log's share near 19000.
+#
+# This budget is divided by the number of calls, so it is what decides whether the judge
+# can see a tool's output at all. At 5500 a 33-call case fell to the 220-char floor and
+# an 11-call case to 500, which is how accurate answers came back scored as fabricated.
+_JUDGE_TOOL_LOG_BUDGET = 19000
 _MIN_DIGEST_CHARS = 220
 
 
