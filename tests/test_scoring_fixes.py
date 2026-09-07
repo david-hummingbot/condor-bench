@@ -212,24 +212,23 @@ def test_the_banned_action_still_trips():
 
 
 def test_a_tool_can_be_required_and_one_of_its_actions_forbidden():
-    """agent_market_making_expert_005 expects manage_executors and says "do not stop
-    anything" — a name ban there is self-contradictory."""
+    """A list/status case can still forbid the mutating action on the same tool."""
     from metrics.tool_accuracy import violated_forbidden_calls
 
-    listing = [{"tool": "manage_executors", "args": {"action": "get_all_bots"}}]
-    stopping = [{"tool": "manage_executors", "args": {"action": "stop"}}]
-    bans = ["manage_executors:stop"]
+    listing = [{"tool": "manage_bots", "args": {"action": "status"}}]
+    deploying = [{"tool": "manage_bots", "args": {"action": "deploy"}}]
+    bans = ["manage_bots:deploy"]
     assert violated_forbidden_calls(listing, bans) == []
-    assert violated_forbidden_calls(stopping, bans) == bans
+    assert violated_forbidden_calls(deploying, bans) == bans
 
 
 def test_name_level_bans_still_work_for_read_only_tools():
-    """tool_consult_003 bans get_market_data: the test is "route it, don't answer
+    """tool_consult_003 bans get_prices: the test is "route it, don't answer
     yourself". That tool has no mutating action, so the name ban is the right shape."""
     from metrics.tool_accuracy import violated_forbidden_calls
 
-    calls = [{"tool": "get_market_data", "args": {"data_type": "prices"}}]
-    assert violated_forbidden_calls(calls, ["get_market_data"]) == ["get_market_data"]
+    calls = [{"tool": "get_prices", "args": {"trading_pairs": ["ETH-USDT"]}}]
+    assert violated_forbidden_calls(calls, ["get_prices"]) == ["get_prices"]
 
 
 def test_every_dataset_ban_on_a_mutating_tool_names_an_action():
@@ -237,15 +236,15 @@ def test_every_dataset_ban_on_a_mutating_tool_names_an_action():
     from bench.dataset import load_all_cases
 
     also_reads = {
-        "manage_executors",
         "manage_bots",
         "manage_amm",
         "manage_controllers",
-        "manage_trading_agent",
+        "manage_agents",
+        "manage_strategies",
+        "control_agent",
         "manage_memory",
         "manage_skill",
         "manage_routines",
-        "manage_notes",
     }
     offenders = {}
     for case in load_all_cases():
@@ -303,9 +302,9 @@ def test_a_created_agent_is_deleted_as_an_agent_not_as_a_strategy():
 
     result = _Result(
         [{
-            "tool": "mcp__condor__manage_trading_agent",
+            "tool": "mcp__condor__manage_agents",
             "tool_call_id": "t1",
-            "args": {"action": "create_agent", "name": "Bench DCA SOL"},
+            "args": {"action": "create", "name": "Bench DCA SOL"},
         }],
         [{"tool_call_id": "t1", "output": '{"agent_slug": "bench_dca_sol"}'}],
     )
@@ -313,10 +312,10 @@ def test_a_created_agent_is_deleted_as_an_agent_not_as_a_strategy():
     # The display name is in args; the slug the delete needs is only in the response.
     assert resource.identifier == "bench_dca_sol"
 
-    undo_action = _UNDO_BY_CREATE[("manage_trading_agent", "create_agent")][0]
-    assert undo_action == "delete_agent"
+    undo_action = _UNDO_BY_CREATE[("manage_agents", "create")][0]
+    assert undo_action == "delete"
     assert _undo_args(resource, undo_action) == {
-        "action": "delete_agent",
+        "action": "delete",
         "agent_slug": "bench_dca_sol",
     }
 
@@ -325,14 +324,14 @@ def test_a_created_strategy_is_still_deleted_as_a_strategy():
     from bench.cleanup import _undo_args, created_resources
 
     result = _Result([{
-        "tool": "mcp__condor__manage_trading_agent",
-        "tool_call_id": "t1",
-        "args": {"action": "create_strategy", "agent_slug": "bench_dca_sol",
+            "tool": "mcp__condor__manage_strategies",
+            "tool_call_id": "t1",
+            "args": {"action": "create", "agent_slug": "bench_dca_sol",
                  "name": "bench_dca_sol"},
     }], [{"tool_call_id": "t1", "output": '{"strategy_id": "bench_dca_sol.bench_dca_sol"}'}])
     (resource,) = created_resources(result)
-    assert _undo_args(resource, "delete_strategy") == {
-        "action": "delete_strategy",
+    assert _undo_args(resource, "delete") == {
+        "action": "delete",
         "strategy_id": "bench_dca_sol.bench_dca_sol",
     }
 

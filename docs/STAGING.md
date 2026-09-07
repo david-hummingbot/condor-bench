@@ -123,9 +123,9 @@ order:
 
 | Level | Means | Examples |
 |---|---|---|
-| `read_only` | No state change anywhere | `get_market_data`, `get_portfolio_overview`, advisory consults |
+| `read_only` | No state change anywhere | `get_prices`, `get_portfolio_overview`, advisory consults |
 | `mutating` | condor-side state only | `manage_routines` create, `manage_memory` write, journal writes |
-| `destructive` | Capital-affecting | `manage_executors` create, `manage_bots` deploy, leverage changes, strategy creation |
+| `destructive` | Capital-affecting | `create_*_executor`, `manage_bots` deploy, leverage changes, strategy creation |
 
 **Every level runs.** The level is not a gate; it decides two things:
 

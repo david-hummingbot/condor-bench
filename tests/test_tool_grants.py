@@ -147,7 +147,7 @@ def test_scoped_specialists_get_a_smaller_grant_than_the_full_surface():
     if grant is None:
         pytest.skip("market_making_expert declares no tools upstream")
     assert 0 < len(grant) < 24, f"expected a scoped grant, got {len(grant)}"
-    assert "get_market_data" in grant
+    assert "get_prices" in grant
 
 
 # ── dataset shape after the consult/agent merge ────────────────────────────────
@@ -263,22 +263,24 @@ from condor_compat.acp.pydantic_ai_client import PydanticAIClient  # noqa: E402
 
 _ALL_TOOLS = sorted(
     [
-        "configure_server", "consult", "delegate", "explore_dex_pools",
-        "explore_geckoterminal", "get_available_models", "get_market_data",
-        "get_portfolio_overview", "get_user_context", "manage_amm", "manage_bots",
-        "manage_controllers", "manage_executors", "manage_memory", "manage_notes",
-        "manage_routines", "manage_servers", "manage_skill", "manage_trading_agent",
+        "configure_server", "delegate", "explore_dex_pools",
+        "explore_geckoterminal", "get_available_models", "get_prices",
+        "get_portfolio_overview", "manage_amm", "manage_bots",
+        "manage_controllers", "list_executors", "manage_memory",
+        "manage_routines", "manage_servers", "manage_skill", "manage_agents",
         "search_history", "send_notification",
         "set_account_position_mode_and_leverage", "trading_agent_journal_read",
-        "trading_agent_journal_write",
+        "trading_agent_journal_write", "create_grid_executor", "stop_executor",
+        "run_code",
     ]
 )
-# market_making_expert's real grant: 11 tools, several of which sort past a
-# 12-tool positional cut of the full 24.
+# market_making_expert's grant is larger than this; the cap tests need a grant
+# that already fits inside moderate (12). These 11 names are a stand-in with
+# the same shape: several sort past a 12-of-24 positional cut of the full list.
 _MM_GRANT = [
-    "get_market_data", "get_portfolio_overview", "manage_bots", "manage_controllers",
-    "manage_executors", "manage_memory", "manage_routines", "manage_skill",
-    "manage_trading_agent", "search_history", "trading_agent_journal_read",
+    "get_prices", "get_portfolio_overview", "manage_bots", "manage_controllers",
+    "list_executors", "manage_memory", "manage_routines", "manage_skill",
+    "manage_agents", "search_history", "trading_agent_journal_read",
 ]
 
 

@@ -20,9 +20,13 @@ This file describes the *favorable decision and content*, not a verbatim script 
 ## Consult cases (`consult.jsonl`)
 
 Everyday consults are the coordinator lookups Layer 2 does not uniquely own
-(`get_user_context`, `manage_servers`, `manage_trading_agent`). Portfolio, bots,
-executors, history and funding-rate questions were dropped: the matching tool and
-agent cases already supply those hits. See `docs/CASE_LIST.md`.
+(`manage_servers`, `manage_agents`). Portfolio, bots, executors, history and
+funding-rate questions were dropped: the matching tool and agent cases already
+supply those hits. See `docs/CASE_LIST.md`.
+
+Role, admin, and active server now come from `manage_servers` `list`. Condor
+folded `consult` into `delegate`; user-facing routing cases pin
+`delegate(action="start")`.
 
 ### Everyday usage
 
@@ -30,14 +34,12 @@ agent cases already supply those hits. See `docs/CASE_LIST.md`.
 **Question:** What's my role in Condor, and do I have admin rights?
 
 **Favorable outcome**
-- Call `get_user_context` and report `user_role` and `is_admin` directly.
-- Tools: `get_user_context`.
+- Call `manage_servers` with `action="list"` and report role / admin from that listing.
+- Tools: `manage_servers`. Params: `action=list`.
 
-Asked about role rather than about the active server on purpose. `get_user_context`
-returns `active_server`, but so does `manage_servers`, so the old wording ("what API
-server am I connected to") was fully answerable without the tool this case exists to
-measure — and a run answered it correctly via `manage_servers` for a composite of
-0.665. `user_role` and `is_admin` are held by `get_user_context` alone.
+`get_user_context` is gone. The list payload is where production now puts role,
+admin, and the active server, so this case shares a tool with the server-list
+consults rather than owning a dedicated lookup.
 
 #### c006 — Server online check
 **Question:** Is my active Hummingbot API server online right now?
@@ -57,16 +59,12 @@ measure — and a run answered it correctly via `manage_servers` for a composite
 **Question:** Which trading agents do I have set up, not counting yourself?
 
 **Favorable outcome**
-- Call `manage_trading_agent` with `action=list_agent_definitions` and summarise the
-  trading agents, excluding the `condor` chat assistant.
-- Tools: `manage_trading_agent`.
+- Call `manage_agents` with `action=list` and summarise the trading agents,
+  excluding the `condor` chat assistant.
+- Tools: `manage_agents`. Params: `action=list`.
 
-"Not counting yourself" is there because the tool answers wider than the old question
-asked. `_list_agent_definitions` walks every `agents/*/AGENT.md`, and `condor` has one —
-so the store returns 9 where the roster holds 8 trading agents plus the assistant. A run
-listed the 8 and left itself out, which is the better answer, and the judge cut quality
-from 1.0 to 0.55 for "silently omitting one agent". Now the sensible reading is the
-expected one.
+"Not counting yourself" is there because the roster includes the chat assistant.
+A run that listed the trading agents and left itself out is the better answer.
 
 ## Tick cases (`tick.jsonl`)
 
@@ -77,8 +75,8 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 
 **Favorable outcome**
 - Conditions pass gates → **open** a BTC grid.
-- Tools: `get_market_data` → `manage_executors` (create) → `trading_agent_journal_write`.
-- Config roughly: ±2% around $65k, ~$500, 10–20 levels, Binance BTC-USDT, `controller_id` top-level.
+- Tools: `create_grid_executor` → `trading_agent_journal_write`.
+- Config roughly: ±2% around $65k, ~$500, 10–20 levels, Binance BTC-USDT.
 - Journal: one action line (opened grid + why).
 
 ### t002 — ETH grid overbought, high PnL
@@ -86,7 +84,7 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 
 **Favorable outcome**
 - **Stop** the executor to lock profits (prefer lock-in over riding trend).
-- Tools: `manage_executors` (stop / inspect) → `trading_agent_journal_write`.
+- Tools: `list_executors` → `stop_executor` → `trading_agent_journal_write`.
 - Cite overbought + PnL thresholds and learnings about mean reversion.
 
 ### t003 — Risk BLOCKED
@@ -95,7 +93,8 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 **Favorable outcome**
 - **Do not trade.** No new executors.
 - Tools: `trading_agent_journal_write` only.
-- Must **not** call `manage_executors` (`expected_no_calls`).
+- Must **not** create or stop executors (`expected_no_calls` on the five
+  `create_*_executor` tools and `stop_executor`).
 - Journal the block reason and wait.
 
 ### t004 — Near executor limit, mixed SOL signal
@@ -103,29 +102,24 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 
 **Favorable outcome**
 - Be selective → **hold / skip** opening a new executor.
-- Tools: `get_market_data` → `trading_agent_journal_write`.
+- Tools: `trading_agent_journal_write`.
 - Journal why the signal is not strong enough given capacity.
 
 ### t005 — Schema error recovery
 **Scenario:** Prior create failed; missing `controller_id`; must fetch schema, fix, retry once, journal.
 
 **Favorable outcome**
-- Methodical recovery: create (or retry) → on error fetch schema via `manage_executors` → fix required fields → retry once → journal error/fix as learning.
-- The scenario's instructions ask for the `grid_executor` schema. They used to say
-  `grid_strike`, which the API rejects with "Unknown executor type" — it is a
-  *controller* (`handlers/bots/controllers/grid_strike/`), not an executor type, a
-  conflation inherited from condor's own prompt example. The case was asking the model
-  to make a call that could not succeed.
-- Tools: `manage_executors` (multiple actions OK) → `trading_agent_journal_write`.
+- Methodical recovery: call `create_grid_executor` → on error fix required fields from
+  the error text → retry once → journal error/fix as learning.
+- Tools: `create_grid_executor` → `trading_agent_journal_write`.
 - End with a successful create when possible (retry: `sol-grid-002`).
 
 ### t006 — ETH dry run
 **Scenario:** `execution_mode: dry_run`; observe only.
 
 **Favorable outcome**
-- Fetch market data; describe what you *would* do in conditional language; dry-run prefixes.
-- Tools: `get_market_data` only.
-- Must **not** call `manage_executors`.
+- Describe what you *would* do in conditional language; dry-run prefixes.
+- No required tools. Must **not** create or stop executors.
 - No live create/stop; no journal required for this experiment mode (and journal tools may be unavailable).
 
 ### t008 — SOL spread wider than the strategy minimum
@@ -133,11 +127,10 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 
 **Favorable outcome**
 - Stand down and explain the spread. Create nothing.
-- Tools: `get_market_data` → `trading_agent_journal_write`.
+- Tools: `trading_agent_journal_write`.
 - The journal write is expected because this runs in `loop` mode, and the tick prompt
-  mandates it: "Write ONE action entry per tick via `trading_agent_journal_write`". The
-  case used to expect `get_market_data` alone, so an agent that obeyed the prompt scored
-  tool F1 0.0 for doing the mandated thing.
+  mandates it: "Write ONE action entry per tick via `trading_agent_journal_write`". Must
+  **not** create or stop executors.
 
 ### t009 — ETH learnings rule out a tempting tape
 **Scenario:** RSI 79 looks strong; a prior learning forbids entries above RSI 75.
@@ -145,10 +138,15 @@ Tick quality is judged on the agent’s reasoning/text; tool score uses `expecte
 
 **Favorable outcome**
 - Stand down and name the learning that stopped you. Create nothing.
-- Tools: `get_market_data` only. Must **not** create or stop executors.
+- No required tools. Must **not** create or stop executors.
 - `dry_run` is required: condor's three modes are `dry_run | run_once | loop`. A
   made-up mode falls through to `loop` and the live prompt then contradicts the
   "do not trade" instructions.
+
+### t010 / t011 — BTC and SOL profit-take (same job as t002)
+Clones of t002 on BTC and SOL so `stop_executor` clears the tool floor. Same
+favorable outcome: list, stop, journal. Slugs `bench_tick_profit_btc` and
+`bench_tick_profit_sol`.
 
 ---
 
@@ -170,26 +168,28 @@ commit that changes case ground truth.
 
 | ID | Expected tools | Pinned params | Must not call | Risk | Slug |
 |----|----------------|---------------|---------------|------|------|
-| c002 | `get_user_context` | — | — | read_only | — |
+| c002 | `manage_servers` | `action=list` | — | read_only | — |
 | c006 | `manage_servers` | `action=status` | — | read_only | — |
 | c010 | `manage_servers` | `action=list` | — | read_only | — |
-| c011 | `manage_trading_agent` | `action=list_agent_definitions` | — | read_only | — |
-| agent_condor_005 | `manage_executors` | `action=create`, `trading_pair=RLUSD-XRP`, `connector_name=xrpl` | — | destructive | — |
+| c011 | `manage_agents` | `action=list` | — | read_only | — |
+| agent_condor_005 | `create_grid_executor` | `trading_pair={venue.pair}`, `connector_name={venue.connector}` | — | destructive | — |
 | agent_condor_routine_001 | `manage_skill`, `manage_routines` | `action=read`, `action=create_routine`, `name=bench_btc_price` | — | mutating | — |
 | agent_condor_routine_004 | `manage_routines` | `action=run`, `name=market_scanner` | — | mutating | — |
-| agent_condor_builder_001 | — | — | `manage_trading_agent:create_strategy`, `manage_trading_agent:create_agent`, `manage_executors:create`, `manage_executors:stop` | read_only | — |
-| agent_condor_builder_002 | `manage_skill`, `manage_trading_agent` | `action=read`, `action=create_strategy`, `name=bench_dca_sol` | — | destructive | — |
+| agent_condor_builder_001 | — | — | `manage_strategies:create`, `manage_agents:create`, `create_*_executor`, `stop_executor` | read_only | — |
+| agent_condor_builder_002 | `manage_skill`, `manage_strategies` | `action=read`, `action=create`, `name=bench_dca_sol` | — | destructive | — |
 | agent_condor_delegate_001 | `delegate` | `agent=market_making_expert`, `action=start` | — | mutating | — |
 | c_journal_roundtrip_001 | `trading_agent_journal_write`, `trading_agent_journal_read` | `agent_id=bench-journal-probe`, `entry_type=learning` | — | mutating | `bench_journal_probe` |
 | c_journal_roundtrip_002 | `trading_agent_journal_write`, `trading_agent_journal_read` | `agent_id=bench-journal-probe`, `entry_type=decision`, `tick=12` | — | mutating | `bench_journal_probe` |
-| t001 | `get_market_data`, `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_normal` |
-| t002 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_profit` |
-| t003 | `trading_agent_journal_write` | — | `manage_executors:create`, `manage_executors:stop` | mutating | `bench_tick_risk_blocked` |
-| t004 | `get_market_data`, `trading_agent_journal_write` | — | — | mutating | `bench_tick_near_limit` |
-| t005 | `manage_executors`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_error_recovery` |
-| t006 | `get_market_data` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_dry_run` |
-| t008 | `get_market_data`, `trading_agent_journal_write` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_spread_wide` |
-| t009 | `get_market_data` | — | `manage_executors:create`, `manage_executors:stop` | read_only | `bench_tick_learnings` |
+| t001 | `create_grid_executor`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_normal` |
+| t002 | `list_executors`, `stop_executor`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_profit` |
+| t003 | `trading_agent_journal_write` | — | `create_*_executor`, `stop_executor` | mutating | `bench_tick_risk_blocked` |
+| t004 | `trading_agent_journal_write` | — | — | mutating | `bench_tick_near_limit` |
+| t005 | `create_grid_executor`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_error_recovery` |
+| t006 | — | — | `create_*_executor`, `stop_executor` | read_only | `bench_tick_dry_run` |
+| t008 | `trading_agent_journal_write` | — | `create_*_executor`, `stop_executor` | read_only | `bench_tick_spread_wide` |
+| t009 | — | — | `create_*_executor`, `stop_executor` | read_only | `bench_tick_learnings` |
+| t010 | `list_executors`, `stop_executor`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_profit_btc` |
+| t011 | `list_executors`, `stop_executor`, `trading_agent_journal_write` | — | — | destructive | `bench_tick_profit_sol` |
 
 `agent_condor_routine_001` reads `routine_cookbook` / `hummingbot_client.md` before
 writing. Condor currently documents `get_prices` as a flat pair→price map; the API
@@ -226,12 +226,12 @@ arguments a correct call must carry.
 - an answer that reports what the tool returned rather than restating the question
   or inventing figures;
 - for cases with `expected_no_calls`, the forbidden tools genuinely not called. A
-  read-only question that ends in a `manage_executors` call is a hard fail no
+  read-only question that ends in a `create_*_executor` call is a hard fail no
   matter how good the prose is.
 
 Cases pinning `risk_level: destructive` (`tool_manage_executors_002`,
-`tool_set_leverage_001`) also have to clear the 0.70 destructive floor before the
-model can be recommended for that domain.
+`tool_create_position_executor_002`, `tool_set_leverage_001`) also have to clear
+the 0.70 destructive floor before the model can be recommended for that domain.
 
 ---
 
@@ -245,8 +245,8 @@ stores. `agent_slug` is what makes the difference: `market_making_expert` reache
 - the agent behaving as its own prompt directs, not as generic Condor. A
   `solana_dex_lp_expert` case should reason about pools and impermanent loss, not
   about CEX grids;
-- correct `manage_routines` / `manage_trading_agent` / `delegate` actions with the
-  pinned name or config;
+- correct `manage_routines` / `manage_agents` / `manage_strategies` / `delegate`
+  actions with the pinned name or config;
 - for the conversational design cases, asking clarifying questions and calling
   **nothing** — a model that jumps straight to creating a strategy has failed it.
 

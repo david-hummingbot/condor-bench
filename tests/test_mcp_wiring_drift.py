@@ -75,13 +75,25 @@ def _strip_bot_id(args: list[str]) -> list[str]:
     return out
 
 
-def _expected_hummingbot_args() -> list[str]:
+def _seat_profile(agent_slug: str | None) -> str:
+    """Pinned ``--profile`` value for this fixture's seat.
+
+    condor mounts ``full`` for the chat coordinator and ``agent`` for an attended
+    specialist (FEAT-066). The probe user owns SERVER, so a ``full`` seat is not
+    downgraded to ``agent`` by the owner check (SEC-252).
+    """
+    return "agent" if agent_slug else "full"
+
+
+def _expected_hummingbot_args(agent_slug: str | None = None) -> list[str]:
     """Pinned mcp-hummingbot spawn args, ``--bot-id`` removed.
 
     ``--server-name`` is the one condor-evals omits. It selects which
     hummingbot-api instance the tools bind to and is what ``start_agent``
     resolves against; without it the server falls back to HUMMINGBOT_API_URL and
     then to localhost:8000.
+
+    ``--profile`` is the seat ring (FEAT-066): which tools the subprocess mounts.
 
     Note what is *not* here: ``--username`` and ``--password``. They used to sit
     on argv and moved into ``env`` under SEC-095. If they reappear in this list,
@@ -96,6 +108,8 @@ def _expected_hummingbot_args() -> list[str]:
         f"http://{HOST}:{PORT}",
         "--server-name",
         SERVER,
+        "--profile",
+        _seat_profile(agent_slug),
     ]
 
 
@@ -122,7 +136,7 @@ def _expected_condor_args(agent_slug: str | None) -> list[str]:
     ]
     if agent_slug:
         args += ["--agent-slug", agent_slug]
-    args += ["--server-name", SERVER]
+    args += ["--server-name", SERVER, "--profile", _seat_profile(agent_slug)]
     return args
 
 
@@ -262,7 +276,9 @@ def test_condor_helpers_match_pinned_spawn_args(wiring, agent_slug):
         "pinned expectations no longer describe."
     )
 
-    assert _strip_bot_id(by_name["mcp-hummingbot"]["args"]) == _expected_hummingbot_args(), (
+    assert _strip_bot_id(by_name["mcp-hummingbot"]["args"]) == _expected_hummingbot_args(
+        agent_slug
+    ), (
         "condor's mcp-hummingbot spawn args changed. Update the pin in this test "
         "only after confirming bench passes whatever the new args need."
     )

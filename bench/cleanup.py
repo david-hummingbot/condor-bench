@@ -35,15 +35,26 @@ log = logging.getLogger(__name__)
 # action that undoes it). Only tools whose creations are cheaply reversible are
 # listed; anything else is reported for manual attention instead of guessed at.
 _CREATE_ACTIONS = {
-    "manage_executors": {"create"},
     "manage_routines": {"create_routine", "create"},
     "manage_skill": {"create", "write"},
     "manage_memory": {"write", "create"},
-    "manage_notes": {"write", "set"},
-    "manage_trading_agent": {"create_strategy", "create_agent"},
+    "manage_agents": {"create"},
+    "manage_strategies": {"create"},
     "manage_bots": {"deploy"},
     "manage_controllers": {"create", "save"},
 }
+
+# Typed create tools have no ``action`` argument — calling them *is* the create
+# (FEAT-062). Undo is ``stop_executor`` with ``keep_position=True``.
+_CREATE_BY_CALL = frozenset(
+    {
+        "create_position_executor",
+        "create_grid_executor",
+        "create_dca_executor",
+        "create_order_executor",
+        "create_lp_executor",
+    }
+)
 
 # Tools that *set state* rather than create a named thing. They have no `action`
 # argument, so _CREATE_ACTIONS cannot see them and _UNDO's (action, identifier)
@@ -76,7 +87,13 @@ _STATE_SETTERS: dict[str, dict[str, Any]] = {
 _STATE_SETTER_SCOPE = ("account_name", "connector_name", "trading_pair")
 
 _UNDO = {
-    "manage_executors": ("manage_executors", "stop"),
+    # Typed create tools undo through stop_executor; the empty action means
+    # _undo_args must not send ``action=`` (stop_executor does not take one).
+    "create_position_executor": ("stop_executor", ""),
+    "create_grid_executor": ("stop_executor", ""),
+    "create_dca_executor": ("stop_executor", ""),
+    "create_order_executor": ("stop_executor", ""),
+    "create_lp_executor": ("stop_executor", ""),
     # condor's action is `delete_routine`; `delete` is not one of its actions and
     # the tool answers with an error *as content*, which teardown used to record as
     # a successful removal. That is how `bench_btc_price` survived into the next
@@ -84,27 +101,26 @@ _UNDO = {
     "manage_routines": ("manage_routines", "delete_routine"),
     "manage_skill": ("manage_skill", "delete"),
     "manage_memory": ("manage_memory", "delete"),
-    "manage_notes": ("manage_notes", "delete"),
-    "manage_trading_agent": ("manage_trading_agent", "delete_strategy"),
 }
 
 # Some tools create more than one kind of thing, and the undo differs per kind.
-# `manage_trading_agent` is the case that matters: `create_agent` makes an AGENT.md
-# identity removed with `delete_agent(agent_slug=…)`, while `create_strategy` makes a
-# playbook removed with `delete_strategy(strategy_id=…)`. Keyed on the tool alone,
-# every agent this benchmark created was "cleaned up" by deleting a strategy that
-# did not exist — which is why `bench_dca_sol` is still in the condor checkout.
+# `manage_agents` / `manage_strategies` replaced the old mega-tool: `create` on
+# manage_agents makes an AGENT.md identity removed with `delete(agent_slug=…)`,
+# while `create` on manage_strategies makes a playbook removed with
+# `delete(strategy_id=…)`. Keyed on the tool alone, every agent this benchmark
+# created used to be "cleaned up" by deleting a strategy that did not exist —
+# which is why `bench_dca_sol` stayed in the condor checkout.
 #
 # (tool, create action) -> (undo action, the argument that names the resource,
 #                           keys to read the identifier from, response first)
 _UNDO_BY_CREATE: dict[tuple[str, str], tuple[str, str, tuple[str, ...]]] = {
-    ("manage_trading_agent", "create_agent"): (
-        "delete_agent",
+    ("manage_agents", "create"): (
+        "delete",
         "agent_slug",
         ("agent_slug", "slug"),
     ),
-    ("manage_trading_agent", "create_strategy"): (
-        "delete_strategy",
+    ("manage_strategies", "create"): (
+        "delete",
         "strategy_id",
         ("strategy_id", "id"),
     ),
@@ -188,17 +204,20 @@ def created_resources(result: Any) -> list[CreatedResource]:
                     )
                 )
             continue
-        creating = _CREATE_ACTIONS.get(tool)
-        if not creating:
-            continue
         args = call.get("args") or {}
         if not isinstance(args, dict):
-            continue
-        action = str(args.get("action", "")).lower()
-        # manage_executors' create is its default-ish action in some schemas, so
-        # require the action to be stated rather than inferring creation.
-        if action not in creating:
-            continue
+            args = {}
+        if tool in _CREATE_BY_CALL:
+            action = "create"
+        else:
+            creating = _CREATE_ACTIONS.get(tool)
+            if not creating:
+                continue
+            action = str(args.get("action", "")).lower()
+            # Typed creates have no action; actioned tools must state it rather
+            # than inferring creation from a default.
+            if action not in creating:
+                continue
         identifier = _identifier(
             tool, args, responses_by_id.get(call.get("tool_call_id")), action
         )
@@ -239,6 +258,12 @@ def _identifier(tool: str, args: dict, response: Any, action: str = "") -> str |
             value = parsed.get(key)
             if value:
                 return str(value)
+    # Typed create tools return a formatted string, not JSON, with
+    # "Executor ID: <id>" on its own line.
+    if isinstance(response, str):
+        match = re.search(r"Executor ID:\s*(\S+)", response)
+        if match and match.group(1) not in ("N/A",):
+            return match.group(1)
     return None
 
 
@@ -383,25 +408,19 @@ def _undo_args(resource: CreatedResource, undo_action: str) -> dict[str, Any]:
                 args[key] = resource.args[key]
         return args
 
-    args: dict[str, Any] = {"action": undo_action}
+    if resource.tool in _CREATE_BY_CALL:
+        # stop_executor has no action; keep_position so cleanup does not close
+        # a live position the create opened.
+        return {"executor_id": resource.identifier, "keep_position": True}
+
+    args: dict[str, Any] = {}
+    if undo_action:
+        args["action"] = undo_action
     by_create = _UNDO_BY_CREATE.get((resource.tool, resource.action))
     if by_create:
         args[by_create[1]] = resource.identifier
         return args
-    if resource.tool == "manage_executors":
-        args["executor_id"] = resource.identifier
-        # Stopping an executor without this flag can close the position, which is
-        # a trade. Keep it: cleanup should remove bookkeeping, not move money.
-        args["keep_position"] = True
-        for key in ("account_name", "connector_name"):
-            if resource.args.get(key):
-                args[key] = resource.args[key]
-    elif resource.tool == "manage_trading_agent":
-        args["strategy_id"] = resource.identifier
-    elif resource.tool == "manage_notes":
-        args["key"] = resource.identifier
-    else:
-        args["name"] = resource.identifier
+    args["name"] = resource.identifier
     return args
 
 
@@ -448,10 +467,17 @@ async def _call_tool(
 
 
 _HUMMINGBOT_TOOLS = {
-    "manage_executors",
+    "create_position_executor",
+    "create_grid_executor",
+    "create_dca_executor",
+    "create_order_executor",
+    "create_lp_executor",
+    "list_executors",
+    "get_executor",
+    "stop_executor",
     "manage_bots",
     "manage_controllers",
-    "get_market_data",
+    "get_prices",
     "get_portfolio_overview",
     "search_history",
 }

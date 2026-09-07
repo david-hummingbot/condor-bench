@@ -1,6 +1,6 @@
 """Warm markets a case needs before the model runs.
 
-``manage_executors(create)`` for a grid on XRPL (and similar thin connectors)
+``create_grid_executor`` for a grid on XRPL (and similar thin connectors)
 fails with ``KeyError: '<pair>'`` when ``connector.trading_rules`` does not yet
 contain the pair — even though hummingbot-api's create path calls
 ``add_market``. Order-book init can succeed while trading rules lag.
