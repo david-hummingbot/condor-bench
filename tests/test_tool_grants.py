@@ -146,8 +146,32 @@ def test_scoped_specialists_get_a_smaller_grant_than_the_full_surface():
     grant = load_agent_tools("market_making_expert")
     if grant is None:
         pytest.skip("market_making_expert declares no tools upstream")
-    assert 0 < len(grant) < 24, f"expected a scoped grant, got {len(grant)}"
+    # Compared against the recorded surface, not a literal. The bound used to be
+    # `< 24`, which was the surface when it was written; the surface is 44 tools at
+    # condor d5eab53e, so the literal had stopped asserting anything about scoping.
+    surface = _tool_surface_names()
+    assert 0 < len(grant) < len(surface), (
+        f"expected a scoped grant, got {len(grant)} of a {len(surface)}-tool surface"
+    )
     assert "get_prices" in grant
+    assert set(grant) <= surface, (
+        f"grant names tools that are not in the recorded surface: "
+        f"{sorted(set(grant) - surface)}"
+    )
+
+
+def _tool_surface_names() -> set[str]:
+    """Every tool name in the recorded production surface, both servers."""
+    import json
+
+    from config import DATASETS_DIR
+
+    snapshot = json.loads((DATASETS_DIR / "tool_surface.json").read_text())
+    return {
+        tool
+        for spec in snapshot.get("servers", {}).values()
+        for tool in (spec.get("tools") or {})
+    }
 
 
 # ── dataset shape after the consult/agent merge ────────────────────────────────
@@ -249,12 +273,18 @@ def test_specialist_cases_only_expect_tools_the_agent_is_granted():
 
 
 # ── The per-mode cap vs the agent's grant ─────────────────────────────────────
-# An allowlist is condor's own curated grant (market_making_expert: 11 tools,
-# meteora_launch_lp: 10) — already how production keeps the schema count down.
-# Truncating it further by *position* threw away tools the agent is defined by
-# for no reduction the grant had not already achieved: six agent-scoped cases
-# were recorded as "expected tool was never offered" while their grant fit inside
-# the cap the whole time.
+# An allowlist is condor's own curated grant — already how production keeps the
+# schema count down. Truncating it further by *position* threw away tools the
+# agent is defined by for no reduction the grant had not already achieved: six
+# agent-scoped cases were recorded as "expected tool was never offered" while
+# their grant fit inside the cap the whole time.
+#
+# The grants have since outgrown the cap (16 / 13 / 20 at condor d5eab53e, all
+# over moderate's 12), so "it fits anyway" no longer covers the same ground and
+# went quiet when it stopped. What holds the guarantee now is the priority pass:
+# an unavoidable cut falls on tools the case is not scored on, so the row stays a
+# measurement of the model rather than of the harness. Counts stay out of these
+# comments on purpose — the tests below construct their own grants.
 
 import asyncio  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
@@ -284,9 +314,14 @@ _MM_GRANT = [
 ]
 
 
-def _prepared(allowed: list[str] | None, mode: str) -> tuple[list[str], bool]:
+def _prepared(
+    allowed: list[str] | None,
+    mode: str,
+    priority: list[str] | None = None,
+) -> tuple[list[str], bool]:
     client = PydanticAIClient.__new__(PydanticAIClient)
-    client.allowed_tools = allowed
+    client.allowed_tools = set(allowed) if allowed else None
+    client.priority_tools = set(priority) if priority else None
     client.tool_filter_mode = mode
     client.model_name = "openai:local-26b"
     client.offered_tools = None
@@ -314,6 +349,45 @@ def test_a_grant_over_the_cap_is_still_trimmed():
     offered, truncated = _prepared(_ALL_TOOLS, "essential")
     assert len(offered) == 6
     assert truncated
+
+
+def test_a_cut_never_falls_on_the_tools_the_case_is_scored_on():
+    """The regression that returned when the grants outgrew the cap.
+
+    Every scoped specialist now grants more than moderate's 12, so the positional
+    cut is live again for mid-size local models. A cut that takes the expected
+    tool with it does not measure the model: the row is dropped as a harness
+    artifact and the domain reads as thin coverage.
+    """
+    over_cap = sorted(_ALL_TOOLS)[:16]
+    # A tool that loses the positional cut on its own, so the assertion is about
+    # the priority pass and not about alphabetical luck.
+    expected = [t for t in over_cap if t not in sorted(over_cap)[:12]]
+    assert expected, "fixture no longer exercises a tool the cut would drop"
+
+    offered, truncated = _prepared(over_cap, "moderate", priority=expected)
+    assert len(offered) == 12, "the cap must still bound what the model sees"
+    assert truncated, "a real cut still has to be recorded"
+    assert not set(expected) - set(offered), (
+        f"the cut withheld the tools the case is scored on: "
+        f"{sorted(set(expected) - set(offered))}"
+    )
+
+
+def test_priority_adds_nothing_that_the_grant_withheld():
+    """Priority orders a cut; it is not a back door into the allowlist."""
+    offered, _ = _prepared(_MM_GRANT, "moderate", priority=["manage_amm"])
+    assert "manage_amm" not in offered, (
+        "an ungranted tool became visible by being named as expected — the "
+        "allowlist is production's scope and priority must not widen it"
+    )
+
+
+def test_an_uncut_run_keeps_discovery_order():
+    """No cut, no reordering: nothing to justify perturbing the surface."""
+    offered, truncated = _prepared(None, "full", priority=["stop_executor"])
+    assert not truncated
+    assert offered == [n for n in _ALL_TOOLS]
 
 
 def test_chat_scoped_runs_still_hit_the_cap_and_say_so():

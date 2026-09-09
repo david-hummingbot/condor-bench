@@ -21,13 +21,22 @@
     "tests/test_matrix_routing.py::test_every_shipped_agent_has_a_routing_domain",
     "on purpose: the decision should be made deliberately once, not defaulted",
     "silently in either direction. If condor ever adds a role field to AGENT.md,",
-    "read it there and keep this file only for overrides."
+    "read it there and keep this file only for overrides.",
+    "",
+    "Tool counts are NOT recorded in these notes. They were, and they rotted: the",
+    "prose argued from '8 tools' and 'inherits all 24' while the grants had grown to",
+    "16-20 against a 44-tool surface, so the subset arguments below were being read",
+    "against numbers that no longer held. Read the current grant from the agent's own",
+    "AGENT.md `tools:` list (bench/client.load_agent_tools does exactly that) and the",
+    "surface from datasets/tool_surface.json. What belongs here is the *reasoning* —",
+    "which base an agent specialises and why — since that is the judgement a count",
+    "cannot make for you."
   ],
   "agents": {
     "adaptive_grid_trader": {
       "role": "strategy",
       "base": "directional_trader",
-      "notes": "Grid trading, but the loop is directional: multi-timeframe analysis picks LONG/SHORT/TWO_SIDED and re-picks it as conditions move, so the grid is the execution shape rather than the job. Based on directional_trader over market_making_expert on grants too — its 9 tools are a strict subset of the directional base (which declares tools: [] and inherits all 24), while market making covers only 6 of them and adds manage_controllers and manage_bots, which this agent is not granted."
+      "notes": "Grid trading, but the loop is directional: multi-timeframe analysis picks LONG/SHORT/TWO_SIDED and re-picks it as conditions move, so the grid is the execution shape rather than the job. Based on directional_trader over market_making_expert on grants too: its grant is a subset of the directional base (which declares tools: [] and inherits the whole surface), while market making misses several of its tools — trading_agent_journal_write and send_notification among them — and adds manage_bots and manage_controllers, which this agent is not granted."
     },
     "condor": {
       "role": "expert",
@@ -37,11 +46,11 @@
     "dca_accumulator": {
       "role": "strategy",
       "base": "directional_trader",
-      "notes": "Laddered spot accumulation via dca_executor — level spacing, per-level size, budget, and re-laddering after a move. Directional rather than market-making: it is one-sided accumulation with a long bias, explicitly not grids or two-sided quoting. Grants agree with the job, on the same reasoning as adaptive_grid_trader: its 9 tools are a strict subset of the directional base (which declares tools: [] and inherits all 24), while market making covers only 7 of them and misses trading_agent_journal_write and send_notification."
+      "notes": "Laddered spot accumulation via dca_executor — level spacing, per-level size, budget, and re-laddering after a move. Directional rather than market-making: it is one-sided accumulation with a long bias, explicitly not grids or two-sided quoting. Grants agree with the job on the same reasoning as adaptive_grid_trader. Note this one is a *local* agent (.condor/agents/), not part of the roster condor ships, and its grant still names pre-d5eab53e tools (get_market_data, manage_executors) — so it is not evidence about the current surface."
     },
     "directional_trader": {
       "role": "expert",
-      "notes": "Declares tools: [] so it inherits all 24. Base for directional strategies."
+      "notes": "Declares tools: [] so it inherits the whole surface. Base for directional strategies."
     },
     "fundamental_analyst": {
       "role": "expert",
@@ -49,25 +58,25 @@
     },
     "market_making_expert": {
       "role": "expert",
-      "notes": "Scoped to 8 tools. Base for connector-specific market-making strategies."
+      "notes": "Scoped to a subset of the surface, centred on the bot/controller pair (manage_bots + manage_controllers) that no other expert is granted. Base for connector-specific market-making strategies."
     },
     "meteora_launch_lp": {
       "role": "expert",
-      "notes": "Scoped to 7 tools and holds the only exclusive grant in the roster (manage_amm), so no other domain's evidence covers its core tool."
+      "notes": "Scoped, and holds the only exclusive grant in the roster (manage_amm), so no other domain's evidence covers its core tool."
     },
     "smart_money_flow": {
       "role": "strategy",
       "base": "directional_trader",
-      "notes": "Directional perp trading on Derive. Declares tools: [] like its base."
+      "notes": "Directional perp trading on Derive. Scoped to a subset of the directional base, on the same reasoning as adaptive_grid_trader."
     },
     "solana_dex_lp_expert": {
       "role": "expert",
-      "notes": "Scoped to 8 tools. Base for chain- or venue-specific LP strategies."
+      "notes": "Scoped, and the only agent granted the orphaned-position pair (list_orphaned_positions + resolve_orphaned_position). Base for chain- or venue-specific LP strategies."
     },
     "xrpl_market_maker": {
       "role": "strategy",
       "base": "market_making_expert",
-      "notes": "Market making specialised to the XRPL CLOB connector."
+      "notes": "Market making specialised to the XRPL CLOB connector. Note the grant does not nest: it holds tools its market-making base is not granted (create_order_executor, stop_executor, send_notification), so the inherited model assignment rests on domain evidence rather than on a subset argument."
     }
   }
 }

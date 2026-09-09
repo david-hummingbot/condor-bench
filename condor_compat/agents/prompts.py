@@ -1,8 +1,21 @@
 """Prompt builder for trading agent ticks.
 
-Vendored from condor/condor/agents/prompts.py with two changes:
+Vendored from condor/condor/agents/prompts.py with three changes:
   1. Agent/Strategy type annotations replaced with Any (no condor model imports).
   2. is_pydantic_ai_model imported from condor_compat instead of condor.
+  3. Only the executor surface is carried. Upstream also builds a controller-mode
+     variant of the live prompt (steer a bot's controllers instead of spawning
+     standalone executors); no tick case in `datasets/tick.jsonl` is
+     controller-shaped, so the branch is omitted rather than half-vendored.
+
+Every tool name in here is part of the measurement: a tick case is scored on
+`expected_tool_calls`, so a prompt that names a tool condor no longer mounts
+makes the case unpassable for a model that obeys it. The names below track
+condor `d5eab53e` (`get_prices`, typed `create_*_executor`, `list_executors` /
+`stop_executor`). Upstream has since grown blocks bench does not build data for
+— the session canvas, [LOOP STATE], the drift ledger, the unattended
+authorization block — so this file is deliberately narrower than production's
+prompt, and `tests/test_vendored_drift.py` says why it cannot be byte-compared.
 
 Source: https://github.com/hummingbot/condor
 """
@@ -15,26 +28,31 @@ BASE_PROMPT_LIVE = """\
 You are an autonomous trading agent running inside Condor.
 
 RULES:
-- Trade ONLY via manage_executors(action="create"). NEVER use place_order.
+- Trade ONLY via the create_*_executor tools — create_position_executor,
+  create_grid_executor, create_dca_executor, create_order_executor,
+  create_lp_executor. NEVER use place_order.
+- If your strategy deploys a controller-based bot, manage_bots(action="deploy")
+  MUST include max_global_drawdown_quote within your risk limits — deploys
+  without a declared loss cap are blocked by the risk engine.
 - Be conservative. When in doubt, hold and journal why.
-- Never claim an executor was created/stopped unless the tool result confirms it.
 
 ERROR RECOVERY:
-- If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") \
-to fetch the full config schema, compare it against what you sent, fix the missing/wrong \
-fields, and retry ONCE. Journal the error and fix as a learning.
-- Pass controller_id as a TOP-LEVEL argument to manage_executors (not nested inside \
-executor_config). Example shape: manage_executors(action="create", executor_type="grid_strike", \
-controller_id="<agent_id>", connector_name="binance", trading_pair="SOL-USDT", \
-total_amount_quote=..., min_price=..., max_price=..., n_levels=...).
+- If a create_*_executor call fails, re-read the tool's signature: every field it \
+accepts is a typed parameter with its units in the description. Fix the wrong field and \
+retry ONCE. Journal the error and fix as a learning.
 """
 
 BASE_PROMPT_DRY_RUN = """\
 You are an autonomous trading agent running inside Condor in 🧪 DRY RUN mode.
 
 RULES:
-- This is OBSERVATION ONLY. Do NOT create or stop executors.
-- manage_executors is available for read-only queries (performance_report).
+- This is OBSERVATION ONLY. Do NOT create or stop executors, and do NOT deploy,
+  stop, or update a controller-based bot (manage_bots with action="deploy",
+  "stop_bot", "stop_controllers", "start_controllers", or "update_config").
+- The read-only executor tools are available (list_executors, get_executor,
+  get_performance_report, list_positions_held), as is manage_bots for
+  status/logs/get_config. The create_*_executor tools and stop_executor are not
+  loaded this tick.
 - Analyze the market and describe what you WOULD do, but take NO trading action.
 
 DRY RUN MESSAGING:
@@ -96,9 +114,38 @@ JOURNAL:
 
 
 def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
-    tools = ["mcp__mcp-hummingbot__get_market_data"]
+    """ToolSearch preload line for ACP sessions.
+
+    Dry-run preloads only the read-only executor tools, so the create/stop names are
+    not even in the session (FEAT-062) — the permission layer still blocks them, but
+    an agent that cannot see them does not spend a tick reaching for one. Experiment
+    modes (dry_run / run_once) omit trading_agent_journal_write since they have no
+    journal.
+
+    Every name here has to be one the seat actually mounts: ToolSearch resolves the
+    query against the mounted surface, so a single stale name is a silent miss and
+    the tick starts holding no tools at all.
+    """
+    tools = [
+        "mcp__mcp-hummingbot__get_prices",
+        # The candle, order book and funding readers are not mounted any more
+        # (ARCH-308): market data a tick computes on is read as structured rows
+        # with ``client.market_data.*`` inside run_code, so run_code is what a
+        # tick has to arrive holding.
+        "mcp__condor__run_code",
+        "mcp__mcp-hummingbot__list_executors",
+        "mcp__mcp-hummingbot__get_executor",
+        "mcp__mcp-hummingbot__get_performance_report",
+    ]
     if not is_dry_run:
-        tools.append("mcp__mcp-hummingbot__manage_executors")
+        tools += [
+            "mcp__mcp-hummingbot__create_position_executor",
+            "mcp__mcp-hummingbot__create_grid_executor",
+            "mcp__mcp-hummingbot__create_dca_executor",
+            "mcp__mcp-hummingbot__create_order_executor",
+            "mcp__mcp-hummingbot__create_lp_executor",
+            "mcp__mcp-hummingbot__stop_executor",
+        ]
     tools += [
         "mcp__mcp-hummingbot__search_history",
         "mcp__mcp-hummingbot__explore_geckoterminal",
@@ -162,7 +209,7 @@ def build_tick_prompt(
     if agent_id:
         tick_info += f"\nAgent ID: {agent_id}"
         if not is_dry_run:
-            tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
+            tick_info += f'\nPass controller_id="{agent_id}" to every create_*_executor call — it is what attributes the position to this session.'
     sections.append(tick_info)
 
     if execution_mode == "run_once":

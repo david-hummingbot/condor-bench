@@ -364,10 +364,18 @@ async def _run_cases(cases, model: str, store):
             # half-created resource still needs removing.
             if is_mutating(case):
                 report = await teardown(
-                    result, model, agent_slug=getattr(case, "agent_slug", None)
+                    result,
+                    model,
+                    agent_slug=getattr(case, "agent_slug", None),
+                    tick=getattr(case, "type", "") == "tick",
                 )
                 if report.removed:
                     console.print(f"      [dim]cleaned up {len(report.removed)} resource(s)[/dim]")
+                for row in report.kept_positions:
+                    console.print(
+                        f"      [yellow]position kept: {row.get('tool')} "
+                        f"{row.get('identifier')} — {row.get('note')}[/yellow]"
+                    )
                 for row in report.failed + report.manual:
                     console.print(
                         f"      [yellow]left behind: {row.get('tool')} "

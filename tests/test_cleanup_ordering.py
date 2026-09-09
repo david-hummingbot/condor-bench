@@ -106,7 +106,7 @@ def _condor_stub():
     state = {"strategies": {"bench_dca_agent.bench_dca_sol"}, "agents": {"bench_dca_agent"}}
     order: list[tuple[str, str]] = []
 
-    async def call_tool(tool, args, *, agent_slug=None, model=""):
+    async def call_tool(tool, args, *, agent_slug=None, model="", tick=False):
         action = args.get("action")
         order.append((action, args.get("agent_slug") or args.get("strategy_id") or ""))
         if action == "delete":

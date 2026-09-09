@@ -108,6 +108,7 @@ async def _run(job: dict) -> dict:
                 result,
                 model,
                 agent_slug=getattr(case, "agent_slug", None),
+                tick=getattr(case, "type", "") == "tick",
             )
 
     pin = build_run_pin(

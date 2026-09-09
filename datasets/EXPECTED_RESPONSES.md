@@ -70,6 +70,18 @@ A run that listed the trading agents and left itself out is the better answer.
 
 Tick quality is judged on the agent’s reasoning/text; tool score uses `expected_tool_calls` / `expected_no_calls`.
 
+Two fields in a tick case do **not** mean what their name suggests:
+
+- `config.agent_key` is part of the production-shaped fixture, not a model
+  selection. `bench/client.build_tick_prompt_for_case` overrides it with the model
+  actually under test, because `build_tick_prompt` reads it to choose the prompt's
+  TOOLS section — a pydantic-ai run is told its tools are pre-loaded, an ACP run
+  gets a `ToolSearch` preload line. Reading the fixture meant a `claude-code` run
+  was told its tools were loaded when that path defers them.
+- `config.bot_name` would emit condor's `[CONTROLLER MODE]` block, which
+  contradicts the executor rules this vendored prompt carries. No case sets it;
+  vendor upstream's controller-mode base prompt before one does.
+
 ### t001 — BTC Grid, first tick (normal)
 **Scenario:** No position; RSI 48, spread 0.04%; strategy says open when favorable.
 
@@ -207,8 +219,17 @@ save correct, and the case still landed at 0.47 because the pinned tool was neve
 touched. `manage_memory` carries the coverage instead.
 
 Risk taxonomy: `read_only` = no state change; `mutating` = condor-side state only
-(routines, skills, memory, journals); `destructive` = capital-affecting (executors,
-bots, controllers, leverage, strategy creation).
+(routines, skills, memory, journals, **and a started delegation** — `delegate(action=
+"start")` detaches an agent session that keeps running after the case is scored);
+`destructive` = capital-affecting (executors, bots, controllers, leverage, strategy
+creation).
+
+The level is not a label, it is what runs teardown (`bench/dataset.is_mutating`), so
+two cases pinning the same call must agree on it —
+`test_two_cases_pinning_the_same_call_agree_on_its_risk_level` holds single-call
+cases to that. `consult` folding into `delegate` is how three routing cases came to
+sit at `read_only` while making the same detaching call as the `mutating` delegate
+cases.
 
 ---
 
@@ -232,6 +253,16 @@ arguments a correct call must carry.
 Cases pinning `risk_level: destructive` (`tool_manage_executors_002`,
 `tool_create_position_executor_002`, `tool_set_leverage_001`) also have to clear
 the 0.70 destructive floor before the model can be recommended for that domain.
+
+The three `create_position_executor` cases state their size in **base units** and
+pin `amount`, because there is no gate in front of them and `amount` is the one
+argument the tool reads in base currency ("for BTC-USDT, `amount=0.01` is 0.01 BTC,
+not $0.01 and not $100" — its own docstring calls this the sharpest trap in the
+tool). A question that names no size leaves a live position sized by whatever the
+model guesses, and an unpinned `amount` scores 0.001 BTC and 1 BTC identically. The
+declared pair is fixed by `bench/market_resolver` — a connector that cannot trade it
+is rejected, never silently swapped — so a base-unit figure in the prompt stays
+correct whichever venue the case binds to.
 
 ---
 

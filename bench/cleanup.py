@@ -42,6 +42,12 @@ _CREATE_ACTIONS = {
     "manage_strategies": {"create"},
     "manage_bots": {"deploy"},
     "manage_controllers": {"create", "save"},
+    # `delegate(action="start")` is a creation with a heartbeat: it detaches an
+    # agent session that runs unattended under full auto-approve until it decides
+    # it is done. Left behind it is worse than a stray routine — it holds a model
+    # budget and can still act on staging after the case that spawned it was
+    # scored. `stop` is its undo (`delegate(action="stop", task_id=…)`).
+    "delegate": {"start"},
 }
 
 # Typed create tools have no ``action`` argument — calling them *is* the create
@@ -124,6 +130,13 @@ _UNDO_BY_CREATE: dict[tuple[str, str], tuple[str, str, tuple[str, ...]]] = {
         "strategy_id",
         ("strategy_id", "id"),
     ),
+    # The task id exists only in the response — `start` is called with an agent
+    # slug and a task string, neither of which names the delegation.
+    ("delegate", "start"): (
+        "stop",
+        "task_id",
+        ("task_id",),
+    ),
 }
 
 # Tools whose creations this module will not attempt to reverse. A deployed bot
@@ -155,6 +168,11 @@ class CleanupReport:
     removed: list[dict[str, Any]] = field(default_factory=list)
     failed: list[dict[str, Any]] = field(default_factory=list)
     manual: list[dict[str, Any]] = field(default_factory=list)
+    # Executors stopped with ``keep_position=True``: the bookkeeping is gone, and
+    # whatever position it had opened is not. Reported separately from `failed`
+    # because the teardown did exactly what it was asked to, and separately from
+    # `removed` because something is still on the box.
+    kept_positions: list[dict[str, Any]] = field(default_factory=list)
     skipped_reason: str | None = None
 
     @property
@@ -167,6 +185,7 @@ class CleanupReport:
             "removed": self.removed,
             "failed": self.failed,
             "manual": self.manual,
+            "kept_positions": self.kept_positions,
             "clean": self.clean,
             "skipped_reason": self.skipped_reason,
         }
@@ -278,7 +297,7 @@ def _as_json(payload: Any) -> Any:
     return None
 
 
-def tool_error(outcome: Any) -> str | None:
+def tool_error(outcome: Any, tool: str = "") -> str | None:
     """The refusal in an MCP result, or None when the call really did the work.
 
     MCP hands a rejected call back as an ordinary result with ``isError`` set and
@@ -313,8 +332,18 @@ def tool_error(outcome: Any) -> str | None:
         # unknown slug returns `{"deleted": false}`. Only an explicitly *present* and
         # falsy flag counts: absence means the tool simply does not report one.
         for flag in ("deleted", "removed", "stopped", "success"):
-            if flag in payload and not payload[flag]:
-                return f"tool reported {flag}={payload[flag]!r} — nothing was removed"
+            if flag not in payload or payload[flag]:
+                continue
+            # One exception, and it is about what the flag means rather than a
+            # tolerance: `delegate(action="stop")` answers `{"stopped": false}` for
+            # a delegation that already finished or is not held by this process
+            # ("the honest outcome instead of a 404", says condor's route). A task
+            # that is no longer running is precisely the state teardown wants, so
+            # calling that a failed cleanup would print "left behind" for every
+            # delegate case that completed inside its own run.
+            if tool == "delegate" and flag == "stopped":
+                return None
+            return f"tool reported {flag}={payload[flag]!r} — nothing was removed"
     return None
 
 
@@ -335,6 +364,7 @@ async def teardown(
     model: str,
     *,
     agent_slug: str | None = None,
+    tick: bool = False,
 ) -> CleanupReport:
     """Undo what a mutating case created. Best-effort; never raises.
 
@@ -342,6 +372,10 @@ async def teardown(
     used, so deletions land in the same stores and on the same API instance the
     creations did — a teardown pointed at a different ``agent_slug`` would delete
     nothing and report success.
+
+    ``tick`` is the other half of "the same wiring": the seat (FEAT-066). A tick
+    case runs on the narrower loop profile, and an undo raised on the attended
+    profile would be reaching for a tool the case itself never held.
     """
     report = CleanupReport(resources=created_resources(result))
 
@@ -380,11 +414,33 @@ async def teardown(
                 _undo_args(resource, undo[1]),
                 agent_slug=agent_slug,
                 model=model,
+                tick=tick,
             )
-            refusal = tool_error(outcome)
+            refusal = tool_error(outcome, undo[0])
             if refusal:
                 raise RuntimeError(refusal)
             report.removed.append(resource.as_dict())
+            if resource.tool in _CREATE_BY_CALL:
+                # `keep_position=True` is deliberate — closing a position is a
+                # trade, not a teardown step — but the consequence has to be
+                # *said*. A position executor's exits (stop-loss, take-profit,
+                # time limit) are the executor's, so once it stops the position
+                # is unmanaged, and the pre-flight backstop looks for RUNNING
+                # executors, not held positions: nothing downstream would ever
+                # mention it. An order executor whose entry never filled leaves
+                # nothing behind, and an LP executor always closes on-chain, so
+                # this is stated as "check", not as "there is a position".
+                report.kept_positions.append(
+                    {
+                        **resource.as_dict(),
+                        "note": (
+                            "stopped with keep_position=true — any position it "
+                            "opened is still held and no longer has the "
+                            "executor's stop-loss/take-profit. Check with "
+                            "list_positions_held / list_orphaned_positions."
+                        ),
+                    }
+                )
         except Exception as exc:
             log.warning(
                 "cleanup failed for %s %s (%s): %s",
@@ -430,6 +486,7 @@ async def _call_tool(
     *,
     agent_slug: str | None,
     model: str,
+    tick: bool = False,
 ) -> Any:
     """Invoke one MCP tool directly, bypassing the model.
 
@@ -441,7 +498,7 @@ async def _call_tool(
 
     from bench.mcp_provider import build_mcp_configs
 
-    configs = build_mcp_configs(agent_slug=agent_slug)
+    configs = build_mcp_configs(agent_slug=agent_slug, tick=tick)
     target = _server_for_tool(tool)
     config = next((c for c in configs if c.get("name") == target), None)
     if config is None:
