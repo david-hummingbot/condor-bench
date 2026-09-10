@@ -35,15 +35,32 @@ log = logging.getLogger(__name__)
 # action that undoes it). Only tools whose creations are cheaply reversible are
 # listed; anything else is reported for manual attention instead of guessed at.
 _CREATE_ACTIONS = {
-    "manage_executors": {"create"},
     "manage_routines": {"create_routine", "create"},
     "manage_skill": {"create", "write"},
     "manage_memory": {"write", "create"},
-    "manage_notes": {"write", "set"},
-    "manage_trading_agent": {"create_strategy", "create_agent"},
+    "manage_agents": {"create"},
+    "manage_strategies": {"create"},
     "manage_bots": {"deploy"},
     "manage_controllers": {"create", "save"},
+    # `delegate(action="start")` is a creation with a heartbeat: it detaches an
+    # agent session that runs unattended under full auto-approve until it decides
+    # it is done. Left behind it is worse than a stray routine — it holds a model
+    # budget and can still act on staging after the case that spawned it was
+    # scored. `stop` is its undo (`delegate(action="stop", task_id=…)`).
+    "delegate": {"start"},
 }
+
+# Typed create tools have no ``action`` argument — calling them *is* the create
+# (FEAT-062). Undo is ``stop_executor`` with ``keep_position=True``.
+_CREATE_BY_CALL = frozenset(
+    {
+        "create_position_executor",
+        "create_grid_executor",
+        "create_dca_executor",
+        "create_order_executor",
+        "create_lp_executor",
+    }
+)
 
 # Tools that *set state* rather than create a named thing. They have no `action`
 # argument, so _CREATE_ACTIONS cannot see them and _UNDO's (action, identifier)
@@ -76,7 +93,13 @@ _STATE_SETTERS: dict[str, dict[str, Any]] = {
 _STATE_SETTER_SCOPE = ("account_name", "connector_name", "trading_pair")
 
 _UNDO = {
-    "manage_executors": ("manage_executors", "stop"),
+    # Typed create tools undo through stop_executor; the empty action means
+    # _undo_args must not send ``action=`` (stop_executor does not take one).
+    "create_position_executor": ("stop_executor", ""),
+    "create_grid_executor": ("stop_executor", ""),
+    "create_dca_executor": ("stop_executor", ""),
+    "create_order_executor": ("stop_executor", ""),
+    "create_lp_executor": ("stop_executor", ""),
     # condor's action is `delete_routine`; `delete` is not one of its actions and
     # the tool answers with an error *as content*, which teardown used to record as
     # a successful removal. That is how `bench_btc_price` survived into the next
@@ -84,29 +107,35 @@ _UNDO = {
     "manage_routines": ("manage_routines", "delete_routine"),
     "manage_skill": ("manage_skill", "delete"),
     "manage_memory": ("manage_memory", "delete"),
-    "manage_notes": ("manage_notes", "delete"),
-    "manage_trading_agent": ("manage_trading_agent", "delete_strategy"),
 }
 
 # Some tools create more than one kind of thing, and the undo differs per kind.
-# `manage_trading_agent` is the case that matters: `create_agent` makes an AGENT.md
-# identity removed with `delete_agent(agent_slug=…)`, while `create_strategy` makes a
-# playbook removed with `delete_strategy(strategy_id=…)`. Keyed on the tool alone,
-# every agent this benchmark created was "cleaned up" by deleting a strategy that
-# did not exist — which is why `bench_dca_sol` is still in the condor checkout.
+# `manage_agents` / `manage_strategies` replaced the old mega-tool: `create` on
+# manage_agents makes an AGENT.md identity removed with `delete(agent_slug=…)`,
+# while `create` on manage_strategies makes a playbook removed with
+# `delete(strategy_id=…)`. Keyed on the tool alone, every agent this benchmark
+# created used to be "cleaned up" by deleting a strategy that did not exist —
+# which is why `bench_dca_sol` stayed in the condor checkout.
 #
 # (tool, create action) -> (undo action, the argument that names the resource,
 #                           keys to read the identifier from, response first)
 _UNDO_BY_CREATE: dict[tuple[str, str], tuple[str, str, tuple[str, ...]]] = {
-    ("manage_trading_agent", "create_agent"): (
-        "delete_agent",
+    ("manage_agents", "create"): (
+        "delete",
         "agent_slug",
         ("agent_slug", "slug"),
     ),
-    ("manage_trading_agent", "create_strategy"): (
-        "delete_strategy",
+    ("manage_strategies", "create"): (
+        "delete",
         "strategy_id",
         ("strategy_id", "id"),
+    ),
+    # The task id exists only in the response — `start` is called with an agent
+    # slug and a task string, neither of which names the delegation.
+    ("delegate", "start"): (
+        "stop",
+        "task_id",
+        ("task_id",),
     ),
 }
 
@@ -139,6 +168,11 @@ class CleanupReport:
     removed: list[dict[str, Any]] = field(default_factory=list)
     failed: list[dict[str, Any]] = field(default_factory=list)
     manual: list[dict[str, Any]] = field(default_factory=list)
+    # Executors stopped with ``keep_position=True``: the bookkeeping is gone, and
+    # whatever position it had opened is not. Reported separately from `failed`
+    # because the teardown did exactly what it was asked to, and separately from
+    # `removed` because something is still on the box.
+    kept_positions: list[dict[str, Any]] = field(default_factory=list)
     skipped_reason: str | None = None
 
     @property
@@ -151,6 +185,7 @@ class CleanupReport:
             "removed": self.removed,
             "failed": self.failed,
             "manual": self.manual,
+            "kept_positions": self.kept_positions,
             "clean": self.clean,
             "skipped_reason": self.skipped_reason,
         }
@@ -188,17 +223,20 @@ def created_resources(result: Any) -> list[CreatedResource]:
                     )
                 )
             continue
-        creating = _CREATE_ACTIONS.get(tool)
-        if not creating:
-            continue
         args = call.get("args") or {}
         if not isinstance(args, dict):
-            continue
-        action = str(args.get("action", "")).lower()
-        # manage_executors' create is its default-ish action in some schemas, so
-        # require the action to be stated rather than inferring creation.
-        if action not in creating:
-            continue
+            args = {}
+        if tool in _CREATE_BY_CALL:
+            action = "create"
+        else:
+            creating = _CREATE_ACTIONS.get(tool)
+            if not creating:
+                continue
+            action = str(args.get("action", "")).lower()
+            # Typed creates have no action; actioned tools must state it rather
+            # than inferring creation from a default.
+            if action not in creating:
+                continue
         identifier = _identifier(
             tool, args, responses_by_id.get(call.get("tool_call_id")), action
         )
@@ -239,6 +277,12 @@ def _identifier(tool: str, args: dict, response: Any, action: str = "") -> str |
             value = parsed.get(key)
             if value:
                 return str(value)
+    # Typed create tools return a formatted string, not JSON, with
+    # "Executor ID: <id>" on its own line.
+    if isinstance(response, str):
+        match = re.search(r"Executor ID:\s*(\S+)", response)
+        if match and match.group(1) not in ("N/A",):
+            return match.group(1)
     return None
 
 
@@ -253,7 +297,7 @@ def _as_json(payload: Any) -> Any:
     return None
 
 
-def tool_error(outcome: Any) -> str | None:
+def tool_error(outcome: Any, tool: str = "") -> str | None:
     """The refusal in an MCP result, or None when the call really did the work.
 
     MCP hands a rejected call back as an ordinary result with ``isError`` set and
@@ -288,8 +332,18 @@ def tool_error(outcome: Any) -> str | None:
         # unknown slug returns `{"deleted": false}`. Only an explicitly *present* and
         # falsy flag counts: absence means the tool simply does not report one.
         for flag in ("deleted", "removed", "stopped", "success"):
-            if flag in payload and not payload[flag]:
-                return f"tool reported {flag}={payload[flag]!r} — nothing was removed"
+            if flag not in payload or payload[flag]:
+                continue
+            # One exception, and it is about what the flag means rather than a
+            # tolerance: `delegate(action="stop")` answers `{"stopped": false}` for
+            # a delegation that already finished or is not held by this process
+            # ("the honest outcome instead of a 404", says condor's route). A task
+            # that is no longer running is precisely the state teardown wants, so
+            # calling that a failed cleanup would print "left behind" for every
+            # delegate case that completed inside its own run.
+            if tool == "delegate" and flag == "stopped":
+                return None
+            return f"tool reported {flag}={payload[flag]!r} — nothing was removed"
     return None
 
 
@@ -310,6 +364,7 @@ async def teardown(
     model: str,
     *,
     agent_slug: str | None = None,
+    tick: bool = False,
 ) -> CleanupReport:
     """Undo what a mutating case created. Best-effort; never raises.
 
@@ -317,6 +372,10 @@ async def teardown(
     used, so deletions land in the same stores and on the same API instance the
     creations did — a teardown pointed at a different ``agent_slug`` would delete
     nothing and report success.
+
+    ``tick`` is the other half of "the same wiring": the seat (FEAT-066). A tick
+    case runs on the narrower loop profile, and an undo raised on the attended
+    profile would be reaching for a tool the case itself never held.
     """
     report = CleanupReport(resources=created_resources(result))
 
@@ -355,11 +414,33 @@ async def teardown(
                 _undo_args(resource, undo[1]),
                 agent_slug=agent_slug,
                 model=model,
+                tick=tick,
             )
-            refusal = tool_error(outcome)
+            refusal = tool_error(outcome, undo[0])
             if refusal:
                 raise RuntimeError(refusal)
             report.removed.append(resource.as_dict())
+            if resource.tool in _CREATE_BY_CALL:
+                # `keep_position=True` is deliberate — closing a position is a
+                # trade, not a teardown step — but the consequence has to be
+                # *said*. A position executor's exits (stop-loss, take-profit,
+                # time limit) are the executor's, so once it stops the position
+                # is unmanaged, and the pre-flight backstop looks for RUNNING
+                # executors, not held positions: nothing downstream would ever
+                # mention it. An order executor whose entry never filled leaves
+                # nothing behind, and an LP executor always closes on-chain, so
+                # this is stated as "check", not as "there is a position".
+                report.kept_positions.append(
+                    {
+                        **resource.as_dict(),
+                        "note": (
+                            "stopped with keep_position=true — any position it "
+                            "opened is still held and no longer has the "
+                            "executor's stop-loss/take-profit. Check with "
+                            "list_positions_held / list_orphaned_positions."
+                        ),
+                    }
+                )
         except Exception as exc:
             log.warning(
                 "cleanup failed for %s %s (%s): %s",
@@ -383,25 +464,19 @@ def _undo_args(resource: CreatedResource, undo_action: str) -> dict[str, Any]:
                 args[key] = resource.args[key]
         return args
 
-    args: dict[str, Any] = {"action": undo_action}
+    if resource.tool in _CREATE_BY_CALL:
+        # stop_executor has no action; keep_position so cleanup does not close
+        # a live position the create opened.
+        return {"executor_id": resource.identifier, "keep_position": True}
+
+    args: dict[str, Any] = {}
+    if undo_action:
+        args["action"] = undo_action
     by_create = _UNDO_BY_CREATE.get((resource.tool, resource.action))
     if by_create:
         args[by_create[1]] = resource.identifier
         return args
-    if resource.tool == "manage_executors":
-        args["executor_id"] = resource.identifier
-        # Stopping an executor without this flag can close the position, which is
-        # a trade. Keep it: cleanup should remove bookkeeping, not move money.
-        args["keep_position"] = True
-        for key in ("account_name", "connector_name"):
-            if resource.args.get(key):
-                args[key] = resource.args[key]
-    elif resource.tool == "manage_trading_agent":
-        args["strategy_id"] = resource.identifier
-    elif resource.tool == "manage_notes":
-        args["key"] = resource.identifier
-    else:
-        args["name"] = resource.identifier
+    args["name"] = resource.identifier
     return args
 
 
@@ -411,6 +486,7 @@ async def _call_tool(
     *,
     agent_slug: str | None,
     model: str,
+    tick: bool = False,
 ) -> Any:
     """Invoke one MCP tool directly, bypassing the model.
 
@@ -422,7 +498,7 @@ async def _call_tool(
 
     from bench.mcp_provider import build_mcp_configs
 
-    configs = build_mcp_configs(agent_slug=agent_slug)
+    configs = build_mcp_configs(agent_slug=agent_slug, tick=tick)
     target = _server_for_tool(tool)
     config = next((c for c in configs if c.get("name") == target), None)
     if config is None:
@@ -448,10 +524,17 @@ async def _call_tool(
 
 
 _HUMMINGBOT_TOOLS = {
-    "manage_executors",
+    "create_position_executor",
+    "create_grid_executor",
+    "create_dca_executor",
+    "create_order_executor",
+    "create_lp_executor",
+    "list_executors",
+    "get_executor",
+    "stop_executor",
     "manage_bots",
     "manage_controllers",
-    "get_market_data",
+    "get_prices",
     "get_portfolio_overview",
     "search_history",
 }

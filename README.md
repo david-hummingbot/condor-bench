@@ -356,11 +356,20 @@ Never hand-edit `datasets/tool_surface.json`.
 `condor_compat/` vendors condor's agent stack. Two files carry **deliberate**
 bench-specific edits and cannot be re-vendored by copying:
 
-- `acp/pydantic_ai_client.py` — bench-only `_TOOL_LIMITS` cap, `OPENAI_BASE_URL`
-  provider detection, no-tools fallback, and per-server `cwd` (bench launches
-  condor's servers with `uv run`, which only resolves inside the condor project —
-  condor doesn't need this because its own process is already there)
-- `agents/prompts.py` — condor model imports replaced with `Any`
+- `acp/pydantic_ai_client.py` — bench-only `_TOOL_LIMITS` cap (with the priority
+  pass that keeps an unavoidable cut off the tools a case is scored on),
+  `OPENAI_BASE_URL` provider detection, no-tools fallback, and per-server `cwd`
+  (bench launches condor's servers with `uv run`, which only resolves inside the
+  condor project — condor doesn't need this because its own process is already
+  there)
+- `agents/prompts.py` — condor model imports replaced with `Any`, and only the
+  executor surface (upstream also builds a controller-mode variant of the live
+  prompt; no tick case is controller-shaped, and a test keeps it that way)
+
+Note which way `config["agent_key"]` flows: `build_tick_prompt` reads it to choose
+the prompt's TOOLS section, so `bench/client.build_tick_prompt_for_case` overrides
+it with the model under test. The dataset's pin is a production-shaped fixture and
+must not decide which client's prompt a run reads.
 
 `acp/client.py` carries the usage types re-vendored from production
 (`UsageEvent`, `fold_usage_event`, the ACP usage parsers), and
@@ -368,6 +377,14 @@ bench-specific edits and cannot be re-vendored by copying:
 Re-syncing those is a manual diff-and-review against condor, keeping the local
 edits. `agents/condor/AGENT.md` is a plain body copy (YAML frontmatter stripped)
 and is the one vendored file the drift test can check automatically.
+
+**When you re-vendor after a condor tool rename, `agents/prompts.py` is the file
+that gets missed.** It is not byte-compared and it is not scored, so a stale tool
+name in it fails nothing — it just sends every tick case at a tool condor no
+longer mounts, and makes the ToolSearch preload line resolve to nothing. What can
+be checked is checked: `tests/test_vendored_drift.py` asserts every tool the tick
+prompt names exists in `datasets/tool_surface.json`, and that the preload offers
+every tool the tick cases are scored on.
 
 ---
 

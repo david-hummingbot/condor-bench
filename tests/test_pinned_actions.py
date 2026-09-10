@@ -32,9 +32,9 @@ def _action_vocabulary() -> dict[str, set[str]]:
 
     Two declaration styles, and both have to be read or the check has blind spots.
     Most tools constrain ``action`` with ``Literal[...]``, which FastMCP validates
-    against. ``manage_trading_agent`` types it as a bare ``str`` and enumerates the
-    actions in its docstring instead — which is exactly where the ``"list"`` pin
-    hid, since a Literal-only reader has nothing to compare against for that tool.
+    against. ``manage_agents`` types it as a bare ``str`` and enumerates the
+    actions in its docstring instead — which is exactly where a bad pin hid on
+    the old mega-tool, since a Literal-only reader has nothing to compare.
     """
     repo = condor_path()
     if repo is None:
@@ -281,4 +281,4 @@ def test_the_vocabulary_reader_finds_real_tools():
         "'list' belongs to manage_controllers — if it appears here the parser is "
         "merging tools and the check above is worthless"
     )
-    assert "list_agent_definitions" in vocab.get("manage_trading_agent", set())
+    assert "list" in vocab.get("manage_agents", set())

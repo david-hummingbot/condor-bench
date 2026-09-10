@@ -399,8 +399,13 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                                     result,
                                     norm_key,
                                     agent_slug=getattr(case, "agent_slug", None),
+                                    tick=getattr(case, "type", "") == "tick",
                                 )
-                                if not report.clean:
+                                # kept_positions leaves `clean` true on purpose —
+                                # teardown did what it was asked — but a position
+                                # still held on staging is exactly what somebody
+                                # watching this run needs to see.
+                                if not report.clean or report.kept_positions:
                                     await _emit(run_id, {
                                         "type": "cleanup",
                                         "case_id": case.id,

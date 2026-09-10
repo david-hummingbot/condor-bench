@@ -55,7 +55,8 @@ VERDICT_ORDER = (UNRUNNABLE, REBINDABLE, UNKNOWN, OK, NO_DEPENDENCY)
 _FALLBACK_ACCOUNT_ACTING = frozenset(
     {
         "set_account_position_mode_and_leverage",
-        "manage_executors",
+        "create_position_executor",
+        "create_grid_executor",
         "manage_bots",
     }
 )
@@ -99,7 +100,7 @@ def connector_required_tools() -> frozenset[str]:
         for tool, meta in specs.items()
         if "connector_name" in (meta.get("required") or [])
     }
-    return frozenset(found or {"set_account_position_mode_and_leverage", "get_market_data"})
+    return frozenset(found or {"set_account_position_mode_and_leverage", "get_prices"})
 
 
 # Words that mark a question as being about perpetuals even when no venue is

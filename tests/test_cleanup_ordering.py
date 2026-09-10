@@ -51,10 +51,10 @@ class _Result:
 def _builder_002_trace():
     calls = [
         {
-            "tool": "mcp__condor__manage_trading_agent",
+            "tool": "mcp__condor__manage_agents",
             "tool_call_id": "call_agent",
             "args": {
-                "action": "create_agent",
+                "action": "create",
                 # Display name only — the slug is assigned server-side.
                 "name": "Bench DCA Agent",
                 "description": "Systematic DCA accumulation agent",
@@ -63,10 +63,10 @@ def _builder_002_trace():
             },
         },
         {
-            "tool": "mcp__condor__manage_trading_agent",
+            "tool": "mcp__condor__manage_strategies",
             "tool_call_id": "call_strategy",
             "args": {
-                "action": "create_strategy",
+                "action": "create",
                 "agent_slug": "bench_dca_agent",
                 "name": "bench_dca_sol",
                 "description": "DCA accumulation for SOL-USDT on Binance",
@@ -75,7 +75,7 @@ def _builder_002_trace():
     ]
     responses = [
         {
-            "tool": "mcp__condor__manage_trading_agent",
+            "tool": "mcp__condor__manage_agents",
             "tool_call_id": "call_agent",
             "output": json.dumps(
                 {
@@ -86,12 +86,12 @@ def _builder_002_trace():
             ),
         },
         {
-            "tool": "mcp__condor__manage_trading_agent",
+            "tool": "mcp__condor__manage_strategies",
             "tool_call_id": "call_strategy",
             "output": json.dumps(
                 {
                     "created": True,
-                    # Namespaced under the agent, which is what delete_strategy wants.
+                    # Namespaced under the agent, which is what delete wants.
                     "strategy_id": "bench_dca_agent.bench_dca_sol",
                     "name": "bench_dca_sol",
                 }
@@ -106,16 +106,17 @@ def _condor_stub():
     state = {"strategies": {"bench_dca_agent.bench_dca_sol"}, "agents": {"bench_dca_agent"}}
     order: list[tuple[str, str]] = []
 
-    async def call_tool(tool, args, *, agent_slug=None, model=""):
+    async def call_tool(tool, args, *, agent_slug=None, model="", tick=False):
         action = args.get("action")
         order.append((action, args.get("agent_slug") or args.get("strategy_id") or ""))
-        if action == "delete_strategy":
-            sid = args.get("strategy_id")
-            if sid not in state["strategies"]:
-                return _Outcome({"deleted": False})
-            state["strategies"].discard(sid)
-            return _Outcome({"deleted": True})
-        if action == "delete_agent":
+        if action == "delete":
+            # manage_strategies delete vs manage_agents delete — told apart by args.
+            if args.get("strategy_id"):
+                sid = args.get("strategy_id")
+                if sid not in state["strategies"]:
+                    return _Outcome({"deleted": False})
+                state["strategies"].discard(sid)
+                return _Outcome({"deleted": True})
             slug = args.get("agent_slug")
             if slug not in state["agents"]:
                 # The bug this also guards: a wrong identifier is not an error, just
@@ -139,11 +140,12 @@ def _condor_stub():
 def test_identifiers_come_from_the_response_not_the_display_name():
     """The slug is server-assigned; `name` is a human label that deletes nothing."""
     found = created_resources(_builder_002_trace())
-    by_action = {r.action: r for r in found}
-    assert by_action["create_agent"].identifier == "bench_dca_agent", (
-        "picked the display name — delete_agent would have matched no agent"
+    # Two creates share the action name now; tell them apart by tool.
+    by_tool = {r.tool: r for r in found}
+    assert by_tool["manage_agents"].identifier == "bench_dca_agent", (
+        "picked the display name — delete would have matched no agent"
     )
-    assert by_action["create_strategy"].identifier == "bench_dca_agent.bench_dca_sol"
+    assert by_tool["manage_strategies"].identifier == "bench_dca_agent.bench_dca_sol"
 
 
 def test_undo_runs_child_before_parent(monkeypatch: pytest.MonkeyPatch):
@@ -154,8 +156,11 @@ def test_undo_runs_child_before_parent(monkeypatch: pytest.MonkeyPatch):
 
     report = asyncio.run(teardown(_builder_002_trace(), "test-model"))
 
-    assert [a for a, _ in order] == ["delete_strategy", "delete_agent"], (
-        f"undo ran in creation order ({order}) — delete_agent is refused while the "
+    assert [ident for _, ident in order] == [
+        "bench_dca_agent.bench_dca_sol",
+        "bench_dca_agent",
+    ], (
+        f"undo ran in creation order ({order}) — delete agent is refused while the "
         "agent still owns a strategy"
     )
     assert state["agents"] == set(), "the agent survived teardown"

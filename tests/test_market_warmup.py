@@ -59,11 +59,11 @@ def test_markets_from_expected_tool_params():
 def test_markets_from_trading_pairs_list_and_dedupe():
     case = SimpleNamespace(
         expected_tool_params={
-            "get_market_data": {
+            "get_prices": {
                 "connector_name": "binance",
                 "trading_pairs": ["BTC-USDT", "ETH-USDT"],
             },
-            "manage_executors": {
+            "create_grid_executor": {
                 "connector_name": "binance",
                 "trading_pair": "BTC-USDT",
             },

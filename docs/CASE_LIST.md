@@ -1,6 +1,6 @@
 # Condor-bench case library
 
-The published library is **80 live MCP cases**: 12 consult, 8 tick, 38 tool, 22
+The published library is **87 live MCP cases**: 12 consult, 10 tick, 43 tool, 22
 agent. That is the smallest set that still satisfies the routing floors in
 [`tests/test_dataset_floors.py`](../tests/test_dataset_floors.py).
 
@@ -33,9 +33,22 @@ a benchmark means executing generated code against the staging box on every run.
 `make tool-surface` will keep reporting it in the snapshot; the absence here is a
 decision, not a gap.
 
+`fundamental_analyst` is classified as an expert in
+[`datasets/agent_roles.json`](../datasets/agent_roles.json) so drift checks pass,
+but it has no cases yet. Router will have no evidence for that domain until
+someone authors them.
+
+Production names this library scores against (condor `d5eab53e`): `get_prices`
+not `get_market_data`; typed `create_*_executor` / `list_executors` /
+`stop_executor` not `manage_executors`; `manage_agents` / `manage_strategies`
+not `manage_trading_agent`; role and active server from `manage_servers` list,
+not `get_user_context`. `consult` was folded into `delegate`. Case IDs that
+still say `get_market_data` or `manage_executors` are historical labels; the
+pinned tools inside those rows are the current names.
+
 ## Core sweep
 
-Cases tagged `core` (65) still meet both floors. Use them for harness/prompt
+Cases tagged `core` (79) still meet both floors. Use them for harness/prompt
 iteration:
 
 ```bash
@@ -43,7 +56,7 @@ uv run python runner.py test ollama:qwen2.5:14b --tags core
 uv run python runner.py sweep --tags core
 ```
 
-Publish routing from the **full** 80. A core run that silently dropped below
+Publish routing from the **full** 87. A core run that silently dropped below
 `MIN_TOOL_CASES` would reprint `thin` as if the tool were never benchmarked;
 [`test_core_subset_clears_the_same_floors`](../tests/test_dataset_floors.py)
 guards that.
@@ -106,6 +119,6 @@ Unbound requirements refuse the run (`bench/market_resolver.py`), and
 
 - Layer A second samples for tools already at three hits
 - Extra “read skill X and summarise” jobs on a specialist already at the domain floor
-- Routing domains for strategy agents (`delta_neutral_funding_agent`,
-  `xrpl_market_maker`, `smart_money_flow`, `adaptive_grid_trader`) — they inherit
-  their base’s model assignment ([`datasets/agent_roles.json`](../datasets/agent_roles.json))
+- Routing domains for strategy agents (`xrpl_market_maker`, `smart_money_flow`,
+  `adaptive_grid_trader`) — they inherit their base’s model assignment
+  ([`datasets/agent_roles.json`](../datasets/agent_roles.json))
