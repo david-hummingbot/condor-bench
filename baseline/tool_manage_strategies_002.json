@@ -1,6 +1,7 @@
 {
   "case_id": "tool_manage_strategies_002",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 14.647,
-  "timestamp": "2026-08-12T13:32:35.382038+00:00"
+  "latency_s": 6.355,
+  "timestamp": "2026-09-15T21:10:23.146757+00:00",
+  "fingerprint": "d05e5c612c94"
 }

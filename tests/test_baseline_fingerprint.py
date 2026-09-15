@@ -167,3 +167,85 @@ def test_every_real_case_fingerprints_without_raising():
         "two cases fingerprint identically — the payload is missing something that "
         f"distinguishes them: {prints}"
     )
+
+
+# ── The baseline has to run the case a scored run would run ───────────────────
+def test_the_fingerprint_ignores_which_venue_a_case_bound_to():
+    """Binding is per-box, so a digest over the bound copy is useless.
+
+    `generate_baselines` runs the *bound* case and fingerprints the *dataset* one
+    for this reason: the same case takes binance on one machine and hyperliquid on
+    another, and a fingerprint over the substituted text would report every
+    baseline as stale on the next box.
+    """
+    template = _case(question="Open a position on `{venue.connector}` for {venue.pair}.")
+    here = _case(question="Open a position on `binance` for ETH-USDT.")
+    there = _case(question="Open a position on `hyperliquid_perpetual` for ETH-USD.")
+    assert case_fingerprint(here) != case_fingerprint(template)
+    assert case_fingerprint(here) != case_fingerprint(there)
+
+
+def test_the_baseline_path_binds_markets_before_measuring():
+    """The bug this guards: 17 cases were measured against literal placeholders.
+
+    `generate_baselines` called `run_case` on the raw dataset case, so
+    `tool_create_position_executor_002` asked the reference model to open a
+    position "on connector `{venue.connector}` for {venue.pair}". It declined, and
+    4-6s of a model reading an unanswerable question became the reference for a
+    case that opens a real position — the rewarding direction, since latency is
+    min(1, baseline / test).
+    """
+    import asyncio
+    import inspect
+
+    import bench.baseline as baseline_mod
+
+    source = inspect.getsource(baseline_mod.generate_baselines)
+    assert "resolve_cases" in source, (
+        "generate_baselines no longer resolves declared markets — templated cases "
+        "would again be measured against literal {venue.connector} placeholders"
+    )
+
+    seen: dict[str, str] = {}
+
+    async def _fake_run_case(case, model):
+        seen[case.id] = case.question
+        return SimpleNamespace(case_id=case.id, latency_s=1.0, tool_calls=[], tool_responses=[])
+
+    async def _fake_resolve(cases):
+        bound = [
+            SimpleNamespace(**{**c.__dict__, "question": c.question.replace(
+                "{venue.connector}", "binance").replace("{venue.pair}", "ETH-USDT")})
+            for c in cases
+        ]
+        return bound, {c.id: SimpleNamespace(ok=True, reason=lambda: "") for c in cases}
+
+    class _Store:
+        def __init__(self):
+            self.saved = []
+
+        def exists(self, case_id):
+            return False
+
+        def load(self, case_id):
+            return None
+
+        def save(self, record):
+            self.saved.append(record)
+
+    case = _case(question="Open a position on `{venue.connector}` for {venue.pair}.")
+    store = _Store()
+    original_run, original_resolve = baseline_mod.run_case, baseline_mod.resolve_cases
+    baseline_mod.run_case, baseline_mod.resolve_cases = _fake_run_case, _fake_resolve
+    try:
+        asyncio.run(baseline_mod.generate_baselines([case], store, model="m"))
+    finally:
+        baseline_mod.run_case, baseline_mod.resolve_cases = original_run, original_resolve
+
+    assert "{venue" not in seen[case.id], (
+        f"the model was handed an unresolved placeholder: {seen[case.id]!r}"
+    )
+    assert seen[case.id] == "Open a position on `binance` for ETH-USDT."
+    # …but the record fingerprints the dataset case, not what it bound to.
+    (record,) = store.saved
+    assert record.fingerprint == case_fingerprint(case)

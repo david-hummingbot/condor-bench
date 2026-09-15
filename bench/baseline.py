@@ -28,6 +28,7 @@ from config import BASELINE_DIR, BASELINE_MODEL, CASE_TIMEOUT_S
 from bench.cleanup import teardown
 from bench.client import run_case
 from bench.dataset import is_mutating
+from bench.market_resolver import resolve_cases
 
 
 # What the fingerprint covers, and why.
@@ -210,7 +211,45 @@ async def generate_baselines(
         return
 
     console.print(f"Generating baselines for {len(to_run)} cases with [bold]{model}[/bold]")
+
+    # Bind declared markets first, exactly as a scored run does. Seventeen cases
+    # carry `{venue.connector}` / `{perp.pair}` placeholders, and this path used to
+    # hand them to the model verbatim: `tool_create_position_executor_002` was asked
+    # to open a position "on connector `{venue.connector}` for {venue.pair}", which
+    # the reference model quite correctly declined to do. The recorded latency was
+    # then 5.8s of a model reading an unanswerable question, standing in as the
+    # reference for a case that opens a real position — the *rewarding* direction,
+    # since latency scores min(1, baseline / test).
+    #
+    # This is the same rule the comment below states about the timeout, applied to
+    # the other half of the wiring: a reference measured against a different prompt
+    # than the runs it scores is not a reference.
+    bound_by_id = {c.id: c for c in to_run}
+    try:
+        bound, resolutions = await resolve_cases(to_run)
+        bound_by_id = {c.id: c for c in bound}
+    except Exception as exc:  # network probe failed — say so, do not measure blind
+        console.print(
+            f"[red]Could not resolve declared markets ({exc}). Baselines for "
+            "templated cases would be measured against literal placeholders, so "
+            "nothing was recorded.[/red]"
+        )
+        return
+    unbound = [cid for cid, r in resolutions.items() if not r.ok]
+    if unbound:
+        console.print(
+            f"[yellow]{len(unbound)} case(s) could not bind their declared markets "
+            f"and are skipped rather than measured against a placeholder: "
+            f"{', '.join(sorted(unbound))}[/yellow]"
+        )
+        to_run = [c for c in to_run if c.id not in set(unbound)]
+
     for case in track(to_run, description="Baseline"):
+        # The bound copy is what runs; the dataset case is what gets fingerprinted.
+        # Binding is per-box — the same case takes binance here and hyperliquid
+        # elsewhere — so a digest over the bound copy would call every baseline
+        # stale on the next machine.
+        runnable = bound_by_id.get(case.id, case)
         try:
             # Baselines are latency references, so they must be produced by the
             # same code path a test run uses — otherwise the reference is measured
@@ -221,7 +260,7 @@ async def generate_baselines(
             # every model a free 1.0 on that case forever. Better to record no
             # baseline than a runaway one.
             result = await asyncio.wait_for(
-                run_case(case, model), timeout=CASE_TIMEOUT_S
+                run_case(runnable, model), timeout=CASE_TIMEOUT_S
             )
         except asyncio.TimeoutError:
             console.print(
@@ -242,7 +281,7 @@ async def generate_baselines(
             report = await teardown(
                 result,
                 model,
-                agent_slug=getattr(case, "agent_slug", None),
+                agent_slug=getattr(runnable, "agent_slug", None),
                 tick=getattr(case, "type", "") == "tick",
             )
             for row in report.kept_positions:
