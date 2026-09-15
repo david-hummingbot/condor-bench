@@ -524,6 +524,13 @@ async def _call_tool(
 
 
 _HUMMINGBOT_TOOLS = {
+    # The leverage reset. Its absence here is why teardown answered "Unknown tool:
+    # set_account_position_mode_and_leverage" on every leverage case: the undo was
+    # routed to the condor server, which does not mount it. _STATE_SETTERS exists
+    # precisely because leverage is account state with no delete, so a reset that
+    # never lands is the ratchet that comment describes, still turning — it had
+    # simply moved from a rejected argument to a misaddressed call.
+    "set_account_position_mode_and_leverage",
     "create_position_executor",
     "create_grid_executor",
     "create_dca_executor",

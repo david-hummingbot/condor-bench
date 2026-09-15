@@ -29,6 +29,7 @@ from bench.cleanup import teardown
 from bench.client import run_case
 from bench.dataset import is_mutating
 from bench.market_resolver import resolve_cases
+from metrics.answer_quality import is_infra_failure
 
 
 # What the fingerprint covers, and why.
@@ -270,6 +271,28 @@ async def generate_baselines(
             continue
         except Exception as exc:
             console.print(f"[red]Error on {case.id}: {exc}[/red]")
+            continue
+
+        # A run that failed measured the failure, not the job. `explore_dex_pools`
+        # answering 404 because the gateway has no CLMM route, or `manage_amm`
+        # refusing because the Solana wallet is still the literal string
+        # `<solana-wallet-address>`, produces a tidy 4.9s that would then stand as
+        # the reference for a case about reading pools. Same rule as the timeout
+        # above: better to record no baseline than a wrong one.
+        #
+        # Checked the way the scorer checks it, and for the same reason it has to
+        # be checked that way: `result.error` is None here. The client catches the
+        # tool failure and yields it as *response text* — the run "succeeded" and
+        # answered "(error: Tool 'explore_dex_pools' exceeded max retries count of
+        # 1)". A guard on `.error` alone reads that as a clean 4.9s reference,
+        # which is how five DEX baselines were recorded against a broken gateway.
+        infra_blob = getattr(result, "response", "") or (getattr(result, "error", None) or "")
+        if is_infra_failure(infra_blob):
+            console.print(
+                f"[yellow]{case.id}: {str(infra_blob).strip()[:100]} — no baseline "
+                "recorded; a reference measured against a broken dependency is "
+                "worse than none[/yellow]"
+            )
             continue
 
         # Same teardown a scored run does. Baselining the whole dataset executes

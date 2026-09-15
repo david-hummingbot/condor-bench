@@ -210,7 +210,10 @@ def test_the_baseline_path_binds_markets_before_measuring():
 
     async def _fake_run_case(case, model):
         seen[case.id] = case.question
-        return SimpleNamespace(case_id=case.id, latency_s=1.0, tool_calls=[], tool_responses=[])
+        return SimpleNamespace(
+            case_id=case.id, latency_s=1.0, tool_calls=[], tool_responses=[],
+            response="Opened the position.", error=None,
+        )
 
     async def _fake_resolve(cases):
         bound = [
@@ -249,3 +252,57 @@ def test_the_baseline_path_binds_markets_before_measuring():
     # …but the record fingerprints the dataset case, not what it bound to.
     (record,) = store.saved
     assert record.fingerprint == case_fingerprint(case)
+
+
+def test_a_run_that_only_failed_is_not_recorded_as_a_reference():
+    """Five DEX baselines were recorded against a gateway returning 404.
+
+    The catch: `result.error` is None for these. The client catches the tool
+    failure and yields it as *response text* — the run "succeeded" and answered
+    "(error: Tool 'explore_dex_pools' exceeded max retries count of 1)" in 4.9s. A
+    guard on `.error` alone reads that as a clean reference, so this checks the
+    same way the scorer does, with `is_infra_failure` over the response.
+    """
+    import asyncio
+
+    import bench.baseline as baseline_mod
+
+    async def _failed_run(case, model):
+        return SimpleNamespace(
+            case_id=case.id,
+            latency_s=4.9,
+            tool_calls=[],
+            tool_responses=[],
+            response="(error: Tool 'explore_dex_pools' exceeded max retries count of 1)",
+            error=None,
+        )
+
+    async def _resolve(cases):
+        return list(cases), {c.id: SimpleNamespace(ok=True, reason=lambda: "") for c in cases}
+
+    class _Store:
+        def __init__(self):
+            self.saved = []
+
+        def exists(self, case_id):
+            return False
+
+        def load(self, case_id):
+            return None
+
+        def save(self, record):
+            self.saved.append(record)
+
+    store = _Store()
+    original_run, original_resolve = baseline_mod.run_case, baseline_mod.resolve_cases
+    baseline_mod.run_case, baseline_mod.resolve_cases = _failed_run, _resolve
+    try:
+        asyncio.run(baseline_mod.generate_baselines([_case()], store, model="m"))
+    finally:
+        baseline_mod.run_case, baseline_mod.resolve_cases = original_run, original_resolve
+
+    assert store.saved == [], (
+        "a run whose whole answer was a tool failure became the latency reference "
+        "for that case — 4.9s of a broken gateway, which every later model is then "
+        "measured against"
+    )

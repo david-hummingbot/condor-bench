@@ -574,3 +574,58 @@ def test_a_multi_step_build_is_no_longer_flattened_by_precision():
     build = ["manage_skill", "manage_routines", "manage_routines", "run_code", "manage_routines"]
     assert metric.score(build, ["manage_routines"]) == pytest.approx(0.5)  # was 0.20
     assert metric.score(["manage_skill", "manage_skill"], ["manage_skill"]) == 1.0
+
+
+def test_every_tool_teardown_can_call_is_routed_to_the_server_that_has_it():
+    """The leverage reset was addressed to the wrong MCP server for its whole life.
+
+    `_server_for_tool` sends anything not in `_HUMMINGBOT_TOOLS` to condor, and
+    `set_account_position_mode_and_leverage` was missing from that set — so every
+    leverage undo answered "Unknown tool" and the reset never landed. `_STATE_SETTERS`
+    exists because leverage is account state with no delete, so the ratchet its
+    comment describes was still turning; it had only moved from a rejected argument
+    to a misaddressed call.
+
+    Derived from the recorded surface rather than a second hand-written list, since
+    a hand-written list is what drifted in the first place.
+    """
+    import json
+
+    from bench.cleanup import (
+        _CREATE_BY_CALL,
+        _STATE_SETTERS,
+        _UNDO,
+        _UNDO_BY_CREATE,
+        _server_for_tool,
+    )
+    from config import DATASETS_DIR
+
+    surface = json.loads((DATASETS_DIR / "tool_surface.json").read_text())
+    home = {
+        tool: server
+        for server, spec in surface.get("servers", {}).items()
+        for tool in (spec.get("tools") or {})
+    }
+
+    # Every tool teardown can actually invoke: the undo targets, the state setters
+    # it re-calls, and the stop_executor the typed creates reverse through.
+    callable_tools = {undo[0] for undo in _UNDO.values()}
+    callable_tools |= set(_STATE_SETTERS)
+    callable_tools |= {tool for tool, _ in _UNDO_BY_CREATE}
+    if _CREATE_BY_CALL:
+        callable_tools.add("stop_executor")
+
+    misrouted = {
+        tool: (_server_for_tool(tool), home[tool])
+        for tool in sorted(callable_tools)
+        if tool in home and _server_for_tool(tool) != home[tool]
+    }
+    assert not misrouted, (
+        "teardown would send these undos to a server that does not mount them, and "
+        f"an MCP server answers that with 'Unknown tool', not an exception: {misrouted}"
+    )
+
+    unknown = sorted(t for t in callable_tools if t not in home)
+    assert not unknown, (
+        f"teardown can call tools that are not in the recorded surface: {unknown}"
+    )
