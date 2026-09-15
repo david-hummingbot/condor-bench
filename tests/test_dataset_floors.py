@@ -133,9 +133,10 @@ def test_every_case_has_a_baseline():
     Cheap to break by hand: deleting a dataset case and leaving `baseline/` alone
     is harmless, but *adding* one and forgetting `make baseline` is not.
 
-    Skipped outright on a machine that has never run `make baseline` — the JSONs
-    are not in git (only `baseline/.gitkeep` is), so on a fresh clone this would
-    fail once per case and say nothing about the datasets.
+    Skipped outright when the store is empty — a checkout that has not run
+    `make baseline`, or one whose `baseline/` did not come down with the repo.
+    Otherwise this would fail once per case and say nothing about the datasets.
+    (The JSONs *are* tracked, so teams share one reference; see .gitignore.)
     """
     import pytest
 

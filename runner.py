@@ -68,6 +68,9 @@ def _resolve_tags(tags: Optional[str]) -> Optional[list[str]]:
 @app.command()
 def baseline(
     overwrite: bool = typer.Option(False, help="Regenerate existing baselines"),
+    stale: bool = typer.Option(
+        False, "--stale", help="Also re-measure cases whose fingerprint no longer matches"
+    ),
     model: str = typer.Option(None, help="Override the baseline model"),
 ) -> None:
     """Generate baseline latency records using the benchmark model."""
@@ -80,9 +83,62 @@ def baseline(
     store = BaselineStore()
 
     async def _run():
-        await generate_baselines(cases, store, model=m, overwrite=overwrite)
+        await generate_baselines(cases, store, model=m, overwrite=overwrite, stale=stale)
 
     asyncio.run(_run())
+
+
+@app.command("baseline-check")
+def baseline_check(
+    strict: bool = typer.Option(
+        False, "--strict", help="Exit non-zero when any baseline is stale or missing"
+    ),
+) -> None:
+    """Report which baselines still describe the case they measured.
+
+    A latency reference never refuses a run — a stale one distorts 10% of a
+    composite, it does not invalidate the answer — so this is a report by default
+    and a gate only when asked.
+    """
+    from bench.baseline import (
+        BASELINE_MISSING,
+        BASELINE_OK,
+        BASELINE_STALE,
+        BASELINE_UNVERIFIED,
+        BaselineStore,
+        classify_baselines,
+    )
+    from bench.dataset import load_all_cases
+
+    cases = load_all_cases()
+    found = classify_baselines(cases, BaselineStore())
+
+    labels = {
+        BASELINE_OK: ("green", "measured against this case as it stands"),
+        BASELINE_STALE: ("red", "the case changed since it was measured — re-run"),
+        BASELINE_MISSING: ("yellow", "never measured"),
+        BASELINE_UNVERIFIED: (
+            "dim",
+            "recorded before fingerprints; no evidence either way",
+        ),
+    }
+    console.print(f"Baselines for {len(cases)} cases")
+    console.print()
+    for status in (BASELINE_OK, BASELINE_STALE, BASELINE_MISSING, BASELINE_UNVERIFIED):
+        ids = found[status]
+        colour, note = labels[status]
+        console.print(f"[{colour}]{status:<11} {len(ids):>3}[/{colour}]  {note}")
+        if ids and status in (BASELINE_STALE, BASELINE_MISSING):
+            for case_id in ids:
+                console.print(f"    [dim]{case_id}[/dim]")
+
+    if found[BASELINE_STALE]:
+        console.print()
+        console.print("  Re-measure them with: [bold]condor-bench baseline --stale[/bold]")
+    if found[BASELINE_MISSING]:
+        console.print("  Measure the missing ones with: [bold]condor-bench baseline[/bold]")
+    if strict and (found[BASELINE_STALE] or found[BASELINE_MISSING]):
+        raise typer.Exit(1)
 
 
 @app.command("staging-check")

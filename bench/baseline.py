@@ -3,10 +3,21 @@
 The baseline is now used exclusively for latency normalisation. Quality scoring
 is reference-free (judge evaluates each response on its own merits). Tool
 accuracy is scored against dataset expected_tools ground truth.
+
+Each record carries a fingerprint of the case it measured. Without one a record
+is just a number with a case id on it, and an edited case keeps that number
+silently: `tool_consult_001` went from a blocking `consult` to
+`delegate(action="start")`, which returns the moment the task is handed off, and
+kept a reference measured against the blocking call — and since latency scores
+`min(1, baseline / test)`, every model since has collected a free 1.0 there.
+`t002` went from one `manage_executors` call to three without a character of its
+question changing. Neither showed up anywhere; both had to be found by diffing
+the dataset against the commit the baselines predate.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -19,12 +30,104 @@ from bench.client import run_case
 from bench.dataset import is_mutating
 
 
+# What the fingerprint covers, and why.
+#
+# In: what decides how much work the case is — the text the model is handed, the
+# turns it is handed, and the trajectory it is expected to walk. The trajectory
+# is in here because `t002` changed from one `manage_executors` call to
+# `list_executors` → `stop_executor` → journal without its question changing at
+# all: `expected_tools` was the only place that showed.
+#
+# Out, deliberately:
+#   * `expected_tool_params` / `expected_no_calls` — ground truth for scoring,
+#     not input. Pinning `amount` does not make the model work harder, and a
+#     fingerprint that fires on every scoring tweak is one people learn to ignore.
+#   * the `markets` block and whatever it binds to — the same dataset binds to
+#     different connectors on different boxes, so a latency reference can never
+#     promise a venue and should not pretend to notice one changing.
+#   * `config["agent_key"]` — a production-shaped fixture that bench overrides
+#     with the model under test (see bench.client.build_tick_prompt_for_case).
+_FINGERPRINT_FIELDS = (
+    "question",
+    "turns",
+    "agent_slug",
+    # A tick's prompt is assembled from these, so each one is part of its input.
+    "scenario_name",
+    "agent_instructions",
+    "strategy_instructions",
+    "core_data",
+    "risk_state",
+    "learnings",
+    "summary",
+    "recent_decisions",
+    "tick_number",
+)
+
+
+def case_fingerprint(case: Any) -> str:
+    """A short digest of the case as the baseline measured it.
+
+    Short because it is read by humans in a report, not compared for security;
+    twelve hex characters over this payload is far past any collision that would
+    matter for 87 cases.
+    """
+    payload: dict[str, Any] = {"type": getattr(case, "type", "")}
+    for name in _FINGERPRINT_FIELDS:
+        value = getattr(case, name, None)
+        if value is None or value == "" or value == [] or value == {}:
+            continue
+        payload[name] = value
+    config = dict(getattr(case, "config", None) or {})
+    config.pop("agent_key", None)
+    if config:
+        payload["config"] = config
+    # `expected_tools` is a property on tick cases, returning expected_tool_calls.
+    payload["expected_tools"] = sorted(getattr(case, "expected_tools", None) or [])
+    blob = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+# A baseline is one of four things, and the difference decides what to do about it.
+BASELINE_OK = "ok"
+BASELINE_MISSING = "missing"
+# Recorded before fingerprints existed. Not the same as stale: it may well still
+# be accurate, there is simply no evidence either way — and inventing the
+# evidence by stamping today's fingerprint onto a record measured months ago is
+# exactly the provenance fiction this field exists to prevent.
+BASELINE_UNVERIFIED = "unverified"
+BASELINE_STALE = "stale"
+
+
+def baseline_status(case: Any, record: "BaselineRecord | None") -> str:
+    if record is None:
+        return BASELINE_MISSING
+    if not record.fingerprint:
+        return BASELINE_UNVERIFIED
+    return BASELINE_OK if record.fingerprint == case_fingerprint(case) else BASELINE_STALE
+
+
+def classify_baselines(cases: list[Any], store: "BaselineStore") -> dict[str, list[str]]:
+    """``{status: [case_id, …]}`` for every case given, statuses always present."""
+    out: dict[str, list[str]] = {
+        BASELINE_OK: [],
+        BASELINE_STALE: [],
+        BASELINE_UNVERIFIED: [],
+        BASELINE_MISSING: [],
+    }
+    for case in cases:
+        out[baseline_status(case, store.load(case.id))].append(case.id)
+    return out
+
+
 @dataclass
 class BaselineRecord:
     case_id: str
     model: str
     latency_s: float
     timestamp: str = ""
+    # Digest of the case this latency was measured against. Empty on records
+    # written before fingerprints existed.
+    fingerprint: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -32,6 +135,7 @@ class BaselineRecord:
             "model": self.model,
             "latency_s": round(self.latency_s, 3),
             "timestamp": self.timestamp,
+            "fingerprint": self.fingerprint,
         }
 
 
@@ -56,6 +160,7 @@ class BaselineStore:
             model=data["model"],
             latency_s=float(data.get("latency_s", 30.0)),
             timestamp=data.get("timestamp", ""),
+            fingerprint=str(data.get("fingerprint", "")),
         )
 
     def exists(self, case_id: str) -> bool:
@@ -73,15 +178,35 @@ async def generate_baselines(
     store: BaselineStore,
     model: str = BASELINE_MODEL,
     overwrite: bool = False,
+    stale: bool = False,
 ) -> None:
-    """Run all cases with the baseline model and store latency records."""
+    """Run all cases with the baseline model and store latency records.
+
+    ``stale`` adds the cases whose fingerprint no longer matches the record. It is
+    opt-in rather than automatic because re-measuring is not free: a baseline run
+    goes through the same path a scored run does, so it executes the mutating and
+    destructive cases for real. Nobody should discover that by typing the command
+    that used to be a no-op.
+    """
     from rich.console import Console
     from rich.progress import track
     console = Console()
 
-    to_run = [c for c in cases if overwrite or not store.exists(c.id)]
+    def _wanted(case: Any) -> bool:
+        if overwrite or not store.exists(case.id):
+            return True
+        return stale and baseline_status(case, store.load(case.id)) == BASELINE_STALE
+
+    to_run = [c for c in cases if _wanted(c)]
     if not to_run:
+        unverified = classify_baselines(cases, store)[BASELINE_UNVERIFIED]
         console.print("[green]All baselines already exist.[/green]")
+        if unverified:
+            console.print(
+                f"[dim]{len(unverified)} of them predate fingerprints, so whether "
+                "they still describe their case is unknown — `baseline-check` "
+                "lists them.[/dim]"
+            )
         return
 
     console.print(f"Generating baselines for {len(to_run)} cases with [bold]{model}[/bold]")
@@ -138,6 +263,7 @@ async def generate_baselines(
             model=model,
             latency_s=result.latency_s,
             timestamp=ts,
+            fingerprint=case_fingerprint(case),
         )
         store.save(record)
         console.print(f"  [dim]{case.id}[/dim] → {result.latency_s:.1f}s")
