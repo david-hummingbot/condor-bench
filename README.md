@@ -353,30 +353,58 @@ Never hand-edit `datasets/tool_surface.json`.
 
 ### Keeping condor_compat in sync
 
-`condor_compat/` vendors condor's agent stack. Two files carry **deliberate**
-bench-specific edits and cannot be re-vendored by copying:
+`condor_compat/` vendors condor's agent stack. Most of it is now **generated** —
+re-vendoring is a command, not a review:
+
+```bash
+make revendor                              # uses ../condor
+CONDOR_PATH=/path/to/condor make revendor
+make revendor-check                        # diff only; non-zero if stale
+```
+
+`scripts/revendor.py` regenerates, straight from a condor checkout:
+
+| Generated | From |
+|---|---|
+| `condor_compat/agents/prompts.py` | `condor/agents/prompts.py` |
+| `condor_compat/runtime/context.py` | the chat preload in `condor/runtime/context.py` |
+| `condor_compat/agents/condor/AGENT.md` | `agents/condor/AGENT.md`, frontmatter stripped |
+| `condor_compat/mcp_servers/*_profiles.py` | `mcp_servers/*/profiles.py` |
+
+Imports are rewritten to `condor_compat/upstream_shims.py`, which has to supply
+every `condor.*` name those files import. A **new** upstream import is not in the
+rewrite table, so it keeps its `condor.` path and the re-vendor fails at the
+import check with the name in the message — loudly, which is the point.
+
+**Bench-specific changes go in `condor_compat/agents/_bench_prompts.py`.** Its body
+is appended below a marker at the end of the generated `prompts.py`. Never edit
+the generated file: re-vendoring regenerates everything above the marker and
+re-appends everything below it untouched, so pulling condor is never a merge.
+
+`tests/test_vendored_drift.py` byte-compares the generated output against the
+checkout, so "condor moved" and "someone edited the generated copy" are the same
+failure. Run `make tool-surface` after re-vendoring too — the surface snapshot is a
+separate artifact and goes stale on its own.
+
+Still hand-vendored, with deliberate bench edits, and **not** covered by the
+script:
 
 - `acp/pydantic_ai_client.py` — bench-only `_TOOL_LIMITS` cap (with the priority
   pass that keeps an unavoidable cut off the tools a case is scored on),
-  `OPENAI_BASE_URL` provider detection, no-tools fallback, and per-server `cwd`
+  `OPENAI_BASE_URL` provider detection, no-tools fallback, per-server `cwd`
   (bench launches condor's servers with `uv run`, which only resolves inside the
-  condor project — condor doesn't need this because its own process is already
-  there)
-- `agents/prompts.py` — condor model imports replaced with `Any`, and only the
-  executor surface (upstream also builds a controller-mode variant of the live
-  prompt; no tick case is controller-shaped, and a test keeps it that way)
+  condor project), and `estimate_cost_usd()` / `_fold_run_usage()`
+- `acp/client.py` — the usage types (`UsageEvent`, `fold_usage_event`, the ACP
+  usage parsers). These have **known divergences** from condor's `TokenUsage`:
+  condor sums a `session/prompt` response's usage as per-turn where bench takes
+  last-wins as cumulative, and bench's stream breaks on `PromptDone` so a late
+  `usage_update` is dropped. Totals are comparable; per-field breakdowns are not.
+- the spawn-arg pins in `tests/test_mcp_wiring_drift.py`
 
 Note which way `config["agent_key"]` flows: `build_tick_prompt` reads it to choose
 the prompt's TOOLS section, so `bench/client.build_tick_prompt_for_case` overrides
 it with the model under test. The dataset's pin is a production-shaped fixture and
 must not decide which client's prompt a run reads.
-
-`acp/client.py` carries the usage types re-vendored from production
-(`UsageEvent`, `fold_usage_event`, the ACP usage parsers), and
-`pydantic_ai_client.py` carries `estimate_cost_usd()` / `_fold_run_usage()`.
-Re-syncing those is a manual diff-and-review against condor, keeping the local
-edits. `agents/condor/AGENT.md` is a plain body copy (YAML frontmatter stripped)
-and is the one vendored file the drift test can check automatically.
 
 **When you re-vendor after a condor tool rename, `agents/prompts.py` is the file
 that gets missed.** It is not byte-compared and it is not scored, so a stale tool
