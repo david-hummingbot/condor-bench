@@ -1,6 +1,7 @@
 {
   "case_id": "tool_manage_servers_001",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 8.975,
-  "timestamp": "2026-08-12T13:32:46.598788+00:00"
+  "latency_s": 3.996,
+  "timestamp": "2026-09-16T20:25:20.849268+00:00",
+  "fingerprint": "6d9614ca4c9a"
 }
