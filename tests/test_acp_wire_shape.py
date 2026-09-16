@@ -21,6 +21,7 @@ from condor_compat.acp.acp_client import (
     acp_tool_input,
     acp_tool_name,
     acp_tool_output,
+    parse_session_models,
 )
 
 # ── Verbatim frames ───────────────────────────────────────────────────────────
@@ -614,3 +615,157 @@ def test_the_first_fragment_alone_would_have_failed():
         "get_market_data": {"connector_name": "binance", "trading_pairs": ["BTC-USDT"]}
     }
     assert ToolParamMetric().score(truncated, expected) < 1.0
+
+
+# ── session/new model list ─────────────────────────────────────────────────────
+# Verbatim from claude-agent-acp 0.66.0. The bridge moved its model list out of a
+# top-level `models` object into the generic `configOptions` mechanism and renamed
+# every field bench reads. Nothing errored: `result.get("models")` returned None,
+# the list came back empty, and the dashboard silently offered no models — so a
+# run used whatever the CLI happened to be configured with.
+SESSION_NEW_066 = {
+    "sessionId": "e0e4b1c2-0000-4000-8000-000000000000",
+    "modes": {"currentModeId": "default", "availableModes": []},
+    "configOptions": [
+        {
+            "id": "mode",
+            "name": "Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": "default",
+            "options": [{"value": "auto", "name": "Auto", "description": "…"}],
+        },
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "default",
+            "options": [
+                {"value": "default", "name": "Default (recommended)",
+                 "description": "Sonnet 5 · Efficient for routine tasks"},
+                {"value": "sonnet", "name": "Sonnet",
+                 "description": "Sonnet 5 · Efficient for routine tasks"},
+                {"value": "opus[1m]", "name": "Opus (1M context)",
+                 "description": "Opus 5 with 1M context · Best for everyday, complex tasks"},
+                {"value": "haiku", "name": "Haiku",
+                 "description": "Haiku 4.5 · Fastest for quick answers"},
+            ],
+        },
+    ],
+}
+
+SESSION_NEW_028 = {
+    "sessionId": "old",
+    "models": {
+        "availableModels": [
+            {"modelId": "claude-sonnet-4-5", "name": "Sonnet", "description": "…"}
+        ],
+        "currentModelId": "claude-sonnet-4-5",
+    },
+}
+
+
+def test_the_066_config_options_shape_is_read():
+    models = parse_session_models(SESSION_NEW_066)
+    assert [m["modelId"] for m in models["availableModels"]] == [
+        "default", "sonnet", "opus[1m]", "haiku",
+    ]
+    assert models["currentModelId"] == "default"
+
+
+def test_the_066_shape_keeps_names_and_descriptions():
+    rows = parse_session_models(SESSION_NEW_066)["availableModels"]
+    haiku = next(r for r in rows if r["modelId"] == "haiku")
+    assert haiku["name"] == "Haiku"
+    assert "Haiku 4.5" in haiku["description"]
+
+
+def test_the_028_shape_still_wins_when_present():
+    """Other bridges may still send it, so the new parse must not displace it."""
+    assert parse_session_models(SESSION_NEW_028) == SESSION_NEW_028["models"]
+
+
+def test_the_mode_option_is_not_mistaken_for_the_model_list():
+    rows = parse_session_models(SESSION_NEW_066)["availableModels"]
+    assert "auto" not in [r["modelId"] for r in rows]
+
+
+def test_a_bridge_that_advertises_nothing_yields_empty():
+    assert parse_session_models({"sessionId": "x"}) == {}
+
+
+def test_malformed_options_are_skipped_not_raised():
+    reply = {
+        "configOptions": [
+            None,
+            {"id": "model", "currentValue": None,
+             "options": [{"name": "no value"}, "junk", {"value": "sonnet"}]},
+        ]
+    }
+    rows = parse_session_models(reply)["availableModels"]
+    assert [r["modelId"] for r in rows] == ["sonnet"]
+    # Name falls back to the id rather than coming back None.
+    assert rows[0]["name"] == "sonnet"
+
+
+def test_the_default_selector_is_not_forwarded_as_a_model_id():
+    """`default` is the bridge's "don't override" sentinel, not a model.
+
+    It appears in the advertised model list, so a picker offers it like any other
+    id. Forwarding it as ANTHROPIC_MODEL makes the CLI answer "There's an issue
+    with the selected model" to every prompt — and leaves no error on the turn, so
+    the run scores that sentence as the model's answer.
+    """
+    from condor_compat.acp.acp_client import resolve_acp
+
+    assert resolve_acp("claude-code:default") == resolve_acp("claude-code")
+    assert resolve_acp("claude-acp:default")[1] == {}
+
+
+def test_a_real_model_id_is_still_forwarded():
+    from condor_compat.acp.acp_client import resolve_acp
+
+    assert resolve_acp("claude-code:haiku")[1] == {"ANTHROPIC_MODEL": "haiku"}
+
+
+def test_a_provider_error_does_not_arrive_as_the_models_answer():
+    """The pydantic-ai path used to yield its error text as a TextChunk.
+
+    `_prompt_failure` treats any text as "the turn produced something" and returns
+    no error, so a provider 400 — an invalid model id in the dashboard's default
+    list was the live case — came back as a successful turn whose response *was*
+    the error string. The judge then graded the 400 as the model's answer, and the
+    row counted against the model instead of showing as an infra failure.
+    """
+    import asyncio
+
+    from bench.client import _stream_turn
+    from condor_compat.acp.client import PromptDone
+
+    client = _client()
+    detail = "(error: status_code: 400, body: {'message': 'x is not a valid model ID'})"
+
+    async def fake_stream(_prompt):
+        # What PydanticAIClient.prompt_stream emits on an unhandled provider error.
+        yield PromptDone(stop_reason="error", error=detail)
+
+    client.prompt_stream = fake_stream
+    turn = asyncio.run(_stream_turn(client, "q", {}))
+
+    assert turn.response == "", "an error must never be scored as the answer"
+    assert turn.error and "not a valid model ID" in turn.error
+
+
+def test_the_pydantic_client_reports_errors_on_prompt_done_not_as_text():
+    """Guards the seam directly: the fix is only in the client's error branch."""
+    import inspect
+
+    from condor_compat.acp import pydantic_ai_client
+
+    src = inspect.getsource(pydantic_ai_client.PydanticAIClient.prompt_stream)
+    assert "TextChunk(text=self._format_error(e))" not in src, (
+        "a failed prompt is reporting through the transcript again — put the "
+        "message on PromptDone(error=...) so _prompt_failure can see the failure"
+    )
+    assert "PromptDone(stop_reason=\"error\", error=self._format_error(e))" in src

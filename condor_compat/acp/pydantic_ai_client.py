@@ -21,6 +21,10 @@ Bench-specific additions (not in condor):
      servers with `uv run python -m mcp_servers.…`, which only resolves inside the
      condor project — and bench's own cwd is a different project. condor doesn't
      need this because its process is already there.
+  6. A failed prompt reports on `PromptDone(error=...)` rather than yielding the
+     message as a TextChunk. condor renders that text to a user who can see the
+     chat failed; bench scores the turn, so an error in the transcript is read as
+     the model's answer. Matches what ACPClient already does.
 """
 
 from __future__ import annotations
@@ -150,6 +154,10 @@ DEFAULT_BASE_URLS: dict[str, str] = {
 # inference server (e.g. LM Studio) share one slot, regardless of which
 # session (user chat, trading tick, etc.) holds it.
 _SERVER_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
+
+# How often the MCP lifecycle task checks its stdio transports for a dead server
+# between shutdown checks (CORR-332, ported from condor 39cb7d50).
+MCP_TRANSPORT_POLL_SECONDS = 2.0
 
 
 def _get_server_semaphore(base_url: str) -> asyncio.Semaphore:
@@ -355,6 +363,23 @@ def _tool_args_to_dict(args: Any) -> dict | None:
     return None
 
 
+def _dead_transport(servers: list[Any]) -> str | None:
+    """Label of the first MCP server whose session streams are closed, if any.
+
+    When an MCP subprocess dies, the stdio reader hits EOF and the MCP session's
+    receive loop closes both of its streams. Nothing raises until the next request
+    (``anyio.ClosedResourceError``), so a closed stream is the only signal there is
+    (CORR-332). ``_closed`` is anyio's memory-stream flag; a server that has not
+    opened its streams reads as healthy.
+    """
+    for server in servers:
+        for attr in ("_read_stream", "_write_stream"):
+            stream = getattr(server, attr, None)
+            if stream is not None and getattr(stream, "_closed", False):
+                return getattr(server, "command", None) or repr(server)
+    return None
+
+
 class PydanticAIClient:
     """Manages a pydantic-ai agent with MCP tool servers.
 
@@ -428,6 +453,11 @@ class PydanticAIClient:
         self._ready_event: asyncio.Event | None = None
         self._shutdown_event: asyncio.Event | None = None
         self._startup_error: BaseException | None = None
+        # A failure *after* start() returned. bench used to swallow these
+        # entirely: the lifecycle task's handler only recorded startup errors, so
+        # a server that died mid-case left `alive` True and every later tool call
+        # failed on the same client.
+        self._lifecycle_error: BaseException | None = None
         # Accumulated turn history — grows with each prompt_stream() call so
         # the model sees prior turns. A fresh client is created per session/tick,
         # so history is reset by recreating the client rather than in-place.
@@ -641,6 +671,14 @@ class PydanticAIClient:
                 env=env,
                 cwd=cwd,
                 timeout=30,
+                # pydantic-ai drops a server's own `instructions` by default. The
+                # ACP host forwards them, so without this the two backends are not
+                # measuring the same task: condor's MCP server ships the live
+                # skills/agents indexes and the seat's identity framing there
+                # (FEAT-025), an ACP model receives them, and a pydantic-ai model
+                # was scored on the same case having never been told any of it.
+                # condor fixed the same gap in ffe9e5af.
+                include_instructions=True,
             )
 
             toolsets.append(mcp_server)
@@ -779,15 +817,70 @@ class PydanticAIClient:
         return tool_defs
 
     async def _run_mcp_lifecycle(self) -> None:
-        """Background task that holds the MCP server context open."""
+        """Background task that holds the MCP server context open.
+
+        Polls the stdio transports rather than parking on the shutdown event: a
+        SIGKILLed MCP subprocess never raises out of ``run_mcp_servers()``, it only
+        closes the session's streams, so waiting for an exception waits forever
+        (CORR-332).
+        """
+        servers = list(self._mcp_servers)
         try:
             async with self._agent.run_mcp_servers():
                 self._ready_event.set()
-                await self._shutdown_event.wait()
+                while not self._shutdown_event.is_set():
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(
+                            self._shutdown_event.wait(),
+                            timeout=MCP_TRANSPORT_POLL_SECONDS,
+                        )
+                    dead = _dead_transport(servers)
+                    if dead is not None and not self._shutdown_event.is_set():
+                        raise ConnectionError(f"MCP server transport closed: {dead}")
+        except asyncio.CancelledError as exc:
+            # Unblock start() if we were cancelled before ready, then stay visibly
+            # cancelled rather than completing "successfully".
+            if not self._ready_event.is_set():
+                self._startup_error = exc
+                self._ready_event.set()
+            raise
         except BaseException as exc:
             if not self._ready_event.is_set():
                 self._startup_error = exc
                 self._ready_event.set()
+                return
+            if self._lifecycle_error is None:
+                # Not already reported by a prompt that hit the dead transport.
+                log.exception(
+                    "MCP server lifecycle failed after startup (model=%s); "
+                    "marking client dead so a new one is built",
+                    self.model_name,
+                )
+                self._lifecycle_error = exc
+            self._teardown_after_lifecycle_failure()
+
+    def _mark_dead_if_transport_closed(self, exc: BaseException) -> None:
+        """A turn failed: if an MCP transport is gone, the client is dead.
+
+        The prompt usually meets a killed subprocess before the lifecycle task's
+        next poll does, so don't leave ``alive`` True in between.
+        """
+        dead = _dead_transport(self._mcp_servers)
+        if dead is None or self._lifecycle_error is not None:
+            return
+        log.error(
+            "MCP server transport closed mid-session (model=%s, server=%s); "
+            "marking client dead so a new one is built",
+            self.model_name,
+            dead,
+        )
+        self._lifecycle_error = exc
+        self._teardown_after_lifecycle_failure()
+
+    def _teardown_after_lifecycle_failure(self) -> None:
+        """Drop the agent so ``alive`` cannot report a toolless client healthy."""
+        self._agent = None
+        self._mcp_servers.clear()
 
     async def stop(self) -> None:
         """Signal the MCP lifecycle task to shut down and wait for it."""
@@ -984,8 +1077,15 @@ class PydanticAIClient:
                             fallback_e,
                         )
                 log.exception("PydanticAI prompt error: %s", e)
-                yield TextChunk(text=self._format_error(e))
-                yield PromptDone(stop_reason="error")
+                self._mark_dead_if_transport_closed(e)
+                # The message goes on PromptDone, not into the transcript. condor
+                # renders this text to a user who can see their chat went wrong;
+                # bench *scores* it, and as a TextChunk it becomes the model's
+                # answer — `_prompt_failure` reads any text as "the turn produced
+                # something", so the run came back error-free and the judge graded
+                # a 400 from the provider as the model's response. An invalid model
+                # id scored as a bad answer instead of an infra failure.
+                yield PromptDone(stop_reason="error", error=self._format_error(e))
 
     def _fold_run_usage(self, run: Any) -> UsageEvent | None:
         """Add this run's token usage to the session total and return an event.

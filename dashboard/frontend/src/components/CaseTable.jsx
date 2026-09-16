@@ -232,7 +232,7 @@ export default function CaseTable({ cases }) {
   )
 }
 
-function TokenChips({ usage, judge }) {
+export function TokenChips({ usage, judge }) {
   const hasUsage = usage && Object.keys(usage).length > 0
   const hasJudge = judge && Object.keys(judge).length > 0
   if (!hasUsage && !hasJudge) return null

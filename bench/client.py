@@ -81,12 +81,41 @@ _JUDGE_TOOL_LOG_BUDGET = 19000
 _MIN_DIGEST_CHARS = 220
 
 
-def _build_consult_prompt(question: str, instructions: str | None = None) -> str:
-    """Mirror production build_agent_context(): instructions + [CONSULT REQUEST]."""
+def _build_consult_prompt(
+    question: str,
+    instructions: str | None = None,
+    *,
+    agent_key: str | None = None,
+    agent_slug: str | None = None,
+) -> str:
+    """Mirror production build_agent_context(): instructions + preload + request.
+
+    The preload is the part this used to be missing, and it is not cosmetic. A
+    consult is chat-shaped, and condor's chat seat opens one by naming all 42
+    mounted tools in a single ToolSearch line (``chat_tool_preload``). Without it
+    an ACP model starts cold and has to keyword-discover its way to a tool it
+    needs — the portfolio case spent two ToolSearch calls finding
+    ``get_portfolio_overview``, which condor's preload names up front.
+
+    That is not a wash across models either: it measures cold-start tool
+    discovery, which production removes from the model's job, and it penalises
+    exactly the models that are weakest at it.
+
+    Pydantic-ai seats auto-discover their toolset and must never receive the line;
+    ``chat_tool_preload`` returns "" for them, so the ordering below is safe for
+    both backends. ``agent_key`` of None keeps the old behaviour for callers that
+    have no model in hand.
+    """
     parts = []
     prompt_body = instructions if instructions is not None else _AGENT_INSTRUCTIONS
     if prompt_body:
         parts.append(prompt_body)
+    if agent_key:
+        from condor_compat.runtime.context import build_consult_preload
+
+        preload = build_consult_preload(agent_slug, agent_key)
+        if preload:
+            parts.append(preload)
     parts.append(f"[CONSULT REQUEST]\n{question}")
     return "\n\n".join(parts)
 
@@ -452,7 +481,13 @@ def _prompt_failure(event: PromptDone, text_chunks: list[str]) -> str | None:
 
     Returns None for a normal completion, and for a failure that still produced
     text — a bridge that dies after answering has given us something to score, and
-    calling that an infra error would throw away a usable row.
+    calling that an infra error would throw away a usable row. That "still produced
+    text" rule is why a client must report a failure on ``PromptDone.error`` and
+    never as a TextChunk: an error in the transcript reads here as a real answer.
+
+    Both transports reach this, not just ACP. The ``ACP prompt failed`` prefix is
+    kept anyway — ``metrics/answer_quality.py`` matches on it to tell an infra
+    failure from a bad answer, so it is a sentinel, not a description.
     """
     if event.stop_reason not in _FAILED_STOP_REASONS:
         return None
@@ -674,6 +709,91 @@ async def acp_available_models(model_key: str = "claude-code") -> dict[str, Any]
         await client.stop()
 
 
+# ACP agent keys name a CLI, not a vendor ("claude-code:claude-sonnet-5"), and the
+# price dataset has never heard of the CLI. Map the bases whose billing vendor is
+# unambiguous; anything else falls back to the key as configured.
+_ACP_PRICE_PREFIX = {"claude-code": "anthropic", "claude-acp": "anthropic"}
+
+# What Claude Code calls a model is not what it bills as. Its bridge advertises
+# selector aliases — `sonnet`, `opus[1m]`, `default` — while the price dataset
+# keys on API ids, so every ACP row priced as None until these are resolved.
+#
+# Hand-maintained on purpose: the alternative is parsing the real name out of the
+# option's `description` ("Sonnet 5 · Efficient for routine tasks"), which is
+# display text and free to be reworded. That makes this table a thing to revisit
+# when Anthropic ships a model — a missing entry costs a price, never a wrong one,
+# because an unresolved alias simply misses the dataset and stays unpriced.
+_TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens")
+
+_ACP_MODEL_ALIASES = {
+    # `default` is whatever the CLI recommends, which its own description names as
+    # Sonnet 5. It moves between releases: check it when the bridge is upgraded.
+    "default": "claude-sonnet-5",
+    "sonnet": "claude-sonnet-5",
+    "opus": "claude-opus-5",
+    "haiku": "claude-haiku-4-5",
+    "fable": "claude-fable-5",
+}
+
+
+def _resolve_acp_alias(model: str) -> str:
+    """Turn a Claude Code model selector into an id the price dataset knows.
+
+    Strips the ``[1m]`` long-context marker: the dataset carries no separate 1M
+    entry and prices the base id at a flat rate, so the suffix would only turn a
+    known model into an unknown one. Anthropic does charge a premium above 200k
+    context, so a 1M run's estimate can read low.
+    """
+    base = model.split("[", 1)[0]
+    return _ACP_MODEL_ALIASES.get(base, base)
+
+
+def _fill_estimated_cost(usage: dict[str, Any], model: str) -> None:
+    """Price a run whose backend reported tokens but no cost, in place.
+
+    The pydantic-ai client prices its own runs, and claude-agent-acp sends a real
+    billed cost of its own. This is the fallback for the backends that report
+    neither — an ACP bridge that sends tokens without a price (the Gemini CLI
+    reports usage through ``_meta.quota`` and no cost at all), or any agent key
+    whose cost the wire simply omits. Without it those rows carried tokens with an
+    empty price, and the matrix averaged cost over the priced rows only.
+
+    A bridge-reported cost is billed money and always wins over this estimate —
+    except a zero with no tokens behind it, which is a turn that never ran.
+    ``cost_usd`` is left absent — never 0.0 — when the dataset cannot price the
+    model, so an unpriced local backend stays distinguishable from a free one.
+    """
+    if not usage:
+        return
+    if not any(usage.get(f) for f in _TOKEN_FIELDS):
+        # No tokens: nothing was billed and there is nothing to price from. A zero
+        # here is claude-agent-acp reporting a turn it never ran (a rejected model
+        # id, a refused session), not a free one — drop it rather than let a $0.00
+        # row average in as though the model cost nothing.
+        if usage.get("cost_usd") == 0:
+            usage.pop("cost_usd", None)
+        return
+    # A bridge that priced a real turn wins: that is billed money, not an estimate.
+    if usage.get("cost_usd") is not None:
+        return
+    from condor_compat.acp.pydantic_ai_client import estimate_cost_usd
+
+    base, _, suffix = model.partition(":")
+    # UsageEvent.model is the id the agent resolved for itself (the Gemini CLI
+    # reports one); it beats the configured key, which may be a bare CLI alias
+    # whose model is whatever that CLI happens to be pointed at.
+    candidate = usage.get("model")
+    if not candidate:
+        candidate = (
+            f"{_ACP_PRICE_PREFIX[base]}:{_resolve_acp_alias(suffix)}"
+            if suffix and base in _ACP_PRICE_PREFIX
+            else model
+        )
+    cost = estimate_cost_usd(candidate, usage)
+    if cost is not None:
+        usage["cost_usd"] = cost
+
+
 async def run_consult(
     case_id: str,
     question: str,
@@ -714,7 +834,9 @@ async def run_consult(
 
         await client.start()
         try:
-            first_prompt = _build_consult_prompt(question, instructions)
+            first_prompt = _build_consult_prompt(
+                question, instructions, agent_key=model, agent_slug=agent_slug
+            )
             turn = await _stream_turn(client, first_prompt, usage_acc)
             all_turns.append(turn)
             if turn.error:
@@ -742,6 +864,8 @@ async def run_consult(
         outer_error = str(exc)
         if not all_turns:
             all_turns.append(TurnResult(response="", tool_calls=[], latency_s=0.0, error=str(exc)))
+
+    _fill_estimated_cost(usage_acc, model)
 
     return BenchmarkResult(
         case_id=case_id,
@@ -808,6 +932,8 @@ async def run_tick(
     except Exception as exc:
         outer_error = str(exc)
         all_turns.append(TurnResult(response="", tool_calls=[], latency_s=0.0, error=str(exc)))
+
+    _fill_estimated_cost(usage_acc, model)
 
     return BenchmarkResult(
         case_id=case_id,

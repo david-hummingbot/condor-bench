@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
-import { getProviders, getProviderModels, createCustomPrompt, streamCustomPromptUrl } from '../api.js'
+import { getProviders, getProviderModels, getAcpModels, createCustomPrompt, streamCustomPromptUrl } from '../api.js'
 import PageHeader from './PageHeader.jsx'
 import ModelPicker from './ModelPicker.jsx'
+import { TokenChips } from './CaseTable.jsx'
 
 const SCORE_COLOR = (v) => v >= 0.8 ? 'var(--green)' : v >= 0.5 ? 'var(--yellow)' : 'var(--red)'
 
@@ -97,6 +98,8 @@ function ModelResult({ model, result }) {
             </div>
           )}
 
+          <TokenChips usage={sc.usage} judge={sc.judge_usage} />
+
           {sc.answer_reason && (
             <div style={{ marginTop: 10 }}>
               <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
@@ -170,7 +173,10 @@ export default function CustomPrompt() {
   useEffect(() => {
     getProviders()
       .then(d => {
-        const ps = (d.providers || []).filter(p => !p.bare_key)
+        // ACP agents (claude-code, gemini) were filtered out here, so the only
+        // Sonnet on this page was the `anthropic:` one — a different client, a
+        // different tool surface, and not what a Runs-page claude-code row measures.
+        const ps = d.providers || []
         setProviders(ps)
         const init = {}
         for (const p of ps) {
@@ -180,6 +186,8 @@ export default function CustomPrompt() {
             baseUrl: p.default_url || '',
             selectedModel: p.models?.[0] || '',
             loadedModels: [],
+            acpModels: [],
+            acpCurrent: '',
             loading: false,
             loadError: '',
           }
@@ -202,7 +210,33 @@ export default function CustomPrompt() {
   const update = (id, patch) =>
     setCfg(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }))
 
-  const toggle = (id) => update(id, { enabled: !cfg[id]?.enabled })
+  const toggle = (p) => {
+    const id = typeof p === 'string' ? p : p.id
+    const enabling = !cfg[id]?.enabled
+    update(id, { enabled: enabling })
+    // Fetch on enable rather than on a button press: the default otherwise is the
+    // CLI's own configured model, which can 400 on every prompt.
+    if (enabling && typeof p === 'object' && p.fetch_acp_models && !cfg[id]?.acpModels?.length) {
+      loadAcpModels(p)
+    }
+  }
+
+  /** Ask an ACP bridge which model ids it accepts; doubles as a bridge health check. */
+  const loadAcpModels = async (p) => {
+    update(p.id, { loading: true, loadError: '' })
+    try {
+      const data = await getAcpModels(p.id)
+      const models = data.models || []
+      update(p.id, {
+        acpModels: models,
+        acpCurrent: data.current || '',
+        selectedModel: models.some(m => m.id === 'default') ? 'default' : (models[0]?.id || ''),
+        loading: false,
+      })
+    } catch (e) {
+      update(p.id, { loading: false, loadError: e.message, acpModels: [] })
+    }
+  }
 
   const loadModels = async (p) => {
     const state = cfg[p.id]
@@ -227,7 +261,19 @@ export default function CustomPrompt() {
     const out = []
     for (const p of providers) {
       const state = cfg[p.id]
-      if (!state?.enabled || !state.selectedModel) continue
+      if (!state?.enabled) continue
+      if (p.bare_key) {
+        // An ACP agent runs whatever its CLI is configured with unless the key names
+        // a model, so a bare `claude-code` is a valid key — but an unnamed model is
+        // also unpriceable, since nothing reports which one actually ran.
+        out.push({
+          model_key: state.selectedModel ? `${p.id}:${state.selectedModel}` : p.id,
+          api_key: null,
+          base_url: null,
+        })
+        continue
+      }
+      if (!state.selectedModel) continue
       const key = p.id === 'lmstudio'
         ? `lmstudio:${state.selectedModel}`
         : `${p.id}:${state.selectedModel}`
@@ -275,6 +321,7 @@ export default function CustomPrompt() {
   const canRun = question.trim() && modelCount > 0 && !running
 
   // Group providers for display
+  const agentProviders = providers.filter(p => p.kind === 'agent')
   const cloudProviders = providers.filter(p => p.kind === 'cloud')
   const localProviders = providers.filter(p => p.kind === 'local')
 
@@ -379,7 +426,9 @@ export default function CustomPrompt() {
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-title">Models</div>
 
-        {[{ label: 'Cloud APIs', list: cloudProviders }, { label: 'Local Models', list: localProviders }]
+        {[{ label: 'CLI Agents', list: agentProviders },
+          { label: 'Cloud APIs', list: cloudProviders },
+          { label: 'Local Models', list: localProviders }]
           .filter(g => g.list.length > 0)
           .map(g => (
             <div key={g.label} style={{ marginBottom: 16 }}>
@@ -393,9 +442,9 @@ export default function CustomPrompt() {
                   const allModels = p.models || []  // static models from provider catalog
                   return (
                     <div key={p.id} className={`provider-row ${state.enabled ? 'enabled' : ''}`}>
-                      <div className="provider-header" onClick={() => toggle(p.id)}>
+                      <div className="provider-header" onClick={() => toggle(p)}>
                         <label className="toggle" onClick={e => e.stopPropagation()}>
-                          <input type="checkbox" checked={state.enabled} onChange={() => toggle(p.id)} />
+                          <input type="checkbox" checked={state.enabled} onChange={() => toggle(p)} />
                           <span className="toggle-track" />
                         </label>
                         <span className="provider-label">{p.label}</span>
@@ -404,6 +453,39 @@ export default function CustomPrompt() {
 
                       {state.enabled && (
                         <div className="provider-body">
+                          {p.fetch_acp_models && (
+                            <div className="field">
+                              <label>Model</label>
+                              <div className="inline-row">
+                                {state.acpModels?.length > 0 ? (
+                                  <ModelPicker
+                                    models={state.acpModels.map(m => ({
+                                      id: m.id,
+                                      name: m.id === state.acpCurrent ? `${m.name} — CLI current` : m.name,
+                                      description: m.description,
+                                    }))}
+                                    value={state.selectedModel || ''}
+                                    onChange={v => update(p.id, { selectedModel: v })}
+                                    allowEmpty
+                                    emptyLabel="CLI default (whatever it is configured with)"
+                                  />
+                                ) : (
+                                  <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                                    Not selected — the run will use whatever model this CLI is
+                                    configured with, and no price can be estimated for it.
+                                  </span>
+                                )}
+                                <button
+                                  className="btn sm"
+                                  onClick={() => loadAcpModels(p)}
+                                  disabled={state.loading}
+                                >
+                                  {state.loading ? '…' : state.acpModels?.length ? '↻' : 'Load models'}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
                           {p.needs_api_key && (
                             <div className="field">
                               <label>API Key</label>
@@ -468,7 +550,7 @@ export default function CustomPrompt() {
                               )}
                             </div>
                           )}
-                          {(() => {
+                          {!p.bare_key && (() => {
                             const merged = [...(state.loadedModels.length ? state.loadedModels : allModels)]
                             return (
                               <div className="field">

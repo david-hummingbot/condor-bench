@@ -29,6 +29,7 @@ tool-surface:
 check-drift:
 	uv run python -m pytest tests/test_mcp_wiring_drift.py \
 	              tests/test_vendored_drift.py \
+	              tests/test_acp_upstream_drift.py \
 	              tests/test_matrix_routing.py::test_config_keys_name_agents_condor_actually_ships \
 	              tests/test_matrix_routing.py::test_every_shipped_agent_has_a_routing_domain -q
 
@@ -129,3 +130,11 @@ bench-local:
 clean:
 	rm -rf results/* baseline/*
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# Re-vendor condor's prompt builders into condor_compat/ (see README).
+# Usage: make revendor [CONDOR_PATH=/path/to/condor]
+revendor:
+	uv run python scripts/revendor.py $(if $(CONDOR_PATH),--condor $(CONDOR_PATH),)
+
+revendor-check:
+	uv run python scripts/revendor.py --check $(if $(CONDOR_PATH),--condor $(CONDOR_PATH),)

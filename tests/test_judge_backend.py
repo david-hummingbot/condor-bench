@@ -141,7 +141,11 @@ def test_acp_judge_reuses_one_session_and_records_usage_deltas(monkeypatch):
     assert fake.started and fake.stopped
     assert fake.kwargs["mcp_servers"] == []
     assert Path(fake.kwargs["working_dir"]).name == ".judge-acp"
-    assert fake.kwargs.get("extra_env", {}).get("ANTHROPIC_MODEL") == "default"
+    # "default" is the bridge's "don't override" sentinel, not a model id, so it
+    # must NOT reach ANTHROPIC_MODEL. Forwarding it makes the real CLI answer
+    # "There's an issue with the selected model" to every prompt with no error on
+    # the turn — which, for a judge, scores that sentence as the verdict.
+    assert "ANTHROPIC_MODEL" not in (fake.kwargs.get("extra_env") or {})
     assert len(fake.prompts) == 2
     assert all("JSON object only" in p for p in fake.prompts)
     assert all("Do not call tools" in p for p in fake.prompts)
