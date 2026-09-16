@@ -1,6 +1,7 @@
 {
   "case_id": "c_journal_roundtrip_002",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 17.142,
-  "timestamp": "2026-08-12T13:18:49.770843+00:00"
+  "latency_s": 17.572,
+  "timestamp": "2026-09-16T20:11:01.377380+00:00",
+  "fingerprint": "8cad2fe3cf4a"
 }

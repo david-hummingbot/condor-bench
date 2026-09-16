@@ -1,6 +1,7 @@
 {
   "case_id": "tool_manage_routines_001",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 19.508,
-  "timestamp": "2026-08-12T13:31:26.198853+00:00"
+  "latency_s": 8.494,
+  "timestamp": "2026-09-16T20:23:55.938192+00:00",
+  "fingerprint": "8173539d147e"
 }

@@ -1,6 +1,7 @@
 {
   "case_id": "t008",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 10.574,
-  "timestamp": "2026-08-12T13:25:10.105142+00:00"
+  "latency_s": 13.737,
+  "timestamp": "2026-09-16T20:14:45.524643+00:00",
+  "fingerprint": "9231e706261b"
 }

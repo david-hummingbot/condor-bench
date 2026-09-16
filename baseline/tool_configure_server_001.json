@@ -1,6 +1,7 @@
 {
   "case_id": "tool_configure_server_001",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 8.648,
-  "timestamp": "2026-08-12T13:31:05.947831+00:00"
+  "latency_s": 6.213,
+  "timestamp": "2026-09-16T20:23:44.791584+00:00",
+  "fingerprint": "c7c3b62020a5"
 }
