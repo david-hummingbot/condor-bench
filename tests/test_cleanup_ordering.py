@@ -249,7 +249,13 @@ def test_the_leverage_reset_avoids_condors_broken_enum():
                 },
             }
         ]
-        tool_responses = []
+        # The call has to have returned something. A completed MCP call always
+        # records a tool return on both client paths; a failed one records none,
+        # which is how `created_resources` now tells "nothing was set, so there is
+        # nothing to put back" from a change that really did land.
+        tool_responses = [
+            {"tool_call_id": "c1", "output": "Leverage set to 20x for BTC-USDT"}
+        ]
 
     found = created_resources(_Result())
     assert len(found) == 1

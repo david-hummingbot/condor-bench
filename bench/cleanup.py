@@ -145,6 +145,12 @@ _UNDO_BY_CREATE: dict[tuple[str, str], tuple[str, str, tuple[str, ...]]] = {
 _MANUAL_ONLY = {"manage_bots", "manage_controllers"}
 
 
+# Distinguishes "no response was recorded for this call" from "the response was
+# recorded and was empty". `dict.get` collapses those, and only the first means
+# the call failed.
+_NO_RESPONSE = object()
+
+
 @dataclass
 class CreatedResource:
     tool: str
@@ -207,6 +213,39 @@ def created_resources(result: Any) -> list[CreatedResource]:
         tool = normalize_tool_name(str(call.get("tool", "")))
         if tool in _STATE_SETTERS:
             setter_args = call.get("args") or {}
+            # A setter whose own call failed set nothing, so there is nothing to
+            # put back — and saying "left behind" about it is a false alarm in a
+            # report whose whole value is that it only speaks up when something
+            # really is still there. `tool_set_leverage_003` produces this every
+            # time a model reads "BTC-USDT perpetuals" as the uncredentialed
+            # mainnet connector: the call 500s, and teardown then reported a
+            # leverage change that never happened.
+            #
+            # Failure is read as *no response recorded*, which is what the trace
+            # actually shows — a failed MCP call comes back as a retry prompt, so
+            # no tool return is captured, while every successful call has one. A
+            # response that was captured but is itself a refusal is caught by
+            # `tool_error`, which covers the paths that record error text instead.
+            #
+            # Only when the call carries an id, though. Without one there is
+            # nothing to correlate against, so an empty lookup means "this trace
+            # does not number its calls", not "the call failed" — and reading it
+            # as failure would skip every reset on such a trace. That is the
+            # expensive direction: leverage has no delete, so a missing reset
+            # ratchets across every later run, while a redundant one costs a call.
+            # Unnumbered traces therefore keep the old behaviour and reset.
+            call_id = call.get("tool_call_id")
+            response = responses_by_id.get(call_id, _NO_RESPONSE)
+            never_returned = call_id is not None and response is _NO_RESPONSE
+            if never_returned or (
+                response is not _NO_RESPONSE and tool_error(response, tool)
+            ):
+                log.debug(
+                    "%s(%s) left no successful response — nothing to reset",
+                    tool,
+                    setter_args.get("trading_pair") or setter_args.get("connector_name"),
+                )
+                continue
             if isinstance(setter_args, dict):
                 found.append(
                     CreatedResource(

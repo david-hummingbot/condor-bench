@@ -629,3 +629,82 @@ def test_every_tool_teardown_can_call_is_routed_to_the_server_that_has_it():
     assert not unknown, (
         f"teardown can call tools that are not in the recorded surface: {unknown}"
     )
+
+
+# ── A setter that never set anything has nothing to put back ──────────────────
+def test_a_failed_leverage_call_is_not_reported_as_left_behind():
+    """`tool_set_leverage_003`'s real trace, every time a model picks mainnet.
+
+    The case names no venue on purpose, so a model that reads "BTC-USDT
+    perpetuals" as `binance_perpetual` hits the uncredentialed mainnet connector
+    and gets a 500. Nothing was set. Teardown still queued a reset and, when that
+    failed the same way, reported "left behind:
+    set_account_position_mode_and_leverage BTC-USDT" — a leverage change that
+    never happened, in a report whose only value is that it stays quiet unless
+    something really is still there.
+    """
+    from bench.cleanup import created_resources
+
+    args = {
+        "account_name": "master_account",
+        "connector_name": "binance_perpetual",
+        "trading_pair": "BTC-USDT",
+        "leverage": 2,
+    }
+    # The failed call is in tool_calls; a failed MCP call records no tool return,
+    # so tool_responses carries only the reads that worked.
+    result = _Result(
+        [
+            {"tool": "set_account_position_mode_and_leverage", "tool_call_id": "t1", "args": args},
+            {"tool": "get_portfolio_overview", "tool_call_id": "t2", "args": {}},
+        ],
+        [{"tool": "get_portfolio_overview", "tool_call_id": "t2", "output": "Portfolio Overview…"}],
+    )
+    assert created_resources(result) == [], (
+        "teardown queued a reset for a leverage change that never landed"
+    )
+
+
+def test_a_leverage_call_that_worked_is_still_reset():
+    """The direction that must not break: leverage has no delete.
+
+    `_STATE_SETTERS` exists because a leverage change that is never put back
+    ratchets across every later run, so a missing reset is the expensive mistake
+    and a redundant one costs nothing.
+    """
+    from bench.cleanup import _undo_args, created_resources
+
+    args = {
+        "account_name": "master_account",
+        "connector_name": "binance_perpetual_testnet",
+        "trading_pair": "BTC-USDT",
+        "leverage": 5,
+    }
+    result = _Result(
+        [{"tool": "set_account_position_mode_and_leverage", "tool_call_id": "t1", "args": args}],
+        [{"tool_call_id": "t1", "output": "Leverage set to 5x for BTC-USDT"}],
+    )
+    (resource,) = created_resources(result)
+    assert resource.identifier == "BTC-USDT"
+    # Back to 1x, carrying the scope so it lands on the connector it changed.
+    assert _undo_args(resource, "set") == {
+        "leverage": 1,
+        "account_name": "master_account",
+        "connector_name": "binance_perpetual_testnet",
+        "trading_pair": "BTC-USDT",
+    }
+
+
+def test_a_setter_whose_response_is_a_refusal_is_also_skipped():
+    """The other shape: a path that records the error as content rather than dropping it."""
+    from bench.cleanup import created_resources
+
+    result = _Result(
+        [{
+            "tool": "set_account_position_mode_and_leverage",
+            "tool_call_id": "t1",
+            "args": {"connector_name": "binance_perpetual", "trading_pair": "BTC-USDT"},
+        }],
+        [{"tool_call_id": "t1", "output": '{"error": "Failed to set leverage: 500"}'}],
+    )
+    assert created_resources(result) == []
