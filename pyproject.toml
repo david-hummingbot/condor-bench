@@ -13,6 +13,21 @@ dependencies = [
     # uses MCPServerStdio which was removed in pydantic-ai 2.0.
     "pydantic-ai[mcp]>=1.78,<2.0",
     "openai>=1.0",
+    # Offline price snapshot behind estimate_cost_usd(), and — via
+    # pydantic_ai.usage.RequestUsage.extract — the thing that parses token counts
+    # off an OpenAI-compatible response. A transitive dep of pydantic-ai (which
+    # only asks for >=0.0.62), pinned to a window here because both edges bite:
+    #
+    #   < 0.0.68  no claude-sonnet-5 / claude-opus-5 entry, so every Claude 5 run
+    #             reported tokens with no cost and the dashboard showed "—".
+    #   >= 0.1.0  extraction returns an `output_reasoning_tokens` field that
+    #             pydantic-ai 1.x's RequestUsage will not accept. `extract()`
+    #             catches the TypeError and returns a zeroed usage, so any
+    #             reasoning model on the OpenAI-compatible path (deepseek, o-series,
+    #             qwen-thinking) silently reported *no tokens at all* — and only
+    #             reasoning models, which is what made it look model-specific.
+    #             Revisit when pydantic-ai 1.x accepts that field.
+    "genai-prices>=0.0.73,<0.1.0",
     "httpx>=0.27",
     # Evaluation
     "deepeval>=2.0",

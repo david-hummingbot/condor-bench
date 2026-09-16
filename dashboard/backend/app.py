@@ -75,7 +75,12 @@ PROVIDERS = [
     {"id": "openrouter", "label": "OpenRouter", "kind": "cloud",
      "needs_api_key": True, "supports_url": False, "fetch_models": True,
      "api_base": "https://openrouter.ai/api/v1",
-     "models": ["google/gemini-flash-2.0", "google/gemini-pro-2.5",
+     # Every id here is one OpenRouter answers to — the two Google entries used to
+     # be spelled "gemini-flash-2.0"/"gemini-pro-2.5", which it 400s as invalid
+     # model ids. A wrong default is not inert: the picker offers it, and a run
+     # against it produced an empty scored row rather than a visible failure.
+     # `fetch_models` loads the live catalogue, so this is only the starting set.
+     "models": ["google/gemini-2.5-flash", "google/gemini-2.5-pro",
                 "meta-llama/llama-3.3-70b-instruct", "qwen/qwen-2.5-72b-instruct",
                 "mistralai/mistral-small-3.1-24b-instruct"],
      "key_hint": "sk-or-..."},

@@ -97,6 +97,25 @@ def _seat_profile(agent_slug: str | None, tick: bool = False) -> str:
     return "agent" if agent_slug else "full"
 
 
+# What condor mutes on an agent seat for AGENT_SLUG: every tool the seat's
+# profile ring mounts that this agent's own grant does not name. Pinned as a
+# literal rather than derived, so that a change to either condor's muting rule or
+# to market_making_expert's grant shows up here as a diff instead of both sides
+# recomputing the same wrong answer.
+#
+# The chat seat is not muted at all — the coordinator is granted its whole ring —
+# so this applies only when `agent_slug` is set. Both attended and tick seats mute
+# the identical set; the ring they mute it *from* is what differs.
+MUTED_ON_AGENT_SEAT = (
+    "clear_position_held,configure_server,create_dca_executor,create_grid_executor,"
+    "create_lp_executor,create_order_executor,create_position_executor,execute_swap,"
+    "executor_defaults,explore_dex_pools,explore_geckoterminal,get_swap_status,"
+    "list_orphaned_positions,list_positions_held,manage_amm,manage_clmm,"
+    "manage_gateway_config,manage_servers,quote_swap,resolve_orphaned_position,"
+    "search_swaps,set_account_position_mode_and_leverage,stop_executor"
+)
+
+
 def _expected_hummingbot_args(agent_slug: str | None = None, tick: bool = False) -> list[str]:
     """Pinned mcp-hummingbot spawn args, ``--bot-id`` removed.
 
@@ -107,11 +126,16 @@ def _expected_hummingbot_args(agent_slug: str | None = None, tick: bool = False)
 
     ``--profile`` is the seat ring (FEAT-066): which tools the subprocess mounts.
 
+    ``--mute-tools`` narrows that ring to the agent's own grant. It is the
+    server-side half of the restriction bench also applies client-side through
+    ``load_agent_tools`` — a model on an agent seat must not be *offered* a tool
+    production withholds, or bench scores a call production could never make.
+
     Note what is *not* here: ``--username`` and ``--password``. They used to sit
     on argv and moved into ``env`` under SEC-095. If they reappear in this list,
     the fix regressed.
     """
-    return [
+    args = [
         "run",
         "python",
         "-m",
@@ -123,6 +147,9 @@ def _expected_hummingbot_args(agent_slug: str | None = None, tick: bool = False)
         "--profile",
         _seat_profile(agent_slug, tick),
     ]
+    if agent_slug is not None:
+        args += ["--mute-tools", MUTED_ON_AGENT_SEAT]
+    return args
 
 
 def _expected_condor_args(agent_slug: str | None, tick: bool = False) -> list[str]:
@@ -132,6 +159,10 @@ def _expected_condor_args(agent_slug: str | None, tick: bool = False) -> list[st
     memory/skill tools to ``agents/{slug}/``. Chat-scoped consults omit it, which
     is what production does for a consult session — so its absence there is
     correct, not a gap.
+
+    ``--mute-tools`` carries the same list as the hummingbot seat: condor narrows
+    both subprocesses to the agent's grant, so a muted tool is absent whichever
+    server would have mounted it.
 
     ``--bot-token`` used to be here in clear text; SEC-095 replaced it with the
     non-secret ``--bot-id`` digest and moved the token into ``env``.
@@ -149,6 +180,8 @@ def _expected_condor_args(agent_slug: str | None, tick: bool = False) -> list[st
     if agent_slug:
         args += ["--agent-slug", agent_slug]
     args += ["--server-name", SERVER, "--profile", _seat_profile(agent_slug, tick)]
+    if agent_slug is not None:
+        args += ["--mute-tools", MUTED_ON_AGENT_SEAT]
     return args
 
 
@@ -592,3 +625,23 @@ def test_unregistered_server_fails_closed(wiring, monkeypatch):
         mcp_provider.build_mcp_configs(
             agent_slug=None, server_name="no_such_bench_server"
         )
+
+
+def test_pydantic_ai_seats_receive_the_servers_own_instructions():
+    """Both backends must be told the same thing, or they measure different tasks.
+
+    condor's MCP server ships ~15KB of live skills/agents indexes and the seat's
+    identity framing as server ``instructions`` (FEAT-025). An ACP host forwards
+    them; pydantic-ai drops them unless asked, so a pydantic-ai model was scored
+    on a case having never been told any of it while an ACP model on the same case
+    had it all. condor closed the same gap in ffe9e5af.
+    """
+    import inspect
+
+    from condor_compat.acp.pydantic_ai_client import PydanticAIClient
+
+    src = inspect.getsource(PydanticAIClient.start)
+    assert "include_instructions=True" in src, (
+        "MCPServerStdio is being built without include_instructions again — "
+        "pydantic-ai seats will silently lose the condor server's instructions"
+    )

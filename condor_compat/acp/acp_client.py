@@ -6,6 +6,8 @@ Changes from production:
 - ACP_COMMANDS and resolve_acp() included for model-key routing.
 - Claude Code ACP subprocesses drop inherited ANTHROPIC_API_KEY so they use the
   CLI login instead of the bench's (possibly empty-credit) API key.
+- parse_session_models() reads both the 0.28 and 0.66 shapes of the session/new
+  model list (see its docstring).
 """
 from __future__ import annotations
 
@@ -45,12 +47,19 @@ ACP_COMMANDS: dict[str, str] = {
 }
 _CLAUDE_ACP_BASES = {"claude-code", "claude-acp"}
 
+# The bridge lists this among its selectable models, but it is a sentinel for
+# "whatever I am configured with", not an id. Forwarding it as ANTHROPIC_MODEL
+# makes the CLI answer "There's an issue with the selected model" to every prompt
+# — with no error on the turn, so the run looks successful and the judge scores
+# that sentence as the model's answer.
+_ACP_MODEL_SENTINEL = "default"
+
 
 def resolve_acp(agent_key: str) -> tuple[str, dict[str, str]]:
     base, _, model = agent_key.partition(":")
     command = ACP_COMMANDS.get(base, ACP_COMMANDS["claude-code"])
     env: dict[str, str] = {}
-    if model and base in _CLAUDE_ACP_BASES:
+    if model and model != _ACP_MODEL_SENTINEL and base in _CLAUDE_ACP_BASES:
         env["ANTHROPIC_MODEL"] = model
     return command, env
 
@@ -95,6 +104,52 @@ def _trace_frame(update: dict[str, Any]) -> None:
             fh.write(json.dumps(update, default=str) + "\n")
     except Exception:
         pass  # Diagnostics must never break a run.
+
+
+def parse_session_models(result: dict[str, Any]) -> dict[str, Any]:
+    """The models a bridge advertises in its ``session/new`` reply, canonicalised.
+
+    Two shapes exist in the wild and bench has to read both — an agent that
+    reports neither is indistinguishable from one bench mis-parsed:
+
+    * claude-agent-acp 0.28 (and the shape the rest of bench speaks)::
+
+          {"models": {"availableModels": [{"modelId", "name", "description"}],
+                      "currentModelId": "..."}}
+
+    * claude-agent-acp 0.66, which moved the list into the generic config
+      mechanism and renamed every field bench looks for::
+
+          {"configOptions": [{"id": "model", "currentValue": "default",
+                              "options": [{"value", "name", "description"}]}]}
+
+      There is no top-level ``models`` key at all, so reading only the old shape
+      yielded ``{}`` with no error — the dashboard then offered no models, and a
+      run fell back to whatever the CLI was configured with.
+
+    Returns the 0.28 shape either way, so callers stay on one vocabulary.
+    """
+    models = result.get("models")
+    if isinstance(models, dict):
+        return models
+
+    for option in result.get("configOptions") or []:
+        if not isinstance(option, dict):
+            continue
+        if option.get("id") != "model" and option.get("category") != "model":
+            continue
+        rows = [
+            {
+                "modelId": row.get("value"),
+                "name": row.get("name") or row.get("value"),
+                "description": row.get("description") or "",
+            }
+            for row in option.get("options") or []
+            if isinstance(row, dict) and row.get("value")
+        ]
+        if rows:
+            return {"availableModels": rows, "currentModelId": option.get("currentValue")}
+    return {}
 
 
 def acp_tool_input(payload: dict[str, Any]) -> Any:
@@ -281,8 +336,7 @@ class ACPClient:
         # offer them instead of guessing at ids — an unusable model id is not a
         # cosmetic mistake: claude-agent-acp fails every prompt in the run with a
         # 400 when the configured model rejects the thinking parameter it sends.
-        models = result.get("models")
-        self.session_models = models if isinstance(models, dict) else {}
+        self.session_models = parse_session_models(result)
 
     async def stop(self) -> None:
         self._peer.cancel_all()

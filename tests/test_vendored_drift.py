@@ -9,9 +9,10 @@ This check needs a condor checkout, so it skips when there isn't one (CI without
 the sibling repo, a fresh clone). It is a guard for developers who have both
 repos side by side, not a hard gate.
 
-The other vendored files (acp/, agents/prompts.py) carry deliberate
-bench-specific edits, so they cannot be byte-compared. Re-syncing those is a
-manual review — see README "Keeping condor_compat in sync".
+``agents/prompts.py``, the chat preload and the two profile modules are no longer
+in that category: ``scripts/revendor.py`` generates them, and
+``test_vendored_prompts_are_not_stale`` below byte-compares the generated output.
+Only ``acp/`` still carries hand-made bench edits.
 """
 from __future__ import annotations
 
@@ -278,38 +279,116 @@ def test_every_bench_model_key_shape_is_classified():
         )
 
 
-def test_no_tick_case_asks_for_controller_mode():
-    """`bot_name` in a tick config produces a prompt that contradicts itself.
+def test_a_controller_mode_tick_gets_the_controller_base_prompt():
+    """`bot_name` in a tick config must select condor's controller base prompt.
 
-    condor splits its live base prompt in two for this reason — its own comment
-    says stating "trade ONLY via the create_*_executor tools" to a controller-mode
-    agent contradicts the [CONTROLLER MODE] block later in the same prompt. This
-    copy carries the executor base and the config-driven [CONTROLLER MODE] section,
-    but not the controller base, so a case setting `bot_name` would get both halves
-    of that contradiction and be scored on whichever one the model believed.
+    This test used to assert the opposite — that bench could not handle a
+    controller-shaped tick, because the vendored copy carried the executor base
+    and the config-driven [CONTROLLER MODE] section but not the controller base,
+    so such a case got both halves of a contradiction: "trade ONLY via the
+    create_*_executor tools" up top and "do NOT create standalone executors"
+    further down. Its failure message said to vendor BASE_PROMPT_LIVE_CONTROLLER
+    and pick the base from the surface the way upstream does. scripts/revendor.py
+    now copies the whole file, so that is what happens, and the guard flips into
+    a check that the right base is chosen.
     """
     from bench.client import build_tick_prompt_for_case
-    from bench.dataset import load_all_cases
 
-    offenders = [
-        case.id
-        for case in load_all_cases()
-        if getattr(case, "type", "") == "tick" and (case.config or {}).get("bot_name")
-    ]
-    assert not offenders, (
-        f"tick cases set config.bot_name: {offenders}. Vendor condor's "
-        "BASE_PROMPT_LIVE_CONTROLLER into condor_compat/agents/prompts.py and pick "
-        "the base prompt from the surface, the way upstream does — otherwise the "
-        "prompt tells the model to trade only via create_*_executor and, further "
-        "down, not to create standalone executors at all."
-    )
-
-    # And prove the contradiction is real, so the guard above is not folklore.
     case = _tick_case()
     controller = build_tick_prompt_for_case(
         type("C", (), {**case.__dict__, "config": {**case.config, "bot_name": "x"}})(),
         "anthropic:claude-opus-5",
     )
-    assert "Trade ONLY via the create_*_executor tools" in controller
-    assert "Do NOT create standalone executors" in controller
+    executor = build_tick_prompt_for_case(case, "anthropic:claude-opus-5")
 
+    assert "steering the controllers" in controller, (
+        "a controller-mode tick did not get BASE_PROMPT_LIVE_CONTROLLER"
+    )
+    assert "Trade ONLY via the create_*_executor tools" not in controller, (
+        "the executor base leaked into a controller-mode prompt — the "
+        "contradiction this test was written about"
+    )
+    assert "Trade ONLY via the create_*_executor tools" in executor, (
+        "a normal tick must still get the executor base"
+    )
+
+
+
+# ── The generated vendor must match the checkout ─────────────────────────────
+# The check the old suite could not make. Its two preload tests compare tool
+# *names* against the surface snapshot, so a vendored copy could lose whole
+# paragraphs of prompt text and stay green — which is exactly what happened:
+# BASE_PROMPT_COMMON was missing the [CORE DATA - drift] rules and the
+# routine-authoring rule, and JOURNAL_SECTION_LIVE was missing the entire
+# SESSION CANVAS block (the four sections, the journal_write call shape, the
+# 1200-char cap). Nothing named a tool wrongly, so nothing failed.
+#
+# Now the files are generated, so "did someone edit the generated copy" and "did
+# condor move" are the same question, and it is asked by regenerating.
+
+
+def test_vendored_prompts_are_not_stale():
+    """Regenerate into memory and compare. Skips without a condor checkout."""
+    repo = _condor_repo()
+    if repo is None:
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from revendor import generate
+
+    stale = [
+        path.relative_to(ROOT)
+        for path, text in generate(repo).items()
+        if not path.exists() or path.read_text() != text
+    ]
+    assert not stale, (
+        f"vendored copies are stale or hand-edited: {stale}. "
+        "Re-pull with: uv run python scripts/revendor.py"
+    )
+
+
+def test_the_consult_preload_is_the_chat_seat_not_the_tick_seat():
+    """A consult case must be opened with the 42-tool chat preload.
+
+    The bug this pins: consult cases got no preload at all, and the only one
+    vendored was the tick seat's — which condor says in as many words must not be
+    unified with the chat one ("a tick must not be able to start or stop the loop
+    it is running inside"). The tick ring omits 24 tools the chat seat mounts,
+    `get_portfolio_overview` among them, so "how is my portfolio doing?" cost a
+    second ToolSearch that production never pays.
+    """
+    from condor_compat.agents.prompts import _build_tool_preload
+    from condor_compat.runtime.context import build_consult_preload
+
+    chat = build_consult_preload(None, "claude-code:sonnet")
+    tick = _build_tool_preload(is_dry_run=False, is_experiment=False)
+
+    assert "get_portfolio_overview" in chat, "the chat preload must name it"
+    assert "get_portfolio_overview" not in tick, (
+        "the tick ring gained it — if condor unified the seats, drop this test; "
+        "if not, the extraction is reading the wrong function"
+    )
+    assert _tool_count(chat) > _tool_count(tick), (
+        "the chat seat mounts strictly more than the tick seat; a chat preload no "
+        "larger than the tick one means build_consult_preload resolved the wrong ring"
+    )
+
+
+def test_a_consult_prompt_carries_the_preload_for_an_acp_model():
+    """End to end, through the builder run_consult actually calls."""
+    from bench.client import _build_consult_prompt
+
+    acp = _build_consult_prompt("how is my portfolio doing?", "", agent_key="claude-code:sonnet")
+    assert "ToolSearch" in acp and "get_portfolio_overview" in acp
+
+    # pydantic-ai seats auto-discover and must never be told to preload.
+    pai = _build_consult_prompt("same", "", agent_key="anthropic:claude-sonnet-4-6")
+    assert "ToolSearch" not in pai
+
+
+def _tool_count(preload: str) -> int:
+    import re
+
+    return len(re.findall(r"mcp__[a-z-]+__[a-z_]+", preload))

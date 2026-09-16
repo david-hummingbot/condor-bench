@@ -512,6 +512,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "deepeval" },
     { name = "fastapi" },
+    { name = "genai-prices" },
     { name = "httpx" },
     { name = "openai" },
     { name = "pandas" },
@@ -541,6 +542,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
     { name = "deepeval", specifier = ">=2.0" },
     { name = "fastapi", specifier = ">=0.110" },
+    { name = "genai-prices", specifier = ">=0.0.73,<0.1.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "openai", specifier = ">=1.0" },
     { name = "pandas", specifier = ">=2.0" },
@@ -970,15 +972,15 @@ wheels = [
 
 [[package]]
 name = "genai-prices"
-version = "0.0.67"
+version = "0.0.73"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx2" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/17/9e/f96ad08d62f7bd33a5b24e65d4eb220569714b9a2a8813ada2e1fa47b4dd/genai_prices-0.0.67.tar.gz", hash = "sha256:54e07eb6541fda377187a471c5dba21a81b439c57f8dc44d89db3103c29ca343", size = 80015, upload-time = "2026-06-24T20:16:23.661Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/84/0b/4b430d9c6ff0c76e42b91fc4cedff84dfbefa1a35b885fad45a22d29303f/genai_prices-0.0.73.tar.gz", hash = "sha256:ddad5b23dadd7aac8a58ab5af7506addb062114037e96427324703e50bc35077", size = 88406, upload-time = "2026-07-29T12:48:58.215Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/dc/05/d1ca6b960a3305f86d1c5f4274f2ddf8c94611ec7edc436a01cd38a01742/genai_prices-0.0.67-py3-none-any.whl", hash = "sha256:08977f1e83b4132abcfc60dabf21ff13c2d25958afb9199e59c4407bf5c9ed3f", size = 82495, upload-time = "2026-06-24T20:16:22.4Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/85/527a729ecd58b7169430e47febdab2e3f91193d0e3f5a56d721c04525709/genai_prices-0.0.73-py3-none-any.whl", hash = "sha256:64dfbbf55df91db6b74ff2b24ac752b8154952e0aed4e62868d6cd42710bf742", size = 92507, upload-time = "2026-07-29T12:48:57.194Z" },
 ]
 
 [[package]]
