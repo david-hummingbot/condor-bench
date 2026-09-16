@@ -1,7 +1,7 @@
 {
   "case_id": "tool_set_leverage_003",
   "model": "anthropic:claude-sonnet-5",
-  "latency_s": 10.017,
-  "timestamp": "2026-09-15T22:20:01.524910+00:00",
+  "latency_s": 11.225,
+  "timestamp": "2026-09-16T00:16:03.666835+00:00",
   "fingerprint": "684a37959a23"
 }
