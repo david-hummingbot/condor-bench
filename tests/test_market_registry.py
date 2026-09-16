@@ -303,7 +303,7 @@ def test_account_acting_tools_come_from_the_tool_surface():
     """Singular account_name means "acts on one account"; plural is a read filter."""
     acting = account_acting_tools()
     assert "set_account_position_mode_and_leverage" in acting
-    assert "manage_executors" in acting
+    assert "create_position_executor" in acting or "create_grid_executor" in acting
     assert "get_portfolio_overview" not in acting
     assert "search_history" not in acting
 
@@ -312,7 +312,7 @@ def test_gateway_tools_come_from_the_tool_surface():
     dex = gateway_tools()
     assert "explore_dex_pools" in dex
     assert "manage_amm" in dex
-    assert "get_market_data" not in dex
+    assert "get_prices" not in dex
 
 
 # ── verdicts ───────────────────────────────────────────────────────────────────
@@ -365,7 +365,7 @@ def test_no_alternative_at_all_is_unrunnable():
 
 def test_read_only_case_needs_support_not_credentials():
     """Public market data works on an uncredentialed connector, so this is fine."""
-    case = _case(question="Price of BTC-USDT on Binance?", expected_tools=["get_market_data"])
+    case = _case(question="Price of BTC-USDT on Binance?", expected_tools=["get_prices"])
     reg = _registry()
     assert judge(_needs(case, reg), reg).verdict == OK
 
@@ -375,7 +375,7 @@ def test_unreadable_target_never_blames_the_dataset(stub):
     case = _case(question="Set Binance perpetuals to 3x leverage.")
     # Prose cannot be matched with no connector list, so this leans on a pin.
     needs = needs_for_case(
-        _case(expected_tool_params={"get_market_data": {"connector_name": "binance"}}), []
+        _case(expected_tool_params={"get_prices": {"connector_name": "binance"}}), []
     )
     assert judge(needs, reg).verdict == UNKNOWN
     assert judge(needs_for_case(case, []), reg).verdict == NO_DEPENDENCY
@@ -424,9 +424,9 @@ async def test_check_cases_demotes_rebindable_when_no_pair_fits(stub):
     case = _case(
         id="t001",
         type="tick",
-        expected_tools=["manage_executors"],
+        expected_tools=["create_grid_executor"],
         expected_tool_params={
-            "manage_executors": {"connector_name": "binance", "trading_pair": "BTC-USDT"}
+            "create_grid_executor": {"connector_name": "binance", "trading_pair": "BTC-USDT"}
         },
     )
     report = await check_cases([case], registry=reg)
@@ -447,9 +447,9 @@ async def test_check_cases_reports_the_pair_with_the_suggestion(stub):
     case = _case(
         id="t001",
         type="tick",
-        expected_tools=["manage_executors"],
+        expected_tools=["create_grid_executor"],
         expected_tool_params={
-            "manage_executors": {"connector_name": "binance", "trading_pair": "BTC-USDT"}
+            "create_grid_executor": {"connector_name": "binance", "trading_pair": "BTC-USDT"}
         },
     )
     report = await check_cases([case], registry=reg)
@@ -462,7 +462,7 @@ async def test_report_counts_and_dict_shape(stub):
     stub(lambda request: httpx.Response(200, json={"BTC-USDT": {}}))
     reg = _registry()
     cases = [
-        _case(id="ok1", question="Price of BTC-USDT on Binance?", expected_tools=["get_market_data"]),
+        _case(id="ok1", question="Price of BTC-USDT on Binance?", expected_tools=["get_prices"]),
         _case(id="none1", question="Explain funding rates."),
     ]
     report = await check_cases(cases, registry=reg)

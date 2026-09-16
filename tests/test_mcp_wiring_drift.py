@@ -75,13 +75,37 @@ def _strip_bot_id(args: list[str]) -> list[str]:
     return out
 
 
-def _expected_hummingbot_args() -> list[str]:
+def _seat_profile(agent_slug: str | None, tick: bool = False) -> str:
+    """Pinned ``--profile`` value for this fixture's seat.
+
+    condor mounts ``full`` for the chat coordinator, ``agent`` for an attended
+    specialist, and ``tick`` for the unattended loop (FEAT-066). The probe user
+    owns SERVER, so a ``full`` seat is not downgraded to ``agent`` by the owner
+    check (SEC-252).
+
+    The seat axis is attendance, not identity — the same slug ticking and being
+    chatted with are different rings — so ``tick`` is pinned separately rather
+    than derived from the slug. That is exactly the distinction bench's tick path
+    lost: it built configs from ``agent_slug`` alone, so every tick case mounted
+    the attended ring and was offered ``manage_amm``/``manage_clmm`` and the
+    orchestration family (``manage_agents``/``manage_strategies``/
+    ``control_agent``/``get_available_models``) that production withholds from a
+    loop nobody is watching.
+    """
+    if tick:
+        return "tick"
+    return "agent" if agent_slug else "full"
+
+
+def _expected_hummingbot_args(agent_slug: str | None = None, tick: bool = False) -> list[str]:
     """Pinned mcp-hummingbot spawn args, ``--bot-id`` removed.
 
     ``--server-name`` is the one condor-evals omits. It selects which
     hummingbot-api instance the tools bind to and is what ``start_agent``
     resolves against; without it the server falls back to HUMMINGBOT_API_URL and
     then to localhost:8000.
+
+    ``--profile`` is the seat ring (FEAT-066): which tools the subprocess mounts.
 
     Note what is *not* here: ``--username`` and ``--password``. They used to sit
     on argv and moved into ``env`` under SEC-095. If they reappear in this list,
@@ -96,10 +120,12 @@ def _expected_hummingbot_args() -> list[str]:
         f"http://{HOST}:{PORT}",
         "--server-name",
         SERVER,
+        "--profile",
+        _seat_profile(agent_slug, tick),
     ]
 
 
-def _expected_condor_args(agent_slug: str | None) -> list[str]:
+def _expected_condor_args(agent_slug: str | None, tick: bool = False) -> list[str]:
     """Pinned condor MCP spawn args, ``--bot-id`` removed.
 
     ``--agent-slug`` is present only for agent-scoped runs and scopes the
@@ -122,7 +148,7 @@ def _expected_condor_args(agent_slug: str | None) -> list[str]:
     ]
     if agent_slug:
         args += ["--agent-slug", agent_slug]
-    args += ["--server-name", SERVER]
+    args += ["--server-name", SERVER, "--profile", _seat_profile(agent_slug, tick)]
     return args
 
 
@@ -230,30 +256,51 @@ def wiring(condor_repo: Path, tmp_path_factory):
     mcp_provider._shared_module = None
 
 
-def _bench_configs(mcp_provider, monkeypatch, agent_slug: str | None) -> list[dict]:
+def _bench_configs(
+    mcp_provider, monkeypatch, agent_slug: str | None, tick: bool = False
+) -> list[dict]:
     monkeypatch.setenv("BENCH_SERVER_NAME", SERVER)
     monkeypatch.setenv("BENCH_CHAT_ID", str(CHAT_ID))
     monkeypatch.setenv("BENCH_USER_ID", str(USER_ID))
     monkeypatch.setenv("HUMMINGBOT_API_URL", f"http://{HOST}:{PORT}")
-    return mcp_provider.build_mcp_configs(agent_slug=agent_slug, server_name=SERVER)
+    return mcp_provider.build_mcp_configs(
+        agent_slug=agent_slug, server_name=SERVER, tick=tick
+    )
 
 
 def _by_name(configs: list[dict]) -> dict[str, dict]:
     return {c["name"]: c for c in configs}
 
 
-def _production_configs(shared, agent_slug: str | None) -> list[dict]:
+def _production_configs(
+    shared, agent_slug: str | None, tick: bool = False
+) -> list[dict]:
     """What condor itself builds for these inputs."""
     return shared.build_mcp_servers_for_session(
-        user_id=USER_ID, chat_id=CHAT_ID, server_name=SERVER, agent_slug=agent_slug
+        user_id=USER_ID,
+        chat_id=CHAT_ID,
+        server_name=SERVER,
+        agent_slug=agent_slug,
+        tick=tick,
     )
 
 
+# The three seats bench actually launches: a chat-scoped consult, an attended
+# specialist, and a tick. The last one is the case bench used to get wrong, so it
+# is a parametrization rather than a separate test — every pin below is checked
+# against it too.
+SEATS = [
+    pytest.param(None, False, id="chat"),
+    pytest.param(AGENT_SLUG, False, id="agent"),
+    pytest.param(AGENT_SLUG, True, id="tick"),
+]
+
+
 # ── Check 2: production output matches the pinned shape ────────────────────────
-@pytest.mark.parametrize("agent_slug", [AGENT_SLUG, None])
-def test_condor_helpers_match_pinned_spawn_args(wiring, agent_slug):
+@pytest.mark.parametrize("agent_slug,tick", SEATS)
+def test_condor_helpers_match_pinned_spawn_args(wiring, agent_slug, tick):
     shared, _ = wiring
-    produced = _production_configs(shared, agent_slug)
+    produced = _production_configs(shared, agent_slug, tick)
 
     by_name = _by_name(produced)
     assert set(by_name) == {"mcp-hummingbot", "condor"}, (
@@ -262,11 +309,15 @@ def test_condor_helpers_match_pinned_spawn_args(wiring, agent_slug):
         "pinned expectations no longer describe."
     )
 
-    assert _strip_bot_id(by_name["mcp-hummingbot"]["args"]) == _expected_hummingbot_args(), (
+    assert _strip_bot_id(by_name["mcp-hummingbot"]["args"]) == _expected_hummingbot_args(
+        agent_slug, tick
+    ), (
         "condor's mcp-hummingbot spawn args changed. Update the pin in this test "
         "only after confirming bench passes whatever the new args need."
     )
-    assert _strip_bot_id(by_name["condor"]["args"]) == _expected_condor_args(agent_slug), (
+    assert _strip_bot_id(by_name["condor"]["args"]) == _expected_condor_args(
+        agent_slug, tick
+    ), (
         "condor's condor-MCP spawn args changed. Update the pin in this test only "
         "after confirming bench passes whatever the new args need."
     )
@@ -293,11 +344,11 @@ def test_agent_builder_removal_is_handled(wiring):
 
 
 # ── Check 1: bench reproduces production output ────────────────────────────────
-@pytest.mark.parametrize("agent_slug", [AGENT_SLUG, None])
-def test_bench_live_configs_match_condor(wiring, monkeypatch, agent_slug):
+@pytest.mark.parametrize("agent_slug,tick", SEATS)
+def test_bench_live_configs_match_condor(wiring, monkeypatch, agent_slug, tick):
     shared, mcp_provider = wiring
-    expected = _production_configs(shared, agent_slug)
-    actual = _bench_configs(mcp_provider, monkeypatch, agent_slug)
+    expected = _production_configs(shared, agent_slug, tick)
+    actual = _bench_configs(mcp_provider, monkeypatch, agent_slug, tick)
 
     exp, act = _by_name(expected), _by_name(actual)
     assert set(act) == set(exp), (
@@ -438,6 +489,82 @@ def test_agent_slug_reaches_the_condor_server(wiring, monkeypatch):
     assert "--agent-slug" not in chat_scoped["args"], (
         "chat-scoped consults must stay chat-scoped — production consults do."
     )
+
+
+def test_the_tick_seat_is_narrower_than_the_attended_one(wiring, monkeypatch):
+    """A tick must not be handed the attended ring (FEAT-066).
+
+    The seat is what a tick can reach at all: it runs behind an auto-approving
+    permission callback, so nothing downstream asks a human about a call the
+    profile mounted. bench built configs from ``agent_slug`` alone, which made
+    every tick case an *attended* seat — offered ``manage_amm``/``manage_clmm``
+    and the orchestration family that starts and stops the very loop it is
+    running inside, and scored as if reaching them were legitimate.
+    """
+    _, mcp_provider = wiring
+    ticking = _by_name(_bench_configs(mcp_provider, monkeypatch, AGENT_SLUG, tick=True))
+    attended = _by_name(_bench_configs(mcp_provider, monkeypatch, AGENT_SLUG))
+
+    for name in ("mcp-hummingbot", "condor"):
+        args = ticking[name]["args"]
+        assert "--profile" in args, f"{name} lost --profile on the tick seat"
+        assert args[args.index("--profile") + 1] == "tick", (
+            f"{name} mounts the '{args[args.index('--profile') + 1]}' ring for a "
+            "tick. bench/client.run_tick must pass tick=True to build_mcp_configs."
+        )
+        assert args != attended[name]["args"], (
+            f"{name}: the tick and attended seats produced identical spawn args, "
+            "so the seat axis is not reaching this subprocess at all."
+        )
+
+
+def test_the_tick_ring_withholds_the_tools_production_withholds(wiring):
+    """Names the six tools the gap actually handed a tick, so the fix has teeth.
+
+    Reads condor's own profile tables rather than a bench-side list: the point is
+    that the rings differ and by what, and a table that drifts should fail here
+    rather than quietly widen the seat. Takes ``wiring`` for the checkout on
+    ``sys.path``; ``profiles.py`` is the one module in either server package that
+    can be imported without waking a FastMCP singleton (FEAT-091).
+    """
+    from mcp_servers.condor import profiles as condor_profiles
+    from mcp_servers.hummingbot_api import profiles as hummingbot_profiles
+
+    widened = (
+        set(hummingbot_profiles.PROFILE_TOOLS["agent"])
+        - set(hummingbot_profiles.PROFILE_TOOLS["tick"])
+    ) | (
+        set(condor_profiles.PROFILE_TOOLS["agent"])
+        - set(condor_profiles.PROFILE_TOOLS["tick"])
+    )
+    assert widened == {
+        "manage_amm",
+        "manage_clmm",
+        "manage_agents",
+        "manage_strategies",
+        "control_agent",
+        "get_available_models",
+    }, (
+        f"the agent/tick ring difference changed to {sorted(widened)}. Re-read "
+        "condor's seat_profile docstring and update this pin deliberately — the "
+        "tick cases are scored on what the loop seat can reach."
+    )
+
+
+def test_the_seat_is_recorded_in_run_metadata(wiring, monkeypatch):
+    """A tick row and an agent row are different measurements; results must say so."""
+    _, mcp_provider = wiring
+    for slug, tick, expected in (
+        (None, False, "full"),
+        (AGENT_SLUG, False, "agent"),
+        (AGENT_SLUG, True, "tick"),
+    ):
+        configs = _bench_configs(mcp_provider, monkeypatch, slug, tick)
+        meta = mcp_provider.wiring_metadata(configs, agent_slug=slug)
+        assert meta["seat_profile"] == expected, (
+            f"seat {expected!r} was not recorded for agent_slug={slug!r}, "
+            f"tick={tick}: got {meta['seat_profile']!r}"
+        )
 
 
 def test_server_name_reaches_both_servers(wiring, monkeypatch):

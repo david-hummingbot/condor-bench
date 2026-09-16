@@ -134,12 +134,25 @@ def build_mcp_configs(
     *,
     agent_slug: str | None = None,
     server_name: str | None = None,
+    tick: bool = False,
 ) -> list[dict]:
     """MCP server configs for one benchmark case.
 
     Production spawn args for the staging server, from condor's own helpers.
     ``agent_slug`` must be set for agent-scoped cases (Layer 3, ticks) and left
     None for chat-scoped consults — see the module docstring for why.
+
+    ``tick`` is the *seat*, and it is a separate axis from the slug (FEAT-066).
+    condor's ``seat_profile(agent_slug, tick)`` mounts three different tool rings:
+    ``full`` for the chat coordinator, ``agent`` for an attended specialist, and
+    ``tick`` for the unattended loop — which drops the orchestration family
+    (``manage_agents``/``manage_strategies``/``control_agent``/
+    ``get_available_models``) and the direct liquidity moves
+    (``manage_amm``/``manage_clmm``) precisely because nothing is watching. The
+    axis is attendance, not identity: ``agent_slug`` alone cannot tell a
+    specialist being chatted with from the same specialist ticking, so a tick
+    case that omits this flag is handed six tools production never mounts for it
+    and can be scored for reaching a surface it would not have had.
     """
     shared = load_condor_shared()
     staging = staging_config()
@@ -168,6 +181,7 @@ def build_mcp_configs(
         chat_id=int(staging["chat_id"]),
         server_name=server_name,
         agent_slug=agent_slug,
+        tick=tick,
     )
 
     configs = [c for c in configs if c.get("name") not in EXCLUDED_MCP_SERVERS]
@@ -257,7 +271,11 @@ def wiring_metadata(
 
     ``tool_count_effective`` is what the model was actually offered before the
     per-mode ``_TOOL_LIMITS`` cut, so a matrix row can tell "small model chose
-    badly" apart from "small model was shown a different tool set".
+    badly" apart from "small model was shown a different tool set". It counts the
+    snapshot's tools for the servers attached, which is the ``full`` seat; a
+    narrower seat mounts fewer, so read it alongside ``seat_profile`` (the ring
+    the subprocess was actually launched with) and ``offered_tools`` (the exact
+    list, on the PydanticAI path).
     """
     counts = _snapshot_tool_counts()
     server_names = [c.get("name") for c in configs]
@@ -294,6 +312,11 @@ def wiring_metadata(
         "api_url": effective_api_url(configs),
         "server_name": _server_name_arg(configs),
         "tool_count_effective": tool_count,
+        # Which tool ring the subprocesses mounted (FEAT-066): `full` for a chat
+        # consult, `agent` for an attended specialist, `tick` for the unattended
+        # loop. Recorded because it changes what the case could reach at all, and
+        # a tick row and an agent row are not the same measurement.
+        "seat_profile": _profile_arg(configs),
         "autodiscovery_extras": extras,
         "tool_scope": "unscoped_acp" if unscoped_acp else scope,
         "allowed_tools": sorted(allowed_tools) if allowed_tools else None,
@@ -303,6 +326,26 @@ def wiring_metadata(
         # truncated surface says nothing about the model.
         "tools_truncated": bool(tools_truncated),
     }
+
+
+def _profile_arg(configs: list[dict]) -> str | None:
+    """The ``--profile`` the servers were launched with, read back from argv.
+
+    Read from the spawn args rather than tracked alongside them: condor resolves
+    the seat itself (and can downgrade ``full`` to ``agent`` when the caller does
+    not own the server, SEC-252), so what argv says is what actually ran.
+    """
+    seats = {
+        str(cfg["args"][cfg["args"].index("--profile") + 1])
+        for cfg in configs
+        if "--profile" in (cfg.get("args") or [])
+        and cfg["args"].index("--profile") + 1 < len(cfg["args"])
+    }
+    if len(seats) == 1:
+        return seats.pop()
+    # Two servers on different rings is not a thing condor does; say so rather
+    # than picking one and reporting a seat the run did not have.
+    return "/".join(sorted(seats)) if seats else None
 
 
 def _server_name_arg(configs: list[dict]) -> str | None:

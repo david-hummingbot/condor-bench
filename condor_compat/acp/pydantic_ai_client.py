@@ -123,7 +123,19 @@ def _infer_tool_filter_mode(model_name: str) -> str:
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
 PYDANTIC_AI_PREFIXES = frozenset(
-    {"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter"}
+    {
+        "ollama",
+        "openai",
+        "groq",
+        "anthropic",
+        "google",
+        "lmstudio",
+        "openrouter",
+        # A saved custom endpoint (``custom@venice:llama-3.3-70b``). Read through
+        # ``model_prefix``, which strips the ``@nickname`` — the raw split leaves
+        # ``custom@venice``, which matches nothing.
+        "custom",
+    }
 )
 
 # Default base URLs for local model providers and OpenRouter
@@ -147,9 +159,16 @@ def _get_server_semaphore(base_url: str) -> asyncio.Semaphore:
 
 
 def is_pydantic_ai_model(agent_key: str) -> bool:
-    """Check if an agent_key should use the PydanticAI client."""
-    prefix = agent_key.split(":", 1)[0] if ":" in agent_key else ""
-    return prefix in PYDANTIC_AI_PREFIXES
+    """Check if an agent_key should use the PydanticAI client.
+
+    Reads the prefix through :func:`model_prefix` so a custom endpoint's saved
+    nickname is stripped first. The raw ``split(":")`` this used to do left
+    ``custom@venice`` and matched nothing, which made every custom-endpoint key
+    read as *not* pydantic-ai — and in the tick prompt that means being told to
+    call ``ToolSearch``, a tool the pydantic-ai path does not have, because tools
+    there arrive registered in the request.
+    """
+    return model_prefix(agent_key) in PYDANTIC_AI_PREFIXES
 
 
 def model_prefix(agent_key: str) -> str:
@@ -369,6 +388,9 @@ class PydanticAIClient:
         allowed_tools: (
             list[str] | None
         ) = None,  # restrict the agent to these tool names
+        priority_tools: (
+            list[str] | None
+        ) = None,  # bench-only: keep these first when the count cap cuts
     ):
         self.model_name = model
         self.mcp_server_configs = mcp_servers or []
@@ -378,6 +400,10 @@ class PydanticAIClient:
         # When set, the agent only sees tools whose name is in this allowlist
         # (used by domain-expert consults to scope an agent to one domain).
         self.allowed_tools = set(allowed_tools) if allowed_tools else None
+        # Bench-only: the tools the case is *scored* on. They decide which side of
+        # an unavoidable count cut a tool lands on — see _prepare_tools. Never a
+        # filter: nothing is added or removed by being named here.
+        self.priority_tools = set(priority_tools) if priority_tools else None
         # Populated by _prepare_tools on the first model request: the tool names
         # actually offered, after the allowlist and the count cap. None until then,
         # which is distinct from "offered nothing".
@@ -690,13 +716,22 @@ class PydanticAIClient:
 
         limit = self._TOOL_LIMITS.get(self.tool_filter_mode, 999)
         # An allowlist is a *curated* set — condor's own per-agent grant, which is
-        # how production keeps the schema count down (market_making_expert grants
-        # 11 tools, meteora_launch_lp 10). Truncating it further by position throws
-        # away tools the agent is defined by, for no reduction the grant had not
-        # already achieved: six agent-scoped cases were recorded as harness
-        # artifacts ("expected tool was never offered") while their grant fit
-        # inside the cap the whole time. The cap exists to bound how many schemas
-        # a local model sees; a grant that already satisfies it needs no cut.
+        # how production keeps the schema count down. Truncating it further by
+        # position throws away tools the agent is defined by, for no reduction the
+        # grant had not already achieved: six agent-scoped cases were recorded as
+        # harness artifacts ("expected tool was never offered") while their grant
+        # fit inside the cap the whole time. The cap exists to bound how many
+        # schemas a local model sees; a grant that already satisfies it needs no
+        # cut.
+        #
+        # "Fits anyway" stopped being true and said nothing when it did. At condor
+        # d5eab53e the grants are market_making_expert 16, meteora_launch_lp 13 and
+        # solana_dex_lp_expert 20 — every scoped specialist is now over moderate's
+        # 12, so this exemption silently stopped applying and the positional cut
+        # came back for every agent-scoped case on a mid-size local model. Hence
+        # the priority pass below: the *shape* of the guarantee has to survive a
+        # grant outgrowing the cap, not just the arithmetic that held in one
+        # snapshot.
         if self.allowed_tools and len(tool_defs) <= limit:
             limit = len(tool_defs)
         if len(tool_defs) > limit:
@@ -712,6 +747,27 @@ class PydanticAIClient:
             # invisible to every capped model regardless of the case. Record it so
             # the matrix can tell "never offered" apart from "chose badly".
             self.tools_truncated = True
+            # When the cut is unavoidable, it must not fall on the tools the case
+            # is scored on. Those rows are not a measurement of the model either
+            # way: the expected tool was never on the menu, so the row is dropped
+            # as a harness artifact and the domain reads as thin coverage. Keeping
+            # them means the cap still bounds the schema count — the number the
+            # model sees is unchanged, and `tools_truncated` still says the surface
+            # was cut — while the row becomes an answerable question. The cost is
+            # stated plainly: a capped model gets a slightly kinder distractor set
+            # than a random slice would be. That is the smaller distortion.
+            if self.priority_tools:
+                priority = self.priority_tools
+
+                def _is_priority(td: Any) -> bool:
+                    name = str(getattr(td, "name", ""))
+                    return name in priority or name.rsplit("__", 1)[-1] in priority
+
+                # Stable within each group, so discovery order still decides the
+                # rest and two runs of the same case see the same surface.
+                tool_defs = [td for td in tool_defs if _is_priority(td)] + [
+                    td for td in tool_defs if not _is_priority(td)
+                ]
         tool_defs = tool_defs[:limit]
         # Bench-only: record what the model was actually offered, after both the
         # allowlist and the count cap. Scoring needs the real list, not the

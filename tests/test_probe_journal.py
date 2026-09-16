@@ -174,7 +174,7 @@ def test_a_case_that_names_no_journal_tool_is_left_alone(monkeypatch, tmp_path):
         id="tool_get_market_data_001",
         type="tool",
         agent_slug="bench_journal_probe",
-        expected_tools=["get_market_data"],
+        expected_tools=["get_prices"],
     )
     assert not needs_probe_journal(case)
     assert ensure_probe_journal(case) is None

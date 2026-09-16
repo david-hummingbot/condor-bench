@@ -591,6 +591,7 @@ def _make_client(
     *,
     tool_filter_mode: str | None = None,
     allowed_tools: list[str] | None = None,
+    priority_tools: list[str] | None = None,
 ) -> tuple[Any, bool]:
     """Build the right client for a model key. Returns (client, is_acp).
 
@@ -599,6 +600,12 @@ def _make_client(
     servers in their working directory — so an ACP run of an agent-scoped case sees
     the full surface regardless. That is recorded in wiring metadata rather than
     silently tolerated, because it makes those rows measure a different task.
+
+    ``priority_tools`` are the case's expected tools. They change nothing about
+    which tools exist for the run; they only decide which side of the per-mode
+    count cap a tool lands on when that cap has to cut, so a capped model is not
+    scored for missing a tool it was never shown. Ignored on the ACP path, which
+    does no capping of its own.
     """
     if is_acp_model(model):
         command, extra_env = resolve_acp(model)
@@ -623,6 +630,8 @@ def _make_client(
         kwargs["tool_filter_mode"] = tool_filter_mode
     if allowed_tools:
         kwargs["allowed_tools"] = list(allowed_tools)
+    if priority_tools:
+        kwargs["priority_tools"] = list(priority_tools)
     return PydanticAIClient(model=model, mcp_servers=mcp_configs, **kwargs), False
 
 
@@ -700,6 +709,7 @@ async def run_consult(
             mcp_configs,
             tool_filter_mode=tool_filter_mode,
             allowed_tools=allowed_tools,
+            priority_tools=required_tools,
         )
 
         await client.start()
@@ -775,7 +785,10 @@ async def run_tick(
     client: Any = None
 
     try:
-        mcp_configs = build_mcp_configs(agent_slug=agent_slug)
+        # tick=True is the unattended seat: it mounts the narrower ring production
+        # gives a loop (no orchestration family, no manage_amm/manage_clmm), so a
+        # tick case is measured on the surface it would actually have.
+        mcp_configs = build_mcp_configs(agent_slug=agent_slug, tick=True)
         # Ticks skip the model-size cap: production does not filter an agent's tools
         # by model size on the tick path, and a truncated set would make a tick
         # failure indistinguishable from a tool that was never offered. The agent's
@@ -843,6 +856,22 @@ def tick_agent_id(case: Any) -> str:
 
 
 def build_tick_prompt_for_case(case: Any, model: str) -> str:
+    """The tick prompt for one case, built for the model actually under test.
+
+    ``config["agent_key"]`` is overridden rather than read. In production it is the
+    model an agent is configured with, and ``build_tick_prompt`` picks the prompt's
+    TOOLS section from it: pydantic-ai gets "all MCP tools are pre-loaded", an ACP
+    session gets a ``ToolSearch`` preload line, because on that path the tools are
+    deferred until the agent asks for them (see :func:`call_origin`).
+
+    In bench the model is the variable and the config is a fixture, so reading the
+    fixture inverted the dependency. Every tick case in `datasets/tick.jsonl` pins
+    ``anthropic:claude-sonnet-4-6``, which resolves to the pydantic-ai branch — so
+    a `claude-code` tick run was told its tools were already loaded when they were
+    not, and the preload line written for exactly that case never ran. The pin is
+    kept in the dataset because a tick config is production-shaped; it just does
+    not get to decide which client's prompt this run reads.
+    """
     from condor_compat.agents.prompts import build_tick_prompt
     agent = SimpleNamespace(
         name=case.id, agent_key=model, instructions=case.agent_instructions, tools=[],
@@ -852,8 +881,9 @@ def build_tick_prompt_for_case(case: Any, model: str) -> str:
         key=f"bench.{case.id}", agent_slug=slug, instructions=case.strategy_instructions,
         agent_key=model, name=case.scenario_name,
     )
+    config = {**case.config, "agent_key": model}
     return build_tick_prompt(
-        agent=agent, strategy=strategy, config=case.config,
+        agent=agent, strategy=strategy, config=config,
         core_data=case.core_data, learnings=case.learnings, summary=case.summary,
         recent_decisions=case.recent_decisions, risk_state=case.risk_state,
         tick_number=case.tick_number, agent_id=tick_agent_id(case),

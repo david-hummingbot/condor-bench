@@ -123,9 +123,9 @@ order:
 
 | Level | Means | Examples |
 |---|---|---|
-| `read_only` | No state change anywhere | `get_market_data`, `get_portfolio_overview`, advisory consults |
-| `mutating` | condor-side state only | `manage_routines` create, `manage_memory` write, journal writes |
-| `destructive` | Capital-affecting | `manage_executors` create, `manage_bots` deploy, leverage changes, strategy creation |
+| `read_only` | No state change anywhere | `get_prices`, `get_portfolio_overview`, `delegate(action="ask")` |
+| `mutating` | condor-side state only | `manage_routines` create, `manage_memory` write, journal writes, `delegate(action="start")` |
+| `destructive` | Capital-affecting | `create_*_executor`, `manage_bots` deploy, leverage changes, strategy creation |
 
 **Every level runs.** The level is not a gate; it decides two things:
 
@@ -145,13 +145,30 @@ only test connectors.
 ## Cleanup
 
 `bench/cleanup.py` runs after each mutating case and undoes what that case
-created. Two rules matter:
+created. The rules that matter:
 
 - **Only what this run created.** Resource ids come from the case's own tool
   trace. There is no "stop everything active" sweep — that could kill a position
   a human was using, which is worse than a dirty database.
 - **Executors are stopped with `keep_position=true`.** Cleanup removes
-  bookkeeping; closing a position is a trade, not a teardown step.
+  bookkeeping; closing a position is a trade, not a teardown step. What that
+  leaves behind is now *reported* rather than implied: the position outlives the
+  executor whose stop-loss and take-profit were managing it, and the orphan scan
+  below looks for running executors, not held positions, so nothing else would
+  mention it:
+
+  ```
+  position kept: create_position_executor e-7f21 — stopped with keep_position=true
+  — any position it opened is still held and no longer has the executor's
+  stop-loss/take-profit. Check with list_positions_held / list_orphaned_positions.
+  ```
+
+- **A started delegation is stopped.** `delegate(action="start")` detaches an
+  agent session that runs unattended under full auto-approve until it decides it
+  is done; left alone it outlives the case, spends a model budget and can still
+  act on staging. Teardown calls `delegate(action="stop", task_id=…)`. A task
+  that already finished answers `{"stopped": false}`, which is the state teardown
+  wanted and is not reported as a failure.
 
 Deployed bots and saved controllers are **not** auto-removed. A deployed bot holds
 capital through a controller, so stopping it is a trading decision. Those are
@@ -189,6 +206,26 @@ So:
 - Tick cases are agent-scoped by construction and get a per-case slug.
 - `tests/test_mcp_wiring_drift.py` asserts the flag actually reaches the condor
   MCP subprocess, and that chat-scoped cases still omit it.
+
+### The seat is a second axis (`--profile`)
+
+The slug says *whose* stores a run reads. The **seat** says which tools it mounts
+at all, and condor decides it from attendance rather than identity
+(`condor.runtime.toolsets.seat_profile`):
+
+| Seat | Who | Loses |
+|---|---|---|
+| `full` | the chat coordinator, with a human confirming | — |
+| `agent` | an attended specialist (a chat bound to an agent) | the operator ring: `configure_server`, Gateway config and container control |
+| `tick` | the unattended loop | that, plus `manage_amm` / `manage_clmm` and the orchestration family (`manage_agents`, `manage_strategies`, `control_agent`, `get_available_models`) |
+
+A tick runs behind an auto-approving permission callback, so the seat *is* its
+permission model: what it can reach is decided by what got mounted, and nothing
+downstream asks a human about a call the profile allowed. Bench therefore passes
+`tick=True` for tick cases (`bench/client.run_tick`, and teardown for the same
+case), and `tests/test_mcp_wiring_drift.py` pins all three seats. Deriving the
+seat from the slug alone — which bench did — hands a tick six tools production
+withholds from it and scores reaching them as legitimate.
 - When the flag is missing, or an assistant prompt falls back to the generic
   Condor one, the result is tagged `harness_artifact` and **excluded** from the
   routing matrix rather than counted as a model failure.
