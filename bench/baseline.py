@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from config import BASELINE_DIR, BASELINE_MODEL, CASE_TIMEOUT_S
+from config import BASELINE_DIR, BASELINE_MODEL, case_timeout_s
 from bench.cleanup import teardown
 from bench.client import run_case
 from bench.dataset import is_mutating
@@ -181,6 +181,7 @@ async def generate_baselines(
     model: str = BASELINE_MODEL,
     overwrite: bool = False,
     stale: bool = False,
+    only: set[str] | None = None,
 ) -> None:
     """Run all cases with the baseline model and store latency records.
 
@@ -189,17 +190,31 @@ async def generate_baselines(
     goes through the same path a scored run does, so it executes the mutating and
     destructive cases for real. Nobody should discover that by typing the command
     that used to be a no-op.
+
+    ``only`` narrows the run to named case ids. Without it, re-measuring a handful
+    of cases meant deleting their records so they counted as missing — which also
+    deletes the reference the new ceiling scales from, dropping every one of them
+    to the CASE_TIMEOUT_MIN_S floor and re-killing the slow case that needed the
+    room. Keeping the record and naming the case is the only way to get both.
     """
     from rich.console import Console
     from rich.progress import track
     console = Console()
 
     def _wanted(case: Any) -> bool:
+        if only is not None and case.id not in only:
+            return False
         if overwrite or not store.exists(case.id):
             return True
         return stale and baseline_status(case, store.load(case.id)) == BASELINE_STALE
 
     to_run = [c for c in cases if _wanted(c)]
+    if only:
+        unknown = only - {c.id for c in cases}
+        if unknown:
+            console.print(
+                f"[yellow]Not in the dataset, ignored: {', '.join(sorted(unknown))}[/yellow]"
+            )
     if not to_run:
         unverified = classify_baselines(cases, store)[BASELINE_UNVERIFIED]
         console.print("[green]All baselines already exist.[/green]")
@@ -260,12 +275,23 @@ async def generate_baselines(
             # bare manage_skill:list, and a reference that long would have handed
             # every model a free 1.0 on that case forever. Better to record no
             # baseline than a runaway one.
+            #
+            # Which is why the ceiling is `case_timeout_s`, the same per-case scale a
+            # scored run gets, and not the flat CASE_TIMEOUT_S this used to pass — the
+            # one number that comment says a run no longer uses. The flat 180s cut off
+            # the cases it was least able to judge: agent_meteora_launch_lp_007 has a
+            # 136.3s reference and was killed at 180s, where its own scale allows 545s.
+            # Re-measuring scales from the record being replaced, since how long the
+            # case has always taken is the best estimate of how long it will take;
+            # a case with none falls to the CASE_TIMEOUT_MIN_S floor.
+            prior = store.load(case.id)
+            ceiling = case_timeout_s(prior.latency_s if prior else None)
             result = await asyncio.wait_for(
-                run_case(runnable, model), timeout=CASE_TIMEOUT_S
+                run_case(runnable, model), timeout=ceiling
             )
         except asyncio.TimeoutError:
             console.print(
-                f"[red]Timeout on {case.id} after {CASE_TIMEOUT_S:.0f}s — "
+                f"[red]Timeout on {case.id} after {ceiling:.0f}s — "
                 "no baseline recorded[/red]"
             )
             continue

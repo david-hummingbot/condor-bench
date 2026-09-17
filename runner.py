@@ -72,6 +72,9 @@ def baseline(
         False, "--stale", help="Also re-measure cases whose fingerprint no longer matches"
     ),
     model: str = typer.Option(None, help="Override the baseline model"),
+    only: str = typer.Option(
+        None, "--only", help="Comma-separated case ids to re-measure (implies --overwrite)"
+    ),
 ) -> None:
     """Generate baseline latency records using the benchmark model."""
     from config import BASELINE_MODEL
@@ -81,9 +84,17 @@ def baseline(
     m = model or BASELINE_MODEL
     cases = load_all_cases()
     store = BaselineStore()
+    # Naming cases means you mean them: re-measuring a handful otherwise required
+    # deleting their records, which also deletes the reference the per-case ceiling
+    # scales from and drops them all to the floor.
+    picked = {c.strip() for c in only.split(",") if c.strip()} if only else None
+    if picked:
+        overwrite = True
 
     async def _run():
-        await generate_baselines(cases, store, model=m, overwrite=overwrite, stale=stale)
+        await generate_baselines(
+            cases, store, model=m, overwrite=overwrite, stale=stale, only=picked
+        )
 
     asyncio.run(_run())
 
