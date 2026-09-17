@@ -306,3 +306,45 @@ def test_a_run_that_only_failed_is_not_recorded_as_a_reference():
         "for that case — 4.9s of a broken gateway, which every later model is then "
         "measured against"
     )
+
+
+# ── the ceiling a baseline is measured under ──────────────────────────────────
+
+def test_baselines_are_measured_under_the_same_ceiling_a_run_gets():
+    """Generation used the flat CASE_TIMEOUT_S; a scored run scales per case.
+
+    That is the one difference the call site's own comment rules out — a reference
+    measured under different wiring than the runs it scores is not a reference. The
+    flat 180s also cut off exactly the cases it was least able to judge:
+    agent_meteora_launch_lp_007 carries a 136.3s reference and was killed at 180s,
+    where its own scale allows 545s, so it kept a record from August instead.
+    """
+    import inspect
+
+    from bench import baseline
+
+    src = inspect.getsource(baseline.generate_baselines)
+    assert "case_timeout_s(" in src, "generation must scale the ceiling per case"
+    assert "timeout=CASE_TIMEOUT_S" not in src, (
+        "generation is back on the flat ceiling a scored run no longer uses"
+    )
+
+
+def test_re_measuring_scales_from_the_record_it_replaces():
+    """How long the case has always taken is the best guess at how long it will."""
+    from config import (
+        CASE_TIMEOUT_BASELINE_MULTIPLE,
+        CASE_TIMEOUT_MAX_S,
+        case_timeout_s,
+    )
+
+    assert case_timeout_s(136.3) == 136.3 * CASE_TIMEOUT_BASELINE_MULTIPLE
+    # ...and a runaway reference cannot buy unlimited room.
+    assert case_timeout_s(10_000) == CASE_TIMEOUT_MAX_S
+
+
+def test_a_case_with_no_record_falls_to_the_floor_not_to_zero():
+    from config import CASE_TIMEOUT_MIN_S, case_timeout_s
+
+    assert case_timeout_s(None) == CASE_TIMEOUT_MIN_S
+    assert case_timeout_s(0) == CASE_TIMEOUT_MIN_S
