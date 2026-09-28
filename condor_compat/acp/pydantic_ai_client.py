@@ -332,11 +332,10 @@ def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
             async def _map_messages(self, *args: Any, **kwargs: Any) -> Any:
                 mapped = await super()._map_messages(*args, **kwargs)
                 for msg in mapped:
-                    if (
-                        isinstance(msg, dict)
-                        and msg.get("role") == "assistant"
-                        and msg.get("content") is None
-                    ):
+                    # Ollama rejects *any* role whose content is null (it only
+                    # tolerates the null when tool_calls is present), so coerce
+                    # on every message rather than on assistant turns alone.
+                    if isinstance(msg, dict) and msg.get("content") is None:
                         msg["content"] = ""
                 return mapped
 
@@ -545,11 +544,21 @@ class PydanticAIClient:
                 model_id, OpenAIProvider(openai_client=openai_client)
             )
 
-        # OpenAI with custom base_url (vLLM, TGI, etc.)
+        # OpenAI with custom base_url (vLLM, TGI, a tunnelled Ollama, etc.).
+        # Fall back to OPENAI_BASE_URL the same way the local-provider branch
+        # above does: the dashboard points "custom"/"lmstudio" models at their
+        # server by exporting that env var and normalising the key to "openai:",
+        # so it never sets base_url explicitly. Without this fallback the model
+        # dropped through to infer_model(), which honours OPENAI_BASE_URL but
+        # builds a stock OpenAIModel -- losing the assistant content:null
+        # coercion and making every tool-calling turn fail against Ollama with
+        # "invalid message content type: <nil>".
+        if prefix == "openai":
+            base_url = base_url or os.environ.get("OPENAI_BASE_URL")
         if prefix == "openai" and base_url:
             openai_client = AsyncOpenAI(
                 base_url=base_url,
-                api_key="not-needed",
+                api_key=os.environ.get("OPENAI_API_KEY") or "not-needed",
                 timeout=_local_timeout,
             )
             return _make_openai_compat_model(
