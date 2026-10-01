@@ -130,6 +130,14 @@ export function compareRuns({ runGroup, runs } = {}) {
 
 export const getRunGroup = (id) => fetch(`/api/run-groups/${id}`).then(handle)
 
+export const getFormState = () => fetch('/api/form-state').then(handle)
+export const saveFormState = (body) =>
+  fetch('/api/form-state', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(handle)
+
 export const getSettings = () => fetch('/api/settings').then(handle)
 export const updateSettings = (updates) =>
   fetch('/api/settings', {

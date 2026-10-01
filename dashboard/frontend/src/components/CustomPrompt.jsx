@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { getProviders, getProviderModels, getAcpModels, createCustomPrompt, streamCustomPromptUrl } from '../api.js'
+import { getProviders, getProviderModels, getAcpModels, createCustomPrompt, streamCustomPromptUrl, getFormState } from '../api.js'
+import { EMPTY_FORM, SAVED_FIELDS_HINT, currentForm, providerFromSaved, seedForm, useSavedForm } from '../formPersist.js'
 import PageHeader from './PageHeader.jsx'
 import ModelPicker from './ModelPicker.jsx'
 import { TokenChips } from './CaseTable.jsx'
@@ -129,7 +130,19 @@ export default function CustomPrompt() {
   const [results, setResults] = useState([])  // [{model, response, tool_calls, scorecard, error}]
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
+  const [hydrated, setHydrated] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [saveError, setSaveError] = useState('')
   const esRef = useRef(null)
+
+  useSavedForm(
+    'prompt',
+    { question, turns, expectedTools, agentSlug },
+    providers,
+    cfg,
+    hydrated,
+    setSaveError,
+  )
 
   const connectToStream = (runId) => {
     if (esRef.current) esRef.current.close()
@@ -171,20 +184,22 @@ export default function CustomPrompt() {
   }
 
   useEffect(() => {
-    getProviders()
-      .then(d => {
-        // ACP agents (claude-code, gemini) were filtered out here, so the only
-        // Sonnet on this page was the `anthropic:` one — a different client, a
-        // different tool surface, and not what a Runs-page claude-code row measures.
+    let cancel = false
+    const cached = currentForm()
+    Promise.all([
+      getProviders(),
+      cached ? Promise.resolve(cached) : getFormState().catch(() => null),
+    ])
+      .then(([d, saved]) => {
+        if (cancel) return
+        const form = saved || EMPTY_FORM
+        if (saved && !cached) seedForm(saved)
         const ps = d.providers || []
-        setProviders(ps)
         const init = {}
         for (const p of ps) {
+          const fields = providerFromSaved(p, form)
           init[p.id] = {
-            enabled: false,
-            apiKey: '',
-            baseUrl: p.default_url || '',
-            selectedModel: p.models?.[0] || '',
+            ...fields,
             loadedModels: [],
             acpModels: [],
             acpCurrent: '',
@@ -192,9 +207,23 @@ export default function CustomPrompt() {
             loadError: '',
           }
         }
+        setProviders(ps)
         setCfg(init)
+        const prompt = form.prompt || EMPTY_FORM.prompt
+        setQuestion(prompt.question || '')
+        setTurns(prompt.turns || [])
+        setExpectedTools(prompt.expectedTools || '')
+        setAgentSlug(prompt.agentSlug || '')
+        if (!saved) setLoadError('Saved fields could not be loaded.')
+        else if (saved.warning) setLoadError(saved.warning)
+        setHydrated(!!saved)
+        for (const p of ps) {
+          if (init[p.id].enabled && p.fetch_acp_models) {
+            loadAcpModels(p, { keepSelection: true, selectedModel: init[p.id].selectedModel })
+          }
+        }
       })
-      .catch(() => {})
+      .catch(() => { if (!cancel) setLoadError('Saved fields could not be loaded.') })
 
     // Reconnect to any run that was in progress before navigation/reload
     const savedRunId = localStorage.getItem(CP_RUN_KEY)
@@ -204,7 +233,10 @@ export default function CustomPrompt() {
       connectToStream(savedRunId)
     }
 
-    return () => { if (esRef.current) esRef.current.close() }
+    return () => {
+      cancel = true
+      if (esRef.current) esRef.current.close()
+    }
   }, [])
 
   const update = (id, patch) =>
@@ -221,16 +253,19 @@ export default function CustomPrompt() {
     }
   }
 
-  /** Ask an ACP bridge which model ids it accepts; doubles as a bridge health check. */
-  const loadAcpModels = async (p) => {
+  const loadAcpModels = async (p, opts = {}) => {
+    const prev = opts.selectedModel ?? cfg[p.id]?.selectedModel ?? ''
     update(p.id, { loading: true, loadError: '' })
     try {
       const data = await getAcpModels(p.id)
       const models = data.models || []
+      const stillThere = prev && models.some(m => m.id === prev)
       update(p.id, {
         acpModels: models,
         acpCurrent: data.current || '',
-        selectedModel: models.some(m => m.id === 'default') ? 'default' : (models[0]?.id || ''),
+        selectedModel: opts.keepSelection || stillThere
+          ? prev
+          : (models.some(m => m.id === 'default') ? 'default' : (models[0]?.id || '')),
         loading: false,
       })
     } catch (e) {
@@ -331,6 +366,10 @@ export default function CustomPrompt() {
         title="Prompt"
         description="Run one free-form question against any set of models side by side. Useful for sanity-checking a change or a new model before committing it to a full benchmark — results are scored but do not enter the leaderboard as a dataset run."
       />
+
+      <p className="run-meta" style={{ marginTop: 0 }}>{SAVED_FIELDS_HINT}</p>
+      {loadError && <p className="error-text">{loadError}</p>}
+      {saveError && <p className="error-text">{saveError}</p>}
 
       {/* Question */}
       <div className="card" style={{ marginBottom: 16 }}>
@@ -470,10 +509,13 @@ export default function CustomPrompt() {
                                     emptyLabel="CLI default (whatever it is configured with)"
                                   />
                                 ) : (
-                                  <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-                                    Not selected — the run will use whatever model this CLI is
-                                    configured with, and no price can be estimated for it.
-                                  </span>
+                                  <input
+                                    type="text"
+                                    className="input"
+                                    placeholder="CLI default (whatever it is configured with)"
+                                    value={state.selectedModel}
+                                    onChange={e => update(p.id, { selectedModel: e.target.value })}
+                                  />
                                 )}
                                 <button
                                   className="btn sm"
@@ -486,13 +528,13 @@ export default function CustomPrompt() {
                             </div>
                           )}
 
-                          {p.needs_api_key && (
+                          {(p.needs_api_key || p.id === 'custom') && (
                             <div className="field">
-                              <label>API Key</label>
+                              <label>{p.id === 'custom' ? 'API Key (optional)' : 'API Key'}</label>
                               <input
                                 type="password"
                                 className="input"
-                                placeholder={p.key_hint || 'API key…'}
+                                placeholder={p.id === 'custom' ? 'Leave blank if not required' : (p.key_hint || 'API key…')}
                                 value={state.apiKey}
                                 onChange={e => update(p.id, { apiKey: e.target.value })}
                               />

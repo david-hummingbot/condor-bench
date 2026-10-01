@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { getProviders, getProviderModels, getAcpModels, createRun, getDatasets } from '../api.js'
+import { getProviders, getProviderModels, getAcpModels, createRun, getDatasets, getFormState } from '../api.js'
+import { EMPTY_FORM, SAVED_FIELDS_HINT, currentForm, providerFromSaved, seedForm, useSavedForm } from '../formPersist.js'
 import StagingStatus from './StagingStatus.jsx'
 import PageHeader from './PageHeader.jsx'
 import ModelPicker from './ModelPicker.jsx'
@@ -24,30 +25,66 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   const [staging, setStaging] = useState(null)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
+  const [hydrated, setHydrated] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [saveError, setSaveError] = useState('')
+
+  useSavedForm(
+    'benchmark',
+    { layers, domain, category, riskLevels, coreOnly },
+    providers,
+    cfg,
+    hydrated,
+    setSaveError,
+  )
 
   useEffect(() => {
     getDatasets().then(setDatasets).catch(() => {})
   }, [])
 
   useEffect(() => {
-    getProviders()
-      .then(d => {
-        setProviders(d.providers || [])
+    let cancel = false
+    const cached = currentForm()
+    Promise.all([
+      getProviders(),
+      cached ? Promise.resolve(cached) : getFormState().catch(() => null),
+    ])
+      .then(([d, saved]) => {
+        if (cancel) return
+        const form = saved || EMPTY_FORM
+        if (saved && !cached) seedForm(saved)
+        const ps = d.providers || []
         const init = {}
-        for (const p of d.providers || []) {
+        for (const p of ps) {
+          const fields = providerFromSaved(p, form)
           init[p.id] = {
-            enabled: false,
-            apiKey: '',
-            baseUrl: p.default_url || '',
+            ...fields,
             loadedModels: [],
-            selectedModel: p.models?.[0] || '',
+            acpModels: [],
+            acpCurrent: '',
             loading: false,
             error: '',
           }
         }
+        setProviders(ps)
         setCfg(init)
+        const bench = form.benchmark || EMPTY_FORM.benchmark
+        setLayers(bench.layers || [])
+        setDomain(bench.domain || '')
+        setCategory(bench.category || '')
+        setRiskLevels(bench.riskLevels || [])
+        setCoreOnly(!!bench.coreOnly)
+        if (!saved) setLoadError('Saved fields could not be loaded.')
+        else if (saved.warning) setLoadError(saved.warning)
+        setHydrated(!!saved)
+        for (const p of ps) {
+          if (init[p.id].enabled && p.fetch_acp_models) {
+            loadAcpModels(p, { keepSelection: true, selectedModel: init[p.id].selectedModel })
+          }
+        }
       })
-      .catch(() => {})
+      .catch(() => { if (!cancel) setLoadError('Saved fields could not be loaded.') })
+    return () => { cancel = true }
   }, [])
 
   const update = (id, patch) =>
@@ -122,18 +159,23 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
    * bridge works at all — if this errors, no run against that agent can succeed, and
    * the message carries the bridge's stderr rather than leaving empty rows behind.
    */
-  const loadAcpModels = async (p) => {
+  const loadAcpModels = async (p, opts = {}) => {
+    const prev = opts.selectedModel ?? cfg[p.id]?.selectedModel ?? ''
     update(p.id, { loading: true, error: '' })
     try {
       const data = await getAcpModels(p.id)
       const models = data.models || []
+      const stillThere = prev && models.some(m => m.id === prev)
       update(p.id, {
         acpModels: models,
         acpCurrent: data.current || '',
         // Default to the bridge's own recommendation, not to the CLI's configured
         // model: that one is whatever happens to be in ~/.claude/settings.json and
-        // is exactly what can fail every prompt in the run.
-        selectedModel: models.some(m => m.id === 'default') ? 'default' : (models[0]?.id || ''),
+        // is exactly what can fail every prompt in the run. A restored selection
+        // is kept, including when this load was triggered by opening the page.
+        selectedModel: opts.keepSelection || stillThere
+          ? prev
+          : (models.some(m => m.id === 'default') ? 'default' : (models[0]?.id || '')),
         loading: false,
       })
     } catch (e) {
@@ -267,6 +309,10 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
         meta={datasets ? `${datasets.total} cases · ${datasets.core ?? 0} core · ${datasets.agent_scoped} agent-scoped` : null}
       />
 
+      <p className="run-meta" style={{ marginTop: 0 }}>{SAVED_FIELDS_HINT}</p>
+      {loadError && <p className="error-text">{loadError}</p>}
+      {saveError && <p className="error-text">{saveError}</p>}
+
       {/* Shown above the model picker on purpose: which API the run will hit
           matters more than which model runs against it. */}
       <div style={{ marginBottom: 16 }}>
@@ -319,11 +365,14 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
                                   allowEmpty
                                   emptyLabel="CLI default (whatever it is configured with)"
                                 />
-                              ) : (
-                                <span className="run-meta">
-                                  Not selected — the run will use whatever model this CLI is
-                                  configured with.
-                                </span>
+                                ) : (
+                                <input
+                                  type="text"
+                                  className="input"
+                                  placeholder="CLI default (whatever it is configured with)"
+                                  value={state.selectedModel}
+                                  onChange={e => update(p.id, { selectedModel: e.target.value })}
+                                />
                               )}
                               <button
                                 className="btn sm"

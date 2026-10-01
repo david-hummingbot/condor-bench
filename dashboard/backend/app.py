@@ -15,6 +15,8 @@ Endpoints:
   DELETE /api/runs/{id}       cancel active run
   GET  /api/matrix            model × domain/tool matrix (rebuilt on request)
   GET  /api/routing           routing recommendations
+  GET  /api/form-state        saved Benchmark / Prompt fields
+  PUT  /api/form-state        remember those fields in .env
 """
 from __future__ import annotations
 
@@ -863,6 +865,35 @@ async def api_put_settings(body: SettingsUpdate):
     except SettingsError as exc:
         # A rejected value is operator error, not a server fault — 400 so the form can
         # show it next to the field instead of a generic failure.
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/form-state")
+async def api_get_form_state():
+    """Saved Benchmark and Prompt fields, including API keys.
+
+    Trusted-local, same as the rest of the dashboard. The keys have to come
+    back in full so the inputs can be filled in; the Settings page is the one
+    that masks secrets.
+    """
+    from bench.form_state import get_form_state
+
+    return get_form_state()
+
+
+@app.put("/api/form-state")
+async def api_put_form_state(request: Request):
+    from bench.form_state import FormStateError, update_form_state
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, "expected a JSON object") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "expected a JSON object")
+    try:
+        return update_form_state(body)
+    except FormStateError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
