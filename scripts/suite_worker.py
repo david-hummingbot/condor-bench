@@ -37,11 +37,11 @@ async def _run(job: dict) -> dict:
     from bench.dataset import is_mutating
     from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.probe_journal import ensure_probe_journal
+    from bench.manifest import build_manifest
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.scorer import score_case
     from bench.suites import load_suite_cases_as_objects, suite_prompt_map
-    from config import build_run_pin
 
     suite_id = job["suite_id"]
     environment_id = job["environment_id"]
@@ -79,6 +79,20 @@ async def _run(job: dict) -> dict:
             ),
             "member_run_id": member_run_id,
         }
+    # Either side may be abbreviated: condor_checkout_state reports a short hash.
+    expected_commit = str(job.get("expected_commit") or "")
+    actual_commit = str(state.get("commit") or "")
+    if expected_commit and not (
+        actual_commit not in ("", "unknown")
+        and (actual_commit.startswith(expected_commit) or expected_commit.startswith(actual_commit))
+    ):
+        return {
+            "ok": False,
+            "error": (
+                f"expected commit '{expected_commit}', got '{state.get('commit')}'"
+            ),
+            "member_run_id": member_run_id,
+        }
     if job.get("require_clean") and int(state.get("dirty_files") or 0) > 0:
         return {
             "ok": False,
@@ -111,7 +125,7 @@ async def _run(job: dict) -> dict:
                 tick=getattr(case, "type", "") == "tick",
             )
 
-    pin = build_run_pin(
+    pin = build_manifest(
         run_type="suite",
         suite_id=suite_id,
         environment_id=environment_id,
@@ -120,6 +134,7 @@ async def _run(job: dict) -> dict:
         models=[model],
         include_in_matrix=include_in_matrix,
         shared_loaded=True,
+        experiment_type_override=job.get("experiment_type"),
     )
     pin["target_banner"] = target_banner()
     pin["parent_run_id"] = job.get("parent_run_id")

@@ -1,4 +1,13 @@
-"""N-way Compare for suite run-group members — sound by default."""
+"""N-way Compare for suite run-group members — sound by default.
+
+One variable under test: members may differ in exactly one *variable* —
+the model, the Condor checkout, or a single manifest key — and Compare refuses
+when more than one differs, listing every one. The model and its inference
+config count as one variable (Experiment B lets each model use its own params);
+the Condor commit and the contract version it ships count as another
+(Experiment A). Runs without a ``manifest`` block (pre-Phase 0) are compared on
+model and checkout alone.
+"""
 
 from __future__ import annotations
 
@@ -36,8 +45,84 @@ def _case_set(summary: dict) -> tuple[str, ...]:
     return tuple(sorted(str(i) for i in ids))
 
 
+# ── Manifest diff ──────────────────────────────────────────────────────────────
+# Keys within the manifest block that are compared.  ``runtime`` is included
+# because different timeouts or concurrency can change outcomes.
+_MANIFEST_COMPARE_KEYS = (
+    "contract_version",
+    "task_set_version",
+    "grader_version",
+    "inference_config",
+    "env_mode",
+    "experiment_type",
+    "uv_lock_hash",
+    "trials",
+    "runtime",
+)
+
+
+def diff_manifests(members: list[dict[str, Any]]) -> list[str]:
+    """Return the manifest keys that differ across *members*.
+
+    Returns an empty list when all manifests agree (or when none of the
+    members have a manifest block — backwards compatibility).
+    """
+    manifests = [m.get("manifest") or {} for m in members]
+    if all(not m for m in manifests):
+        return []
+
+    diffs: list[str] = []
+    for key in _MANIFEST_COMPARE_KEYS:
+        values = {json.dumps(m.get(key), sort_keys=True, default=str) for m in manifests}
+        if len(values) > 1:
+            diffs.append(key)
+    return diffs
+
+
+# Manifest keys that travel with another variable rather than counting alone.
+_VARIABLE_OF_KEY = {
+    "inference_config": "model",
+    "contract_version": "condor_checkout",
+    "task_set_version": "case_set",
+}
+
+
+def _condor_identity(summary: dict) -> str | None:
+    """Commit + dirty state of the checkout a run measured, or None if unrecorded."""
+    condor = summary.get("condor") or {}
+    commit = condor.get("commit")
+    if not commit:
+        return None
+    return f"{commit}{'+dirty' if condor.get('dirty_files') else ''}"
+
+
+def varied_variables(members: list[dict[str, Any]]) -> list[str]:
+    """The distinct variables that differ across *members*, in a stable order."""
+    varied: list[str] = []
+
+    def _add(name: str) -> None:
+        if name not in varied:
+            varied.append(name)
+
+    if len({tuple(m.get("models") or [m.get("model")]) for m in members}) > 1:
+        _add("model")
+    condors = {_condor_identity(m) for m in members}
+    if len(condors) > 1 and None not in condors:
+        _add("condor_checkout")
+    if len({_case_set(m) for m in members}) > 1:
+        _add("case_set")
+    for key in diff_manifests(members):
+        _add(_VARIABLE_OF_KEY.get(key, f"manifest:{key}"))
+    return varied
+
+
 def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
-    """Compare 2+ member summaries. Returns comparable + differences + deltas."""
+    """Compare 2+ member summaries. Returns comparable + differences + deltas.
+
+    ``differences`` holds the reasons a comparison was refused and is empty when
+    it is comparable; ``variable_under_test`` names the one variable that
+    differs, or None when the members are identical.
+    """
     if len(members) < 2:
         return {
             "comparable": False,
@@ -48,14 +133,6 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
 
     differences: list[str] = []
 
-    models = {tuple(m.get("models") or [m.get("model")]) for m in members}
-    if len(models) > 1:
-        differences.append("model")
-
-    case_sets = {_case_set(m) for m in members}
-    if len(case_sets) > 1:
-        differences.append("case_set")
-
     if any(int(m.get("harness_artifacts") or 0) > 0 for m in members):
         differences.append("harness_artifacts")
 
@@ -63,12 +140,20 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
     if "skipped" in statuses or "failed" in statuses:
         differences.append("partial_group")
 
+    varied = varied_variables(members)
+    if len(varied) > 1:
+        differences.extend(varied)
+    manifest_diffs = diff_manifests(members)
+
     comparable = not differences
     deltas = _build_deltas(members) if comparable else None
 
     return {
         "comparable": comparable,
         "differences": differences,
+        "variable_under_test": varied[0] if len(varied) == 1 else None,
+        "varied": varied,
+        "manifest_diffs": manifest_diffs,
         "members": [
             {
                 "run_dir": m.get("run_dir"),
@@ -81,6 +166,7 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
                 "cases_scored": m.get("cases_scored"),
                 "n": m.get("cases_scored") or m.get("cases_total"),
                 "condor": m.get("condor"),
+                "manifest": m.get("manifest"),
             }
             for m in members
         ],

@@ -19,9 +19,10 @@ Three things are captured per case:
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -40,6 +41,78 @@ from condor_compat.acp.client import (
 from bench.mcp_provider import build_mcp_configs, wiring_metadata
 from bench.tool_digest import DEFAULT_DIGEST_CHARS, annotate_epochs, digest_tool_output
 from config import condor_path
+
+# ── Inference config ───────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class InferenceConfig:
+    """Generation parameters pinned for a run, read from ``BENCH_*`` env vars.
+
+    Unset means unset: ``None`` is recorded in the manifest and nothing is sent, so
+    the provider default applies and the manifest says so — rather than recording a
+    value the model never received. :meth:`model_settings` is what reaches the
+    pydantic-ai Agent; the ACP path cannot take it (see ``inference_ignored`` in
+    wiring metadata).
+    """
+
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    reasoning: bool | None = None
+    seed: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def model_settings(self) -> dict[str, Any]:
+        """pydantic-ai ``ModelSettings`` for the set fields only."""
+        out: dict[str, Any] = {
+            k: v
+            for k, v in (
+                ("temperature", self.temperature),
+                ("top_p", self.top_p),
+                ("max_tokens", self.max_tokens),
+                ("seed", self.seed),
+            )
+            if v is not None
+        }
+        if self.reasoning is not None:
+            out["thinking"] = self.reasoning
+        return out
+
+
+def inference_config() -> InferenceConfig:
+    """The current run's :class:`InferenceConfig`. An unparsable value raises.
+
+    A typo'd ``BENCH_TEMPERATURE=0,2`` silently becoming "provider default" would
+    put a lie in the manifest, so bad values fail loudly instead.
+    """
+
+    def _get(key: str, cast: Any) -> Any:
+        raw = os.environ.get(key)
+        if raw is None or not raw.strip():
+            return None
+        try:
+            return cast(raw.strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key}={raw!r} is not a valid {cast.__name__}") from exc
+
+    def _bool(raw: str) -> bool:
+        low = raw.lower()
+        if low in ("1", "true", "yes", "on"):
+            return True
+        if low in ("0", "false", "no", "off"):
+            return False
+        raise ValueError(raw)
+
+    _bool.__name__ = "bool"
+    return InferenceConfig(
+        temperature=_get("BENCH_TEMPERATURE", float),
+        top_p=_get("BENCH_TOP_P", float),
+        max_tokens=_get("BENCH_MAX_TOKENS", int),
+        reasoning=_get("BENCH_REASONING", _bool),
+        seed=_get("BENCH_SEED", int),
+    )
+
 
 # ── Agent instructions ─────────────────────────────────────────────────────────
 _AGENT_MD = Path(__file__).parent.parent / "condor_compat" / "agents" / "condor" / "AGENT.md"
@@ -620,6 +693,11 @@ async def _stream_turn(
     )
 
 
+def _inference_ignored(is_acp: bool) -> bool:
+    """True when pinned inference settings exist but the ACP path dropped them."""
+    return bool(is_acp and inference_config().model_settings())
+
+
 def _make_client(
     model: str,
     mcp_configs: list[dict],
@@ -667,6 +745,9 @@ def _make_client(
         kwargs["allowed_tools"] = list(allowed_tools)
     if priority_tools:
         kwargs["priority_tools"] = list(priority_tools)
+    settings = inference_config().model_settings()
+    if settings:
+        kwargs["model_settings"] = settings
     return PydanticAIClient(model=model, mcp_servers=mcp_configs, **kwargs), False
 
 
@@ -882,7 +963,10 @@ async def run_consult(
             offered_tools=getattr(client, "offered_tools", None),
             tools_truncated=bool(getattr(client, "tools_truncated", False)),
         )
-        | {"assistant_prompt": assistant_prompt_source(agent_slug) if agent_slug else None},
+        | {
+            "assistant_prompt": assistant_prompt_source(agent_slug) if agent_slug else None,
+            "inference_ignored": _inference_ignored(is_acp),
+        },
     )
 
 
@@ -949,7 +1033,8 @@ async def run_tick(
             tool_scope=agent_tool_scope(agent_slug, allowed_tools),
             offered_tools=getattr(client, "offered_tools", None),
             tools_truncated=bool(getattr(client, "tools_truncated", False)),
-        ),
+        )
+        | {"inference_ignored": _inference_ignored(is_acp)},
     )
 
 

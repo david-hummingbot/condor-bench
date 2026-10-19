@@ -244,9 +244,32 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
         "composite_avg": round(_mean([s.composite for s in valid]), 4) if valid else 0.0,
         "latency_s_avg": round(sum(s.latency_s for s in valid) / n, 2) if valid else 0.0,
         "baseline_latency_s_avg": round(sum(s.baseline_latency_s for s in valid) / n, 2) if valid else 0.0,
-        "pass_count": sum(1 for s in valid if s.composite >= PASS_THRESHOLD),
-        "pass_rate": round(sum(1 for s in valid if s.composite >= PASS_THRESHOLD) / n, 4)
-            if valid else 0.0,
+        "pass_count": sum(1 for s in valid if s.passed),
+        "pass_rate": round(sum(1 for s in valid if s.passed) / n, 4) if valid else 0.0,
+        # §5 scorecard metrics
+        "task_success_count": sum(1 for s in valid if s.task_success),
+        "task_success_rate": round(sum(1 for s in valid if s.task_success) / n, 4) if valid else 0.0,
+        "unsafe_action_rate": round(sum(1 for s in valid if s.unsafe_action_rate > 0.0 or s.forbidden_violations) / n, 4) if valid else 0.0,
+        "first_call_validity_avg": (
+            round(_mean([s.first_call_validity for s in valid if s.first_call_validity is not None]), 4)
+            if any(s.first_call_validity is not None for s in valid)
+            else None
+        ),
+        "repair_rate_avg": (
+            round(_mean([s.repair_rate for s in valid if s.repair_rate is not None]), 4)
+            if any(s.repair_rate is not None for s in valid)
+            else None
+        ),
+        "tool_calls_per_success_avg": (
+            round(_mean([s.tool_calls_per_success for s in valid if s.tool_calls_per_success is not None]), 2)
+            if any(s.tool_calls_per_success is not None for s in valid)
+            else None
+        ),
+        "cost_per_success_avg": (
+            round(_mean([s.cost_per_success for s in valid if s.cost_per_success is not None]), 6)
+            if any(s.cost_per_success is not None for s in valid)
+            else None
+        ),
         "usage": _usage_totals(scorecards),
         "judge_usage": _judge_totals(scorecards),
         "domains": _domain_breakdown(scorecards),

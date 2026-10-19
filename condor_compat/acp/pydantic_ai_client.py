@@ -415,6 +415,9 @@ class PydanticAIClient:
         priority_tools: (
             list[str] | None
         ) = None,  # bench-only: keep these first when the count cap cuts
+        model_settings: (
+            dict[str, Any] | None
+        ) = None,  # bench-only: pinned inference params (see bench.client.InferenceConfig)
     ):
         self.model_name = model
         self.mcp_server_configs = mcp_servers or []
@@ -428,6 +431,10 @@ class PydanticAIClient:
         # an unavoidable count cut a tool lands on — see _prepare_tools. Never a
         # filter: nothing is added or removed by being named here.
         self.priority_tools = set(priority_tools) if priority_tools else None
+        # Bench-only: the run's pinned inference parameters. Without them every
+        # request inherits the provider's defaults, and the manifest would record
+        # settings the model never received.
+        self.model_settings = dict(model_settings) if model_settings else None
         # Populated by _prepare_tools on the first model request: the tool names
         # actually offered, after the allowlist and the count cap. None until then,
         # which is distinct from "offered nothing".
@@ -697,7 +704,12 @@ class PydanticAIClient:
         # Always wire up _prepare_tools: it enforces both the allowed_tools
         # allowlist (production) and the _TOOL_LIMITS cap (bench safety net
         # so local models aren't overwhelmed by 20 full MCP tool schemas).
-        self._agent = Agent(model, toolsets=toolsets, prepare_tools=self._prepare_tools)
+        self._agent = Agent(
+            model,
+            toolsets=toolsets,
+            prepare_tools=self._prepare_tools,
+            model_settings=self.model_settings,
+        )
 
         # Resolve the global semaphore for this server's base URL so all client
         # instances targeting the same local inference server share one request

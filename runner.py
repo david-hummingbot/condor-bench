@@ -256,9 +256,10 @@ def test(
     from bench.dataset import case_prompt_map, filter_cases, load_all_cases
     from bench.market_resolver import bindings_summary, unresolvable_card
     from bench.mcp_provider import target_banner
+    from bench.manifest import build_manifest
     from bench.reporter import save_run
     from bench.staging_health import StagingUnhealthy, assert_ready
-    from config import PASS_THRESHOLD, build_run_pin
+    from config import PASS_THRESHOLD
 
     try:
         assert_ready()
@@ -312,7 +313,7 @@ def test(
         unresolvable_card(case, model, resolutions[case.id]) for case in market_skips
     ] + scorecards
 
-    pin = build_run_pin(
+    pin = build_manifest(
         run_type="adhoc",
         case_ids=[c.id for c in cases],
         models=[model],
@@ -587,11 +588,12 @@ def sweep(
     from bench.baseline import BaselineStore
     from bench.dataset import case_prompt_map, filter_cases, load_all_cases
     from bench.market_resolver import bindings_summary, unresolvable_card
+    from bench.manifest import build_manifest
     from bench.matrix import load_models
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.staging_health import StagingUnhealthy, assert_ready
-    from config import PASS_THRESHOLD, build_run_pin
+    from config import PASS_THRESHOLD
 
     try:
         assert_ready()
@@ -658,11 +660,11 @@ def sweep(
         if not scorecards:
             console.print("  [yellow]no cases scored — skipping save[/yellow]")
             continue
-        pin = build_run_pin(
+        pin = build_manifest(
             run_type="adhoc",
             case_ids=[c.id for c in cases],
             models=[entry.key],
-                shared_loaded=True,
+            shared_loaded=True,
         )
         pin["sweep"] = True
         pin["market_bindings"] = bindings_summary(resolutions)
@@ -1015,6 +1017,8 @@ def suite_list() -> None:
 def suite_run_cmd(
     suite_id: str = typer.Argument(..., help="Suite id"),
     case_ids: Optional[str] = typer.Option(None, help="Comma-separated case ids"),
+    adhoc: bool = typer.Option(False, "--adhoc", help="Run ad-hoc (bypasses A/B freeze rules)"),
+    experiment: Optional[str] = typer.Option(None, "--experiment", help="Experiment type: A, B, or adhoc"),
 ) -> None:
     """Run a suite across its environments via subprocess workers."""
     import uuid
@@ -1033,6 +1037,8 @@ def suite_run_cmd(
             parent_run_id=run_id,
             emit=emit,
             case_ids=ids,
+            experiment_type=experiment,
+            adhoc=adhoc,
         )
 
     result = asyncio.run(_go())

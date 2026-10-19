@@ -1,0 +1,36 @@
+# Experiment A preset — "Did Condor improve?"
+#
+# Freeze the model.  Vary Condor checkouts via Environments.
+# Suites load this file; the freeze rules are enforced at start time.
+#
+# Usage:
+#   1. Create two Environments pointing at different Condor checkouts.
+#   2. Create a Suite, attach both Environments and one model.
+#   3. Set experiment_type: A on the suite (or BENCH_EXPERIMENT_TYPE=A).
+#   4. Run.  Compare will refuse if the manifests differ in more than the
+#      Condor checkout.
+
+experiment_type: A
+
+# The model and inference config are frozen.  Every suite member MUST use
+# exactly these values; a mismatch fails at start.
+freeze:
+  model_id: "anthropic:claude-sonnet-5"
+  inference_config:
+    temperature: null     # provider default — document, don't guess
+    top_p: null
+    max_tokens: null
+    reasoning: null
+    seed: null
+
+# What is allowed to vary across suite members:
+vary:
+  - condor_checkout       # different Environments point at different commits
+  - contract_version      # follows from the checkout
+
+# Tags to run.  Omit for the full library.
+tags: null
+
+# Number of trials per case (Phase 2).  Recorded in the manifest so a 1-trial
+# debug run cannot be compared with a 3-trial run.
+# trials: 3

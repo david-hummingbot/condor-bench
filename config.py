@@ -14,10 +14,8 @@ ROOT = Path(__file__).parent
 #
 # This has now caused three separate wrong answers: a maintenance script that would
 # have deleted from the wrong checkout, and two analyses that reported an agent as
-# having no tool grant because the fallback clone predates it. It also removes an
-# accidental dependency — under pytest the only reason .env was loaded at all is that
-# importing deepeval calls load_dotenv() as a side effect, so dropping an unrelated
-# test dependency would have silently changed which condor every drift check read.
+# having no tool grant because the fallback clone predates it. We load .env
+# explicitly here via python-dotenv.
 try:
     from dotenv import load_dotenv
 
@@ -233,12 +231,22 @@ def summary_counts_for_matrix(summary: dict) -> bool:
     """Whether a persisted run should feed the matrix / router.
 
     Suite runs and custom-prompt runs are excluded unless they explicitly opt in
-    via ``include_in_matrix: true``. Hand-edited suite cases must not silently
+    via ``include_in_matrix: true`` — and ad-hoc dashboard or suite runs are
+    excluded even then. Hand-edited suite cases must not silently
     reshape routing recommendations.
     """
+    run_type = summary.get("run_type")
+    # Ad-hoc dashboard and suite runs never feed the published frontier: only an
+    # A/B preset freezes enough to make them evidence. CLI test/sweep stay in — they
+    # are the documented way to build the matrix. Summaries from before the
+    # manifest existed carry no experiment_type and keep their old treatment.
+    exp_type = (summary.get("manifest") or {}).get("experiment_type")
+    if exp_type == "adhoc" and (
+        summary.get("source") == "dashboard" or run_type == "suite" or summary.get("suite_id")
+    ):
+        return False
     if summary.get("include_in_matrix") is True:
         return True
-    run_type = summary.get("run_type")
     if run_type in ("suite", "custom_prompt", "custom", "custom-prompt"):
         return False
     if summary.get("suite_id"):
@@ -316,16 +324,21 @@ def staging_config() -> dict[str, object]:
     }
 
 
-# ── Composite score weights ────────────────────────────────────────────────────
-# Real API responses make param correctness and response shape meaningful, so
-# tool-name F1 shares weight with them rather than carrying the tool signal alone.
-SCORE_WEIGHTS = {
+# ── Score Profile & Weights ──────────────────────────────────────────────────
+# SCORE_PROFILE can be 'default' (outcome-first scorecard) or 'legacy_routing'.
+# Deprecation notice: 'legacy_routing' profile is preserved for historical compatibility
+# and will be deleted in release v2.0.
+SCORE_PROFILE = os.environ.get("SCORE_PROFILE", "default").strip().lower()
+
+LEGACY_SCORE_WEIGHTS = {
     "answer_quality": 0.45,
     "tool_accuracy": 0.20,
     "tool_params": 0.15,
     "live_validity": 0.10,
     "latency_score": 0.10,
 }
+
+SCORE_WEIGHTS = dict(LEGACY_SCORE_WEIGHTS)
 
 # Latency floor: even the slowest model gets at least this score
 LATENCY_FLOOR = 0.1

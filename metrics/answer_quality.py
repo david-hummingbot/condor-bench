@@ -85,11 +85,17 @@ class _ScoreResult(BaseModel):
     reason: str
 
 
-def _parse(raw: str) -> tuple[float, str]:
+def _parse(raw: str) -> tuple[float | None, str]:
     text = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     data = json.loads(text)
-    score = max(0.0, min(1.0, float(data["score"])))
-    return score, str(data.get("reason", ""))
+    raw_score = data.get("score")
+    if raw_score is None or str(raw_score).strip().lower() in ("null", "none", "unknown", "n/a"):
+        return None, str(data.get("reason", "unknown"))
+    try:
+        score = max(0.0, min(1.0, float(raw_score)))
+        return score, str(data.get("reason", ""))
+    except (ValueError, TypeError):
+        return None, str(data.get("reason", "unknown score"))
 
 
 def is_infra_failure(text: str) -> bool:
@@ -148,7 +154,7 @@ def _build_prompt(input_text: str, actual_output: str) -> str:
         f"USER INPUT:\n{input_text[:JUDGE_QUESTION_CHARS]}\n\n"
         f"ACTUAL RESPONSE / TRANSCRIPT:\n{actual_output[:JUDGE_INPUT_CHARS]}\n\n"
         "Rate this response. Reply with JSON only, no markdown:\n"
-        '{"score": <float 0.0–1.0>, "reason": "<one sentence>"}'
+        '{"score": <float 0.0–1.0 or null if unknown>, "reason": "<one sentence>"}'
     )
 
 

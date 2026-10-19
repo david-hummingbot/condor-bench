@@ -1,0 +1,32 @@
+# Experiment B preset — "Which model is best?"
+#
+# Freeze Condor.  Vary models.
+# Suites load this file; the freeze rules are enforced at start time.
+#
+# Usage:
+#   1. Create one Environment pointing at the pinned Condor checkout.
+#   2. Create a Suite, attach the Environment and multiple models.
+#   3. Set experiment_type: B on the suite (or BENCH_EXPERIMENT_TYPE=B).
+#   4. Run.  Compare will refuse if the manifests differ in more than the
+#      model.
+
+experiment_type: B
+
+# Condor is frozen.  The tree must be clean and the commit must match the pin.
+# A local --adhoc opt-out exists and marks the run experiment_type: adhoc.
+freeze:
+  condor_commit: null     # filled by the operator; null = any clean commit
+  require_clean: true
+  contract_version: null  # filled at run time from the checkout
+  # Prompt and guide hashes are computed from the checkout.
+
+# What is allowed to vary across suite members:
+vary:
+  - model_id
+  - inference_config      # each model may use its own supported params
+
+# Tags to run.  Omit for the full library.
+tags: null
+
+# Number of trials per case (Phase 2).
+# trials: 3

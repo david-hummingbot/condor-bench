@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import uuid
+import subprocess
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -15,6 +16,146 @@ from config import ROOT
 
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
 WaitFn = Callable[[], Awaitable[None]]
+
+
+class FreezeViolationError(ValueError):
+    """Raised when an Experiment A or B freeze invariant is violated."""
+
+
+_INFERENCE_ENV = {
+    "temperature": "BENCH_TEMPERATURE",
+    "top_p": "BENCH_TOP_P",
+    "max_tokens": "BENCH_MAX_TOKENS",
+    "reasoning": "BENCH_REASONING",
+    "seed": "BENCH_SEED",
+}
+
+
+def _model_key(cfg: dict[str, Any]) -> str | None:
+    return cfg.get("model_key") or cfg.get("key")
+
+
+def effective_inference(model_cfg: dict[str, Any]) -> dict[str, Any]:
+    """The inference config a member will run with: env defaults + per-model overrides."""
+    from bench.client import inference_config  # noqa: PLC0415 — heavy import
+
+    base = inference_config().as_dict()
+    for key, value in (model_cfg.get("inference_config") or {}).items():
+        if key in base and value is not None:
+            base[key] = value
+    return base
+
+
+def _git(condor_p: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args], cwd=condor_p, capture_output=True, text=True
+    )
+
+
+def _canon(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def check_experiment_freeze(
+    suite: dict[str, Any],
+    env_ids: list[str],
+    model_cfgs: list[dict[str, Any]],
+    *,
+    experiment_type: str | None = None,
+    adhoc: bool = False,
+) -> str:
+    """Validate Experiment A or B freeze invariants before running members.
+
+    Returns the effective experiment type: 'A', 'B', or 'adhoc'. ``suite["freeze"]``
+    carries the preset's pins (see ``experiments/*.yaml``): ``model_id`` and
+    ``inference_config`` for A, ``condor_commit`` for B.
+    """
+    if adhoc:
+        return "adhoc"
+
+    exp_type = (
+        experiment_type
+        or suite.get("experiment_type")
+        or os.environ.get("BENCH_EXPERIMENT_TYPE")
+        or "adhoc"
+    ).strip()
+    if exp_type not in ("A", "B", "adhoc"):
+        raise FreezeViolationError(
+            f"Unknown experiment type {exp_type!r} — expected 'A', 'B' or 'adhoc'."
+        )
+    freeze = suite.get("freeze") or {}
+    hint = "Pass --adhoc to run as an ad-hoc experiment."
+
+    if exp_type == "A":
+        # Freeze model & inference; vary Condor checkouts via environments.
+        models = {_model_key(m) for m in model_cfgs if _model_key(m)}
+        if len(models) > 1:
+            raise FreezeViolationError(
+                f"Experiment A freeze violation: expected a single frozen model, but found {sorted(models)}. "
+                f"Experiment A freezes the model and varies the Condor checkout. {hint}"
+            )
+        pinned_model = freeze.get("model_id")
+        if pinned_model and models and models != {pinned_model}:
+            raise FreezeViolationError(
+                f"Experiment A freeze violation: preset pins model '{pinned_model}', "
+                f"suite runs {sorted(models)}. {hint}"
+            )
+        configs = {_canon(effective_inference(m)) for m in model_cfgs}
+        if len(configs) > 1:
+            raise FreezeViolationError(
+                "Experiment A freeze violation: members would run with different "
+                f"inference configs ({sorted(configs)}). Experiment A freezes inference "
+                f"parameters along with the model. {hint}"
+            )
+        pinned_inf = freeze.get("inference_config")
+        if pinned_inf is not None:
+            for m in model_cfgs:
+                actual = effective_inference(m)
+                wrong = {
+                    k: (v, actual.get(k))
+                    for k, v in pinned_inf.items()
+                    if k in actual and actual.get(k) != v
+                }
+                if wrong:
+                    raise FreezeViolationError(
+                        "Experiment A freeze violation: inference config differs from the "
+                        f"preset pin (pinned, actual): {wrong}. {hint}"
+                    )
+    elif exp_type == "B":
+        # Freeze Condor; vary models.
+        if len(env_ids) > 1:
+            raise FreezeViolationError(
+                f"Experiment B freeze violation: expected a single frozen Condor environment, but found {env_ids}. "
+                f"Experiment B freezes the Condor environment and varies models. {hint}"
+            )
+        for env_id in env_ids:
+            env = get_environment(env_id)
+            condor_p = Path(env["condor_path"])
+            # A checkout that cannot be inspected cannot be shown to be frozen.
+            if not condor_p.is_dir():
+                raise FreezeViolationError(
+                    f"Experiment B freeze violation: Condor checkout '{condor_p}' does not exist. {hint}"
+                )
+            status = _git(condor_p, "status", "--porcelain")
+            if status.returncode != 0:
+                raise FreezeViolationError(
+                    f"Experiment B freeze violation: cannot read git state of '{condor_p}' "
+                    f"({status.stderr.strip() or 'not a git checkout'}). {hint}"
+                )
+            if status.stdout.strip():
+                raise FreezeViolationError(
+                    f"Experiment B freeze violation: Condor checkout at '{condor_p}' has uncommitted changes. "
+                    f"Experiment B freezes Condor and requires a clean checkout. {hint}"
+                )
+            pinned = freeze.get("condor_commit") or env.get("expected_commit")
+            if pinned:
+                head = _git(condor_p, "rev-parse", "HEAD").stdout.strip()
+                if not head.startswith(str(pinned)):
+                    raise FreezeViolationError(
+                        f"Experiment B freeze violation: Condor at '{condor_p}' is on {head[:12] or 'unknown'}, "
+                        f"but the pin is {pinned}. {hint}"
+                    )
+    return exp_type
 
 
 async def run_suite(
@@ -27,6 +168,8 @@ async def run_suite(
     models: list[dict[str, Any]] | None = None,
     cancel_event: asyncio.Event | None = None,
     wait_if_paused: WaitFn | None = None,
+    experiment_type: str | None = None,
+    adhoc: bool = False,
 ) -> dict[str, Any]:
     """Fan out suite × environments × models via subprocess workers.
 
@@ -41,6 +184,15 @@ async def run_suite(
     model_cfgs = models or list(suite.get("models") or [])
     if not model_cfgs:
         raise ValueError("Suite has no models configured")
+
+    # Enforce A/B freeze rules before scheduling members
+    effective_exp_type = check_experiment_freeze(
+        suite,
+        env_ids,
+        model_cfgs,
+        experiment_type=experiment_type,
+        adhoc=adhoc,
+    )
 
     run_group_id = uuid.uuid4().hex
     members_plan: list[tuple[dict, dict]] = []
@@ -117,7 +269,11 @@ async def run_suite(
             "case_ids": case_ids,
             "include_in_matrix": bool(suite.get("include_in_matrix", False)),
             "expected_branch": env.get("expected_branch"),
+            "expected_commit": (
+                (suite.get("freeze") or {}).get("condor_commit") or env.get("expected_commit")
+            ),
             "require_clean": bool(env.get("require_clean", True)),
+            "experiment_type": effective_exp_type,
         }
         job_path = Path(tempfile.mkstemp(prefix="suite_job_", suffix=".json")[1])
         job_path.write_text(json.dumps(job))
@@ -138,6 +294,11 @@ async def run_suite(
                 env_vars["OPENAI_API_KEY"] = str(model_cfg["api_key"])
         if model_cfg.get("base_url"):
             env_vars["OPENAI_BASE_URL"] = str(model_cfg["base_url"])
+        # Per-model inference overrides reach the worker the same way the run-wide
+        # BENCH_* settings do, so the worker's manifest records what it ran with.
+        for key, value in (model_cfg.get("inference_config") or {}).items():
+            if key in _INFERENCE_ENV and value is not None:
+                env_vars[_INFERENCE_ENV[key]] = str(value)
 
         worker = ROOT / "scripts" / "suite_worker.py"
         try:
