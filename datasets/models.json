@@ -3,7 +3,7 @@
   "_fields": {
     "key": "agent_key as condor would configure it (provider:model)",
     "params_b": "parameter count in billions; null for cloud models, which sort last",
-    "provider": "local | cloud",
+    "provider": "local | cloud (NVIDIA NIM rows are cloud: unpriced, so the router never ranks them as free)",
     "tool_filter_mode": "essential | moderate | full — omit to let _infer_tool_filter_mode() decide, which is what production does",
     "notes": "why this model is in the sweep"
   },
@@ -73,6 +73,30 @@
       "params_b": null,
       "provider": "cloud",
       "notes": "Claude Code CLI over the ACP transport. Bare key (no provider prefix) — the CLI picks its own model. provider=cloud so it sorts last and does not count as a local pass in bench/routing.py."
+    },
+    {
+      "key": "nvidia:openai/gpt-oss-20b",
+      "params_b": 20,
+      "provider": "cloud",
+      "notes": "NVIDIA NIM hosted catalog — functional-only: shared capacity and rate limits make its wall clock unrepresentative, so latency is excluded (bench/nim.py). Passed nim-smoke 2026-10-20."
+    },
+    {
+      "key": "nvidia:nvidia/nemotron-3.5-lightning-30b-a3b",
+      "params_b": 30,
+      "provider": "cloud",
+      "notes": "NVIDIA NIM hosted catalog — functional-only: shared capacity and rate limits make its wall clock unrepresentative, so latency is excluded (bench/nim.py). Passed nim-smoke 2026-10-20. MoE, ~3B active."
+    },
+    {
+      "key": "nvidia:google/gemma-4-31b-it",
+      "params_b": 31,
+      "provider": "cloud",
+      "notes": "NVIDIA NIM hosted catalog — functional-only: shared capacity and rate limits make its wall clock unrepresentative, so latency is excluded (bench/nim.py). Passed nim-smoke 2026-10-20."
+    },
+    {
+      "key": "nvidia:nvidia/nemotron-3-super-120b-a12b",
+      "params_b": 120,
+      "provider": "cloud",
+      "notes": "NVIDIA NIM hosted catalog — functional-only: shared capacity and rate limits make its wall clock unrepresentative, so latency is excluded (bench/nim.py). Passed nim-smoke 2026-10-20. MoE, ~12B active."
     }
   ]
 }

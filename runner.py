@@ -505,6 +505,9 @@ async def _run_cases(cases, model: str, store, trials: int = 1):
             label = f" [dim]t{trial}/{trials}[/dim]" if trials > 1 else ""
             console.print(f"  [dim]{case.id}[/dim] ({case.type}){label}", end=" ")
             await _run_trial(case, model, store, trial, scorecards, responses)
+    from bench.traces import flush
+
+    flush()
     return scorecards, responses
 
 
@@ -515,6 +518,7 @@ async def _run_trial(case, model: str, store, trial: int, scorecards: list, resp
     from bench.dataset import is_mutating
     from bench.reporter import trial_key
     from bench.scorer import harness_card, score_case, timeout_card, with_trial
+    from bench.traces import case_span
     from config import PASS_THRESHOLD, case_timeout_s, staging_config
 
     if staging_config().get("env_mode") == "mock":
@@ -532,9 +536,12 @@ async def _run_trial(case, model: str, store, trial: int, scorecards: list, resp
         # proportional to how slow it has always been.
         baseline = store.load(case.id)
         timeout_s = case_timeout_s(baseline.latency_s if baseline else None)
-        result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
+        lane = str(staging_config().get("env_mode") or "live")
+        with case_span(case.id, trial=trial, model=model, lane=lane) as trace_link:
+            result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
         baseline_latency = baseline.latency_s if baseline else result.latency_s
         card = await score_case(case, result, baseline_latency, trial_idx=trial)
+        card.trace_id, card.trace_url = trace_link["trace_id"], trace_link["trace_url"]
         if staging_config().get("env_mode") == "mock":
             _flag_mock_gaps(card)
         scorecards.append(card)
@@ -1151,7 +1158,7 @@ def report() -> None:
             f"{r.get('answer_quality_avg', 0):.2f}" if r.get("answer_quality_avg") is not None else "—",
             f"{r.get('tool_accuracy_avg', 0):.2f}" if r.get("tool_accuracy_avg") is not None else "—",
             f"{r.get('tool_params_avg', 0):.2f}" if r.get("tool_params_avg") is not None else "—",
-            f"{r.get('latency_score_avg', 0):.2f}",
+            f"{r['latency_score_avg']:.2f}" if r.get("latency_score_avg") is not None else "n/a",
             f"{avg_tokens:,.0f}" if avg_tokens else "—",
             str(r.get("cases_scored", "?")),
         )
@@ -1187,14 +1194,22 @@ def _print_summary(scorecards, model: str, pass_threshold: float) -> None:
     console.print(f"  Tool accuracy:  {_avg('tool_accuracy')}")
     console.print(f"  Tool params:    {_avg('tool_params')}")
     console.print(f"  Live validity:  {_avg('live_validity')}")
-    console.print(f"  Latency score:  {sum(s.latency_score for s in valid)/n:.3f}")
+    scored_latency = [s.latency_score for s in valid if s.latency_score is not None]
+    console.print(
+        f"  Latency score:  {sum(scored_latency)/len(scored_latency):.3f}"
+        if scored_latency
+        else "  Latency score:  n/a [dim](provider latency not representative — excluded)[/dim]"
+    )
     from bench.stats import median, percentile_95
 
-    lat = [s.latency_s for s in valid]
-    console.print(
-        f"  Latency:        mean {sum(lat)/n:.1f}s, median {median(lat) or 0:.1f}s, "
-        f"p95 {percentile_95(lat) or 0:.1f}s"
-    )
+    lat = [s.latency_s for s in valid if s.latency_representative]
+    if lat:
+        console.print(
+            f"  Latency:        mean {sum(lat)/len(lat):.1f}s, median {median(lat) or 0:.1f}s, "
+            f"p95 {percentile_95(lat) or 0:.1f}s"
+        )
+    else:
+        console.print("  Latency:        n/a [dim](hosted endpoint — wall clock not representative)[/dim]")
     from bench import stats
 
     passes = sum(1 for s in valid if s.passed)
@@ -1294,6 +1309,132 @@ def suite_run_cmd(
     console.print(f"[bold]run_group_id[/bold] {result['run_group_id']}")
     for m in result["members"]:
         console.print(f"  {m}")
+
+
+LADDER_RUNGS = ("l0", "l1")
+#: L1 is single-tool calling on what the mock serves: the trading reads, creates
+#: and executor management. Bots, controllers, DEX and platform tools need the
+#: live lane (L2), where routing is published from.
+L1_CATEGORIES = ("market_reads", "order_creation", "executor_lifecycle")
+
+
+@app.command()
+def ladder(
+    model: Optional[str] = typer.Argument(None, help="Model for L1 and up (L0 needs none)"),
+    upto: str = typer.Option("l0", "--upto", help="Highest rung to run: l0 | l1"),
+    trials: int = typer.Option(1, "--trials", min=1, help="Trials per L1 case"),
+) -> None:
+    """Climb the evaluation ladder on the mock lane, stopping at the first failed rung.
+
+    L0 — Condor's tool contract, no model: every measured tool's schema compiles,
+    and missing or out-of-enum arguments are rejected in a stable, scoreable form.
+    L1 — one model on the single-tool cases the mock serves.
+
+    Defaults to the mock lane. ``BENCH_ENV_MODE=live`` is honoured only with a
+    passing staging pre-flight.
+    """
+    import json as _json
+    import uuid
+
+    from bench.staging_health import StagingUnhealthy, assert_ready
+
+    if upto not in LADDER_RUNGS:
+        console.print(f"[red]--upto must be one of {', '.join(LADDER_RUNGS)}[/red]")
+        raise typer.Exit(2)
+    rungs = LADDER_RUNGS[: LADDER_RUNGS.index(upto) + 1]
+    if "l1" in rungs and not model:
+        console.print("[red]L1 needs a model: runner.py ladder <model> --upto l1[/red]")
+        raise typer.Exit(2)
+
+    lane = _enter_lane("mock")
+    try:
+        assert_ready()
+    except StagingUnhealthy as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    from config import RESULTS_DIR
+
+    ladder_id = uuid.uuid4().hex[:8]
+    out_dir = RESULTS_DIR / f"ladder_{ladder_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    from eval.l0_contracts.contracts import format_report, run_l0
+
+    l0 = asyncio.run(run_l0())
+    (out_dir / "l0.json").write_text(_json.dumps({**l0, "env_mode": lane}, indent=2))
+    console.print(format_report(l0))
+    if l0["failed"]:
+        console.print(f"[red]L0 failed — not climbing to {upto}.[/red] Report: {out_dir / 'l0.json'}")
+        raise typer.Exit(1)
+    if "l1" not in rungs:
+        console.print(f"[green]L0 passed.[/green] Report: {out_dir / 'l0.json'}")
+        return
+
+    from bench.baseline import BaselineStore
+    from bench.dataset import filter_cases, load_all_cases
+    from bench.manifest import build_manifest
+    from bench.reporter import save_run
+
+    cases = filter_cases(
+        load_all_cases(), layers=["tool"], task_categories=L1_CATEGORIES,
+        splits=["dev", "regression"],
+    )
+    cases = _cases_for_lane(cases)
+    cases, resolutions, market_skips = _bind_markets(cases, False)
+    store = BaselineStore()
+    console.print(f"\nL1: [bold]{model}[/bold] on {len(cases)} single-tool case(s) × {trials} trial(s)")
+    scorecards, responses = asyncio.run(_run_cases(cases, model, store, trials))
+    pin = build_manifest(
+        run_type="ladder", case_ids=[c.id for c in cases], models=[model],
+        shared_loaded=True, trials=trials, cases=cases,
+    )
+    pin["ladder"] = {"id": ladder_id, "rung": "l1", "l0_report": str(out_dir / "l0.json")}
+    run_dir = save_run(model, scorecards, responses, f"{ladder_id}l1", extra_summary=pin)
+    from config import PASS_THRESHOLD
+
+    _print_summary(scorecards, model, PASS_THRESHOLD)
+    console.print(f"\n[bold]L1 run saved:[/bold] {run_dir}")
+
+
+@app.command("nim-smoke")
+def nim_smoke(
+    models: Optional[str] = typer.Argument(
+        None, help="Comma-separated nvidia:* keys (default: every nvidia:* model in the registry)"
+    ),
+) -> None:
+    """Gate NVIDIA NIM models before a sweep: listed, real tool call, bench-sized context.
+
+    A catalog listing is not proof a model is callable — several listed models
+    answer 404 for a given account — so run this before adding one to a sweep.
+    """
+    from bench.matrix import load_models
+    from bench.nim import is_nim_model, smoke
+
+    keys = (
+        [k.strip() for k in models.split(",") if k.strip()]
+        if models
+        else [m.key for m in load_models() if is_nim_model(m.key)]
+    )
+    if not keys:
+        console.print("[yellow]No nvidia:* models given or registered.[/yellow]")
+        raise typer.Exit(1)
+
+    async def _go():
+        return [await smoke(k) for k in keys]
+
+    results = asyncio.run(_go())
+    table = Table(title="NIM smoke")
+    for col in ("model", "listed", "tool call", "context", "verdict"):
+        table.add_column(col)
+    for r in results:
+        table.add_row(
+            r.model, r.detail.get("listed", ""), r.detail.get("tool_call", "—"),
+            r.detail.get("context", "—"), "[green]ok[/green]" if r.ok else "[red]fail[/red]",
+        )
+    console.print(table)
+    if not all(r.ok for r in results):
+        raise typer.Exit(1)
 
 
 @app.command("mock-serve")

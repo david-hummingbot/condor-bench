@@ -693,6 +693,12 @@ async def _stream_turn(
     )
 
 
+def _provider_log(client: Any) -> dict[str, Any] | None:
+    """Per-call HTTP evidence from providers that record it (NVIDIA NIM), else None."""
+    recorder = getattr(client, "provider_log", None)
+    return recorder.summary() if recorder is not None else None
+
+
 def _inference_ignored(is_acp: bool) -> bool:
     """True when pinned inference settings exist but the ACP path dropped them."""
     return bool(is_acp and inference_config().model_settings())
@@ -966,6 +972,7 @@ async def run_consult(
         | {
             "assistant_prompt": assistant_prompt_source(agent_slug) if agent_slug else None,
             "inference_ignored": _inference_ignored(is_acp),
+            "provider_log": _provider_log(client),
         },
     )
 
@@ -1034,7 +1041,7 @@ async def run_tick(
             offered_tools=getattr(client, "offered_tools", None),
             tools_truncated=bool(getattr(client, "tools_truncated", False)),
         )
-        | {"inference_ignored": _inference_ignored(is_acp)},
+        | {"inference_ignored": _inference_ignored(is_acp), "provider_log": _provider_log(client)},
     )
 
 

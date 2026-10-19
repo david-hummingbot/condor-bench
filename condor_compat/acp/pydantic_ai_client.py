@@ -135,6 +135,8 @@ PYDANTIC_AI_PREFIXES = frozenset(
         "google",
         "lmstudio",
         "openrouter",
+        # Bench-only: NVIDIA NIM hosted catalog (build.nvidia.com). See bench/nim.py.
+        "nvidia",
         # A saved custom endpoint (``custom@venice:llama-3.3-70b``). Read through
         # ``model_prefix``, which strips the ``@nickname`` — the raw split leaves
         # ``custom@venice``, which matches nothing.
@@ -147,6 +149,9 @@ DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    # Bench-only. Listed here so resolve_base_url gives NIM a server semaphore:
+    # one request in flight per process, which is what its rate limits allow.
+    "nvidia": "https://integrate.api.nvidia.com/v1",
 }
 
 
@@ -431,6 +436,8 @@ class PydanticAIClient:
         # an unavoidable count cut a tool lands on — see _prepare_tools. Never a
         # filter: nothing is added or removed by being named here.
         self.priority_tools = set(priority_tools) if priority_tools else None
+        # Bench-only: per-call HTTP evidence for providers that need it (NIM).
+        self.provider_log: Any = None
         # Bench-only: the run's pinned inference parameters. Without them every
         # request inherits the provider's defaults, and the manifest would record
         # settings the model never received.
@@ -528,6 +535,27 @@ class PydanticAIClient:
                 base_url=base_url or DEFAULT_BASE_URLS["openrouter"],
                 api_key=api_key,
                 timeout=_local_timeout,
+            )
+            return _make_openai_compat_model(
+                model_id, OpenAIProvider(openai_client=openai_client)
+            )
+
+        # Bench-only: NVIDIA NIM. OpenAI-compatible, keyed, rate-limited. Handled
+        # before the generic branch (which sends api_key="not-needed"), with SDK
+        # retries for 429s and an httpx recorder so every exchange — retries
+        # included — lands in the trial's evidence (bench/nim.py).
+        if prefix == "nvidia":
+            from bench import nim  # noqa: PLC0415 — bench-only provider
+
+            if not model_id:
+                raise RuntimeError("NIM requires a catalog id, e.g. 'nvidia:openai/gpt-oss-20b'.")
+            self.provider_log = nim.CallRecorder()
+            openai_client = AsyncOpenAI(
+                base_url=base_url or nim.base_url(),
+                api_key=nim.api_key(),
+                max_retries=nim.NIM_MAX_RETRIES,
+                timeout=_local_timeout,
+                http_client=self.provider_log.http_client(_local_timeout),
             )
             return _make_openai_compat_model(
                 model_id, OpenAIProvider(openai_client=openai_client)
@@ -1238,6 +1266,16 @@ class PydanticAIClient:
                 "OpenRouter rate-limited the request (429). Free models share a "
                 "tighter quota — wait a moment and retry, or switch to a paid model."
             )
+        if self.model_name.startswith("nvidia:"):
+            if status == 401:
+                return "NVIDIA NIM rejected the API key (401). Check NVIDIA_API_KEY in .env."
+            if status == 404:
+                return (
+                    "NVIDIA NIM: this model is listed but not enabled for the account (404). "
+                    "Run `runner.py nim-smoke` to see which catalog models are callable."
+                )
+            if status == 429:
+                return "NVIDIA NIM rate-limited the request (429) after retries."
         if is_openrouter and status and 500 <= status < 600:
             return (
                 f"OpenRouter upstream error ({status}). The selected provider may "

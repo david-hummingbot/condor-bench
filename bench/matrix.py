@@ -156,7 +156,8 @@ class Cell:
             self.costs.append(float(usage["cost_usd"]))
             if passed:
                 self.priced_passes += 1
-        if case.get("latency_s") is not None:
+        # A NIM row's wall clock measures the hosted endpoint, not the model.
+        if case.get("latency_s") is not None and case.get("latency_representative", True):
             self.latencies.append(float(case["latency_s"]))
 
     def as_dict(self, gate: float = DOMAIN_PASS_RATE) -> dict[str, Any]:

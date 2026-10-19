@@ -70,6 +70,7 @@ class MockState:
         self.faults: list[dict[str, Any]] = []
         self.calls: list[dict[str, Any]] = []
         self.unhandled: list[str] = []
+        self.settings: dict[tuple[str, str], dict[str, Any]] = {}
         self._next_id = 1
 
     def snapshot(self) -> dict[str, Any]:
@@ -79,6 +80,7 @@ class MockState:
             "faults": copy.deepcopy(self.faults),
             "calls": copy.deepcopy(self.calls),
             "unhandled": list(self.unhandled),
+            "settings": {f"{a}/{c}": v for (a, c), v in self.settings.items()},
         }
 
     def new_executor_id(self) -> str:
@@ -283,6 +285,37 @@ def create_app(state: MockState | None = None) -> FastAPI:
     @app.post("/gateway/clmm/positions/search", dependencies=[Depends(auth)])
     async def clmm_positions(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return {"data": [], "pagination": {"has_more": False, "next_cursor": None}}
+
+    # Perp account settings: stateful, so a case's leverage change is readable back.
+    @app.get("/trading/{account}/{connector}/position-mode", dependencies=[Depends(auth)])
+    async def get_position_mode(account: str, connector: str) -> dict[str, Any]:
+        mode = state.settings.get((account, connector), {}).get("position_mode", "ONEWAY")
+        return {"account_name": account, "connector_name": connector, "position_mode": mode}
+
+    @app.post("/trading/{account}/{connector}/position-mode", dependencies=[Depends(auth)])
+    async def set_position_mode(account: str, connector: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _require_perp(connector)
+        mode = str(payload.get("position_mode") or "").upper()
+        if mode not in ("HEDGE", "ONEWAY"):
+            raise HTTPException(status_code=400, detail=f"Invalid position mode {mode!r}")
+        state.settings.setdefault((account, connector), {})["position_mode"] = mode
+        return {"status": "success", "position_mode": mode}
+
+    @app.post("/trading/{account}/{connector}/leverage", dependencies=[Depends(auth)])
+    async def set_leverage(account: str, connector: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _require_perp(connector)
+        pair = payload.get("trading_pair")
+        if pair not in state.market["trading_rules"].get(connector, {}):
+            raise HTTPException(status_code=400, detail=f"Unknown market {connector}/{pair}")
+        leverage = int(payload.get("leverage") or 0)
+        if not 1 <= leverage <= 125:
+            raise HTTPException(status_code=400, detail=f"Invalid leverage {leverage}")
+        state.settings.setdefault((account, connector), {}).setdefault("leverage", {})[pair] = leverage
+        return {"status": "success", "trading_pair": pair, "leverage": leverage}
+
+    def _require_perp(connector: str) -> None:
+        if not connector.endswith("_perpetual") and "perpetual" not in connector:
+            raise HTTPException(status_code=400, detail=f"{connector} is not a perpetual connector")
 
     # ── executors ───────────────────────────────────────────────────────────
     @app.post("/executors/", dependencies=[Depends(auth)])

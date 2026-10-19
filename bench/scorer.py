@@ -21,6 +21,7 @@ from typing import Any
 
 from config import POST_CONDITION_FAIL_CAP, SCORE_WEIGHTS, judge_model
 from bench.client import BenchmarkResult
+from bench.nim import latency_representative as _nim_representative
 from bench.post_conditions import post_condition_score
 from metrics.answer_quality import AnswerQualityMetric, is_infra_failure
 from metrics.judge import JUDGE_USAGE
@@ -89,7 +90,10 @@ class ScoreCard:
     answer_quality: float | None
     answer_reason: str
     tool_accuracy: float | None  # None when no required expected_tools
-    latency_score: float
+    # None when the provider's wall clock does not measure the model (NVIDIA NIM's
+    # shared hosted capacity): the weight moves to answer quality like any other
+    # unmeasurable component, and the row stays out of every latency statistic.
+    latency_score: float | None
     composite: float
     latency_s: float
     baseline_latency_s: float
@@ -150,6 +154,10 @@ class ScoreCard:
     # See :func:`_detect_tool_substitutions`.
     tool_substitutions: list[dict[str, Any]] = field(default_factory=list)
     trial_idx: int = 1
+    latency_representative: bool = True
+    # OpenTelemetry trace for this trial, when tracing is on (bench/traces.py).
+    trace_id: str | None = None
+    trace_url: str | None = None
     # Task-bank identity (Phase 4), copied from the case's task block.
     task_id: str = ""
     task_version: str = ""
@@ -201,7 +209,10 @@ class ScoreCard:
             "tool_accuracy": round(self.tool_accuracy, 4) if self.tool_accuracy is not None else None,
             "tool_params": round(self.tool_params, 4) if self.tool_params is not None else None,
             "live_validity": round(self.live_validity, 4) if self.live_validity is not None else None,
-            "latency_score": round(self.latency_score, 4),
+            "latency_score": round(self.latency_score, 4) if self.latency_score is not None else None,
+            "latency_representative": self.latency_representative,
+            "trace_id": self.trace_id,
+            "trace_url": self.trace_url,
             "composite": round(self.composite, 4),
             "latency_s": round(self.latency_s, 2),
             "baseline_latency_s": round(self.baseline_latency_s, 2),
@@ -356,6 +367,7 @@ async def score(
             "harness_artifact": harness_artifact,
             "harness_note": harness_note,
             "trial_idx": trial_idx,
+            "latency_representative": _nim_representative(result.model),
         }
         base.update(overrides)
         return ScoreCard(**base)
@@ -449,9 +461,11 @@ async def score(
     if result.post_conditions:
         validity_detail["post_conditions"] = result.post_conditions
 
-    latency_score = _latency_metric.score(
-        test_latency=result.latency_s,
-        baseline_latency=baseline_latency_s,
+    representative = _nim_representative(result.model)
+    latency_score = (
+        _latency_metric.score(test_latency=result.latency_s, baseline_latency=baseline_latency_s)
+        if representative
+        else None
     )
 
     legacy_composite = _composite(
@@ -533,7 +547,7 @@ async def score(
             (i for i, r in enumerate(responses) if r.get("score", 0.0) > 0.0),
             None,
         )
-        if valid_idx is not None and result.latency_s:
+        if valid_idx is not None and result.latency_s and _nim_representative(result.model):
             time_to_first_valid_action = round(
                 result.latency_s * ((valid_idx + 1) / len(responses)), 2
             )
@@ -551,6 +565,7 @@ async def score(
         tool_params=tool_params,
         live_validity=live_validity,
         latency_score=latency_score,
+        latency_representative=representative,
         composite=composite,
         error=result.error or (f"infra: {answer_reason[:200]}" if quality_infra else None),
         judge_usage=JUDGE_USAGE.delta_since(judge_before),

@@ -227,6 +227,13 @@ uv run python runner.py test ollama:qwen2.5:14b --mode live
 # Live pre-flight (exits non-zero on a blocking failure — usable as a CI gate)
 uv run python runner.py staging-check
 
+# Evaluation ladder on the mock lane: L0 tool contracts (no model), then L1 single-tool cases
+uv run python runner.py ladder --upto l0
+uv run python runner.py ladder nvidia:openai/gpt-oss-20b --upto l1
+
+# NVIDIA NIM: gate catalog models before sweeping them (listed ≠ callable)
+uv run python runner.py nim-smoke
+
 # Mock lane: same commands, deterministic target, no staging needed
 BENCH_ENV_MODE=mock uv run python runner.py test openrouter:openai/gpt-4o-mini --cases tool_get_market_data_001
 uv run python runner.py mock-serve              # or: docker compose up  (in mock_mcp/)
@@ -244,6 +251,32 @@ make report
 Results are saved to `results/<run-id>_<model>/` as JSON.
 
 ---
+
+## Ladder, NVIDIA NIM and traces
+
+**Ladder.** `runner.py ladder` climbs rungs on the mock lane and stops at the first
+that fails. **L0** checks Condor's tool contract with no model in the loop — a
+Pydantic Evals dataset (`eval/l0_contracts/`) that asserts every measured tool's
+schema compiles and that a missing or out-of-enum argument is rejected before the
+tool runs, in a form bench's own scorer reads as an error naming the field. **L1**
+runs one model on the single-tool cases the mock serves (market reads, order
+creation, executor lifecycle). Bots, controllers, DEX and platform work is L2 and
+lives on the live lane. Live needs `BENCH_ENV_MODE=live` *and* a passing pre-flight.
+
+**NVIDIA NIM.** `nvidia:<catalog id>` models (key: `NVIDIA_API_KEY`) run through the
+same OpenAI-compatible path as OpenRouter, one request at a time with retry and
+backoff. Every HTTP exchange — status, request id, 429s, a truncated raw body,
+usage, client latency — is recorded in the row's `wiring.provider_log`. NIM rows are
+**functional-only**: shared hosted capacity makes their wall clock a measure of the
+endpoint, so they carry `latency_representative: false`, score no latency
+component, and stay out of every latency statistic. A catalog listing does not mean
+the model is enabled for your account — run `nim-smoke` (listed, real tool call,
+~60k-token context) before adding one to `datasets/models.json`.
+
+**Traces (optional, off by default).** `BENCH_TRACES=phoenix` exports pydantic-ai's
+OpenTelemetry spans plus a `bench.case` span per trial to a local Phoenix collector
+(`BENCH_PHOENIX_URL`, default `http://localhost:6006`; or any OTLP/HTTP endpoint via
+`BENCH_OTLP_ENDPOINT`), and stamps `trace_id` / `trace_url` on each case row.
 
 ## Dataset
 

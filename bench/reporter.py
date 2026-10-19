@@ -214,7 +214,9 @@ def _trial_stats(valid: list[ScoreCard]) -> dict[str, Any]:
         "unsafe_action_rate_ci": stats.rate_summary(unsafe, n)["ci"],
         # Mean per-case std dev of pass/fail across trials; None on a 1-trial run.
         "pass_consistency_std": stats.trial_consistency(by_case),
-        "latency_s": stats.distribution([s.latency_s for s in valid]),
+        # Only rows whose wall clock measures the model (see bench.nim).
+        "latency_s": stats.distribution([s.latency_s for s in valid if s.latency_representative]),
+        "latency_representative": all(s.latency_representative for s in valid),
         "total_tokens": stats.distribution(
             [s.usage["total_tokens"] for s in valid if (s.usage or {}).get("total_tokens") is not None],
             digits=1,
@@ -309,7 +311,11 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
             if with_params else None,
         "live_validity_avg": round(_mean([s.live_validity for s in with_validity]), 4)
             if with_validity else None,
-        "latency_score_avg": round(_mean([s.latency_score for s in valid]), 4) if valid else 0.0,
+        "latency_score_avg": (
+            round(_mean([s.latency_score for s in valid if s.latency_score is not None]), 4)
+            if any(s.latency_score is not None for s in valid)
+            else None
+        ),
         "composite_avg": round(_mean([s.composite for s in valid]), 4) if valid else 0.0,
         "latency_s_avg": round(sum(s.latency_s for s in valid) / n, 2) if valid else 0.0,
         "baseline_latency_s_avg": round(sum(s.baseline_latency_s for s in valid) / n, 2) if valid else 0.0,
