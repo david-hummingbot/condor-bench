@@ -301,7 +301,7 @@ def _member(run_dir: str, model: str, trials: int) -> dict:
         "models": [model],
         "case_ids": ["c0", "c1"],
         "condor": {"commit": "abc", "dirty_files": 0},
-        "manifest": {"trials": trials, "experiment_type": "B"},
+        "manifest": {"trials": trials, "experiment_type": "B", "env_mode": "live"},
     }
 
 

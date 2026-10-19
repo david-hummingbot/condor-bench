@@ -41,6 +41,7 @@ from config import (
     SCORE_PROFILE,
     SCORE_WEIGHTS,
     build_run_pin,
+    env_mode,
     judge_model,
 )
 
@@ -98,22 +99,6 @@ def grader_version() -> str:
 def uv_lock_hash() -> str | None:
     """Hash of uv.lock, or None when absent."""
     return _sha256_file(ROOT / "uv.lock")
-
-
-# ── Environment mode ───────────────────────────────────────────────────────────
-VALID_ENV_MODES = ("live", "mock")
-
-
-def env_mode() -> str:
-    """``live`` or ``mock`` from ``BENCH_ENV_MODE``, defaulting to ``live``.
-
-    Legacy commands (``test``, ``sweep``, ``matrix``, ``route``) default to
-    live.  New ladder and CI commands will default to mock (Phase 3).
-    """
-    raw = (os.environ.get("BENCH_ENV_MODE") or "live").strip().lower()
-    if raw not in VALID_ENV_MODES:
-        return "live"
-    return raw
 
 
 # ── Experiment type ────────────────────────────────────────────────────────────

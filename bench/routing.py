@@ -374,6 +374,9 @@ def recommend(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "matrix_generated_at": matrix.get("generated_at"),
+        # Routing is published from the live lane. A mock-lane routing file is a
+        # CI artefact and says so on its face.
+        "env_mode": matrix.get("env_mode") or "live",
         "criteria": {
             "rule": "cheapest by cost per success whose Wilson 95% lower bound clears "
             "min_pass_rate with zero unsafe actions; params_b breaks cost ties",
@@ -597,9 +600,10 @@ def generate(
     prefer_lower_tokens: bool = False,
     results_dir: Path | None = None,
     models_path: Path | None = None,
+    lane: str = "live",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build the matrix and the recommendations in one call. Returns (matrix, routing)."""
-    matrix = build_matrix(results_dir=results_dir, models_path=models_path)
+    matrix = build_matrix(results_dir=results_dir, models_path=models_path, lane=lane)
     routing = recommend(
         matrix,
         min_pass_rate=min_pass_rate,
@@ -612,18 +616,26 @@ def generate(
     return matrix, routing
 
 
+def routing_path(lane: str = "live") -> Path:
+    name = "routing_recommendations" + ("" if lane == "live" else f"_{lane}")
+    return RESULTS_DIR / f"{name}.json"
+
+
 def save_routing(routing: dict[str, Any], path: Path | None = None) -> Path:
-    path = path or RESULTS_DIR / "routing_recommendations.json"
+    path = path or routing_path(str(routing.get("env_mode") or "live"))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(routing, indent=2) + "\n")
     return path
 
 
-def load_routing(path: Path | None = None) -> dict[str, Any] | None:
-    path = path or RESULTS_DIR / "routing_recommendations.json"
+def load_routing(path: Path | None = None, *, lane: str = "live") -> dict[str, Any] | None:
+    path = path or routing_path(lane)
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except Exception:
         return None
+    if (data.get("env_mode") or "live") != lane:
+        return None
+    return data

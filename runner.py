@@ -233,6 +233,9 @@ def test(
         help="Comma-separated case tags to require (AND). '--tags core' is the "
         "floor-valid iteration subset — publish routing from the full library.",
     ),
+    case_ids: Optional[str] = typer.Option(
+        None, "--cases", help="Comma-separated case ids — run just these (after the other filters)"
+    ),
     consult_only: bool = typer.Option(False, help="Only consult cases"),
     tick_only: bool = typer.Option(False, help="Only tick cases"),
     skip_unavailable: bool = typer.Option(
@@ -270,6 +273,7 @@ def test(
     from bench.staging_health import StagingUnhealthy, assert_ready
     from config import PASS_THRESHOLD
 
+    _enter_lane("live")
     try:
         assert_ready()
     except StagingUnhealthy as exc:
@@ -284,6 +288,13 @@ def test(
         risk_levels=_resolve_risk_levels(risk),
         tags=_resolve_tags(tags),
     )
+    if case_ids:
+        wanted = [c.strip() for c in case_ids.split(",") if c.strip()]
+        unknown = set(wanted) - {c.id for c in cases}
+        if unknown:
+            console.print(f"[red]No such case (or filtered out): {', '.join(sorted(unknown))}[/red]")
+            raise typer.Exit(2)
+        cases = [c for c in cases if c.id in set(wanted)]
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
         raise typer.Exit(1)
@@ -349,6 +360,27 @@ def test(
     )
     console.print(f"\n[bold]Run saved:[/bold] {run_dir}")
     _print_summary(scorecards, model, PASS_THRESHOLD)
+
+
+def _enter_lane(default: str) -> str:
+    """Resolve this command's lane and, on the mock lane, make sure the mock is up.
+
+    ``test`` and ``sweep`` default to live (``BENCH_ENV_MODE=mock`` opts in to the
+    mock). On the mock lane the staging pre-flight that follows runs against the
+    mock, so the same checks guard both lanes.
+    """
+    from bench.lanes import LaneError, ensure_mock_running, resolve_lane
+
+    try:
+        lane = resolve_lane(default)
+        if lane == "mock":
+            handle = ensure_mock_running()
+            note = "started in-process" if handle.started else "already running"
+            console.print(f"[cyan]mock lane[/cyan] — hummingbot-api mock at {handle.api_url} ({note})")
+    except (LaneError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    return lane
 
 
 def _reset_acp_memory(model: str, run_id: str):
@@ -436,9 +468,19 @@ async def _run_trial(case, model: str, store, trial: int, scorecards: list, resp
     from bench.client import run_case
     from bench.dataset import is_mutating
     from bench.reporter import trial_key
-    from bench.scorer import score_case, timeout_card, with_trial
-    from config import PASS_THRESHOLD, case_timeout_s
+    from bench.scorer import harness_card, score_case, timeout_card, with_trial
+    from config import PASS_THRESHOLD, case_timeout_s, staging_config
 
+    if staging_config().get("env_mode") == "mock":
+        # Every trial starts from the fixture: the mock is stateful, and a trial
+        # must not inherit the executor the previous one created. A trial that
+        # cannot be seeded is retried once, then recorded as infra — never scored
+        # against a state it did not start from, and never silently dropped.
+        reason = _seed_mock_with_retry()
+        if reason:
+            scorecards.append(harness_card(case, model, reason, trial_idx=trial))
+            console.print(f"[yellow]harness: {reason}[/yellow]")
+            return
     try:
         # Baseline first: the ceiling is sized from it, so a slow case gets room
         # proportional to how slow it has always been.
@@ -496,7 +538,25 @@ async def _run_trial(case, model: str, store, trial: int, scorecards: list, resp
             "recorded as a harness artifact[/red]"
         )
     except Exception as exc:
-        console.print(f"[red]ERROR: {exc}[/red]")
+        # Recorded, not dropped: a vanished trial makes thin evidence look complete.
+        scorecards.append(
+            harness_card(case, model, f"harness error: {type(exc).__name__}: {exc}", trial_idx=trial)
+        )
+        console.print(f"[red]ERROR: {exc} — recorded as a harness artifact[/red]")
+
+
+def _seed_mock_with_retry(attempts: int = 2) -> str | None:
+    """Reset the mock to its fixture. Returns why it failed, or None on success."""
+    from bench.lanes import reset_mock
+
+    last = ""
+    for _ in range(attempts):
+        try:
+            reset_mock()
+            return None
+        except Exception as exc:  # noqa: BLE001 — any failure means "not seeded"
+            last = f"{type(exc).__name__}: {exc}"
+    return f"mock could not be reset to its fixture after {attempts} attempts ({last})"
 
 
 def _order_cases(cases: list, order: str, store) -> list:
@@ -637,6 +697,7 @@ def sweep(
     from bench.staging_health import StagingUnhealthy, assert_ready
     from config import PASS_THRESHOLD
 
+    _enter_lane("live")
     try:
         assert_ready()
     except StagingUnhealthy as exc:
@@ -749,7 +810,12 @@ def matrix(
         console.print("[red]--axis must be 'domains' or 'tools'.[/red]")
         raise typer.Exit(2)
 
-    data = build_matrix(models_path=models)
+    from config import env_mode
+
+    lane = env_mode("live")
+    data = build_matrix(models_path=models, lane=lane)
+    if lane != "live":
+        console.print(f"[cyan]{lane} lane[/cyan] — this matrix is not a routing source")
     if not data["models"]:
         console.print("[yellow]No runs found. Run 'sweep' or 'test' first.[/yellow]")
         raise typer.Exit(1)
@@ -871,7 +937,16 @@ def route(
     from bench.routing import generate, save_routing
     from config import MIN_TOOL_CASES, TOOL_PASS_RATE
 
+    from config import env_mode
+
+    lane = env_mode("live")
+    if lane != "live":
+        console.print(
+            f"[cyan]{lane} lane[/cyan] — recommendations are a CI artefact, saved apart "
+            "from the live routing file; publish routing from the live lane"
+        )
     matrix_data, routing = generate(
+        lane=lane,
         min_pass_rate=min_pass_rate,
         min_cases=min_cases,
         min_tool_pass_rate=(
@@ -1131,6 +1206,26 @@ def suite_run_cmd(
     console.print(f"[bold]run_group_id[/bold] {result['run_group_id']}")
     for m in result["members"]:
         console.print(f"  {m}")
+
+
+@app.command("mock-serve")
+def mock_serve(
+    fixture: str = typer.Option("default", help="Fixture in mock_mcp/fixtures/ to serve"),
+) -> None:
+    """Serve the mock hummingbot-api (the mock lane's target) in the foreground."""
+    import os
+
+    import uvicorn
+
+    from config import mock_config
+    from mock_mcp.server import MockState, create_app
+
+    cfg = mock_config()
+    os.environ["BENCH_MOCK_FIXTURE"] = fixture
+    console.print(f"mock hummingbot-api on {cfg['api_url']} (fixture {fixture}) — Ctrl-C to stop")
+    uvicorn.run(
+        create_app(MockState(fixture)), host=str(cfg["host"]), port=int(cfg["port"]), log_level="warning"
+    )
 
 
 if __name__ == "__main__":

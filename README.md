@@ -12,15 +12,30 @@ a leaderboard.
 
 ## How runs execute
 
-Every run goes through condor's real MCP servers against a staging
-`hummingbot-api`. There is no offline or mocked mode: param correctness and
-response validity only mean something against a real API — a model can pick the
-right tool with plausible arguments and get an error back every single time, and
-canned payloads score that 1.0.
+Every run goes through condor's real MCP servers. What sits behind them is the
+**lane**, set by `BENCH_ENV_MODE`:
 
-That means a **condor checkout** and a **staging hummingbot-api** are required for
-any run, and a fail-closed pre-flight refuses to start until the URL the MCP
-subprocess resolves to is provably the staging one.
+| Lane | Target | Used for | Default for |
+|------|--------|----------|-------------|
+| `live` | a staging `hummingbot-api` | routing, L2, every published number | `test`, `sweep`, `matrix`, `route` |
+| `mock` | the stateful stand-in in `mock_mcp/` | CI and safety cases (insufficient funds, stale prices, 5xx, rate limits) | CI / ladder commands |
+
+**The routing lane has no offline mode; CI and safety cases run against the
+mock.** Param correctness and response validity only mean something against a
+real API — a model can pick the right tool with plausible arguments and get an
+error back every time — so routing is published from live only. The mock is not a
+canned payload either: it keeps state (an executor a model creates is listed and
+stoppable afterwards) and cases are scored on the end state they leave, so
+describing an action scores nothing. Mock and live rows never share a frontier:
+each lane has its own matrix and routing file, and Compare refuses to difference
+across lanes.
+
+The live lane needs a **condor checkout** and a **staging hummingbot-api**, and a
+fail-closed pre-flight refuses to start until the URL the MCP subprocess resolves
+to is provably the staging one. Capital-risk rules stay on the live lane. The mock
+lane needs only the condor checkout: `BENCH_ENV_MODE=mock` points every API call
+— bench's and condor's — at the mock, ignores `HUMMINGBOT_*` entirely, and starts
+the mock in-process when nothing answers at `BENCH_MOCK_URL`.
 
 Setup, guard rails and the failure modes they defend against:
 **[docs/STAGING.md](docs/STAGING.md)**.
@@ -211,6 +226,10 @@ uv run python runner.py test ollama:qwen2.5:14b --mode live
 
 # Live pre-flight (exits non-zero on a blocking failure — usable as a CI gate)
 uv run python runner.py staging-check
+
+# Mock lane: same commands, deterministic target, no staging needed
+BENCH_ENV_MODE=mock uv run python runner.py test openrouter:openai/gpt-4o-mini --cases tool_get_market_data_001
+uv run python runner.py mock-serve              # or: docker compose up  (in mock_mcp/)
 
 # Sweep, aggregate, recommend
 uv run python runner.py sweep --max-params-b 14

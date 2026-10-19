@@ -245,11 +245,27 @@ class Run:
     cases: list[dict]
 
 
-def load_runs(results_dir: Path | None = None) -> list[Run]:
-    """Every persisted run eligible for the matrix, newest first.
+def summary_lane(summary: dict) -> str | None:
+    """The lane a persisted run was measured on, or None when it cannot be told.
+
+    A summary with no manifest predates Phase 0 — and the mock lane — so it can
+    only have been live. A manifest without ``env_mode`` matches neither lane:
+    every manifest since the lane existed records it, so its absence means the
+    run's provenance is unknown, and mock and live rows must never share a frontier.
+    """
+    manifest = summary.get("manifest")
+    if not manifest:
+        return "live"
+    mode = manifest.get("env_mode")
+    return mode if mode in ("live", "mock") else None
+
+
+def load_runs(results_dir: Path | None = None, *, lane: str = "live") -> list[Run]:
+    """Every persisted run eligible for *lane*'s matrix, newest first.
 
     Suite and custom-prompt runs are excluded unless ``include_in_matrix`` is set
-    — see :func:`config.summary_counts_for_matrix`.
+    — see :func:`config.summary_counts_for_matrix` — and a run from the other lane
+    is never eligible (see :func:`summary_lane`).
     """
     from config import summary_counts_for_matrix
 
@@ -261,6 +277,8 @@ def load_runs(results_dir: Path | None = None) -> list[Run]:
         except Exception:
             continue
         if not summary_counts_for_matrix(summary):
+            continue
+        if summary_lane(summary) != lane:
             continue
         run_dir = summary_path.parent
         cases = []
@@ -300,10 +318,11 @@ def build_matrix(
     *,
     results_dir: Path | None = None,
     models_path: Path | None = None,
+    lane: str = "live",
 ) -> dict[str, Any]:
-    """Build the model × (domain, tool) matrix from persisted runs."""
+    """Build *lane*'s model × (domain, tool) matrix from persisted runs."""
     registry = model_index(load_models(models_path))
-    all_runs = [r for r in load_runs(results_dir) if r.model]
+    all_runs = [r for r in load_runs(results_dir, lane=lane) if r.model]
     latest = latest_run_per_model(all_runs)
 
     domains: dict[str, dict[str, Cell]] = {}
@@ -383,6 +402,7 @@ def build_matrix(
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "env_mode": lane,
         "pass_threshold": PASS_THRESHOLD,
         "models": models_out,
         "domain_pass_rate": DOMAIN_PASS_RATE,
@@ -471,18 +491,27 @@ def _dataset_expected_tools() -> dict[str, list[str]]:
     return mapping
 
 
+def matrix_path(lane: str = "live") -> Path:
+    """Each lane keeps its own file, so a mock matrix can never stand in for live."""
+    return RESULTS_DIR / ("matrix.json" if lane == "live" else f"matrix_{lane}.json")
+
+
 def save_matrix(matrix: dict[str, Any], path: Path | None = None) -> Path:
-    path = path or RESULTS_DIR / "matrix.json"
+    path = path or matrix_path(str(matrix.get("env_mode") or "live"))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(matrix, indent=2) + "\n")
     return path
 
 
-def load_matrix(path: Path | None = None) -> dict[str, Any] | None:
-    path = path or RESULTS_DIR / "matrix.json"
+def load_matrix(path: Path | None = None, *, lane: str = "live") -> dict[str, Any] | None:
+    path = path or matrix_path(lane)
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except Exception:
         return None
+    # A file written before lanes existed is live by construction.
+    if (data.get("env_mode") or "live") != lane:
+        return None
+    return data

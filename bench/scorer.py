@@ -598,6 +598,35 @@ def timeout_card(case: Any, model: str, timeout_s: float, baseline_latency_s: fl
     )
 
 
+def harness_card(case: Any, model: str, reason: str, *, trial_idx: int = 1) -> ScoreCard:
+    """Scorecard for a trial the harness could not run — never scored, never dropped.
+
+    Same treatment as :func:`timeout_card`: the row is a harness artifact, so it
+    is counted and shown but excluded from every average and from routing.
+    """
+    return ScoreCard(
+        case_id=getattr(case, "id", "?"),
+        model=model,
+        category=getattr(case, "category", "") or "",
+        case_type=getattr(case, "type", "") or "",
+        domain=getattr(case, "domain", "") or "",
+        risk_level=getattr(case, "risk_level", "read_only") or "read_only",
+        answer_quality=None,
+        answer_reason=reason,
+        tool_accuracy=None,
+        tool_params=None,
+        live_validity=None,
+        latency_score=0.0,
+        composite=0.0,
+        latency_s=0.0,
+        baseline_latency_s=0.0,
+        expected_tools=list(getattr(case, "expected_tools", []) or []),
+        harness_artifact=reason,
+        error=f"infra: {reason}",
+        trial_idx=trial_idx,
+    )
+
+
 # Which of the agent's own built-ins can stand in for which condor tool. Keyed by
 # the MCP tool the case asked for; the values are the built-ins that reach the same
 # state by another road. Only names that genuinely overlap belong here — this drives

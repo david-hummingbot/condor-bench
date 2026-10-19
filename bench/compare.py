@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from bench import stats
+from bench.matrix import summary_lane
 from config import PASS_THRESHOLD, RESULTS_DIR
 
 
@@ -145,11 +146,16 @@ def compare_summaries(
         differences.append("partial_group")
 
     varied = varied_variables(members)
-    if "manifest:trials" in varied:
-        # Not a variable under test: a 1-trial and a 3-trial run measure the same
-        # thing with different precision, and their rates cannot be differenced.
-        differences.append("manifest:trials")
-        varied = [v for v in varied if v != "manifest:trials"]
+    # Not variables under test. A 1-trial and a 3-trial run measure the same thing
+    # with different precision, so their rates cannot be differenced; a mock and a
+    # live run measured different worlds.
+    for hard in ("manifest:trials", "manifest:env_mode"):
+        if hard in varied:
+            differences.append(hard)
+            varied = [v for v in varied if v != hard]
+    lanes = {summary_lane(m) for m in members}
+    if None in lanes and "manifest:env_mode" not in differences:
+        differences.append("unknown_lane")
     if len(varied) > 1:
         differences.extend(varied)
     manifest_diffs = diff_manifests(members)
