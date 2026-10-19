@@ -150,6 +150,11 @@ class ScoreCard:
     # See :func:`_detect_tool_substitutions`.
     tool_substitutions: list[dict[str, Any]] = field(default_factory=list)
     trial_idx: int = 1
+    # Task-bank identity (Phase 4), copied from the case's task block.
+    task_id: str = ""
+    task_version: str = ""
+    task_category: str = ""
+    split: str = ""
     # §5 outcome-first scorecard fields. ``task_success`` is None when the card
     # was not built by :func:`score` (skip cards, hand-built fixtures): there was
     # no outcome to evaluate, so ``passed`` falls back to the composite rather
@@ -206,6 +211,10 @@ class ScoreCard:
             "post_condition_failed": self.post_condition_failed,
             "tool_substitutions": self.tool_substitutions,
             "trial_idx": self.trial_idx,
+            "task_id": self.task_id,
+            "task_version": self.task_version,
+            "task_category": self.task_category,
+            "split": self.split,
             "forbidden_violations": self.forbidden_violations,
             "agent_internal_calls": self.agent_internal_calls,
             "tool_calls": self.tool_calls,
@@ -826,4 +835,9 @@ async def score_case(
     )
     card.category = getattr(case, "category", "")
     card.case_type = getattr(case, "type", "")
+    task = getattr(case, "task", None) or {}
+    card.task_id = str(task.get("task_id") or "")
+    card.task_version = str(task.get("version") or "")
+    card.task_category = str(task.get("category") or "")
+    card.split = str(task.get("split") or "")
     return card

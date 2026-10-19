@@ -115,6 +115,110 @@ def _normalize_risk(value: Any) -> str:
     return risk if risk in RISK_LEVELS else "read_only"
 
 
+# ── Task bank ──────────────────────────────────────────────────────────────────
+# Every case carries a ``task`` block. The six trading categories come from the
+# refactor spec; ``platform`` holds Condor's own tooling (servers, models,
+# routines, memory, journal, delegation, notifications, agent and strategy
+# management), which the six do not describe. Category floors apply to the six.
+TASK_CATEGORIES = {
+    "market_reads": "reads",
+    "order_creation": "orders",
+    "executor_lifecycle": "exec",
+    "bots_controllers": "bots",
+    "dex_gateway": "dex",
+    "negative_safety": "safety",
+    "platform": "platform",
+}
+TRADING_CATEGORIES = tuple(c for c in TASK_CATEGORIES if c != "platform")
+CATEGORY_FLOOR = 10
+SPLITS = ("dev", "regression", "holdout")
+DIFFICULTIES = ("easy", "medium", "hard")
+# none: reads nothing it can change · state: writes Condor/API state that is not
+# capital (memory, routines, journal, leverage settings) · capital: places,
+# changes or stops something that can move funds.
+SAFETY_TIERS = ("none", "state", "capital")
+LANES = ("live", "mock")
+
+TASK_FIELD_DOC = """\
+"task": {
+  "task_id": "T-<prefix>-<nnn>",      # stable id; the case "id" stays as its alias
+  "version": "1",                     # bump when the prompt or ground truth changes
+  "category": one of TASK_CATEGORIES,
+  "difficulty": "easy" | "medium" | "hard",
+  "safety_tier": "none" | "state" | "capital",
+  "split": "dev" | "regression" | "holdout",
+  "initial_state": {...},             # account, markets, bots, controllers, executors
+  "expected_final_state": {...},      # what must hold afterwards; "asserted_by" names
+                                      # the mechanism (post_conditions, live_expected, none)
+  "forbidden_transitions": [...],     # state changes the case must not cause
+  "milestones": [{"name", "required_tools"}],   # partial credit; generalises `steps`
+  "reference_solution": [...],        # a correct call sequence
+  "known_limitations": [...]          # what the case cannot catch, said out loud
+}"""
+
+_TASK_REQUIRED = (
+    "task_id", "version", "category", "difficulty", "safety_tier", "split",
+    "initial_state", "expected_final_state", "forbidden_transitions",
+    "milestones", "reference_solution", "known_limitations",
+)
+
+
+def _task_fields(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task": dict(data.get("task") or {}),
+        "lanes": list(data.get("lanes") or []),
+        "mock_faults": list(data.get("mock_faults") or []),
+    }
+
+
+def task_problems(case: Any) -> list[str]:
+    """Everything wrong with a case's task block — empty when it is valid."""
+    task = getattr(case, "task", None) or {}
+    cid = getattr(case, "id", "?")
+    problems = [f"{cid}: task.{k} missing" for k in _TASK_REQUIRED if k not in task]
+    if problems:
+        return problems
+    category = task["category"]
+    if category not in TASK_CATEGORIES:
+        problems.append(f"{cid}: unknown category {category!r}")
+    elif not str(task["task_id"]).startswith(f"T-{TASK_CATEGORIES[category]}-"):
+        problems.append(f"{cid}: task_id {task['task_id']} does not match category {category}")
+    if task["split"] not in SPLITS:
+        problems.append(f"{cid}: unknown split {task['split']!r}")
+    if task["difficulty"] not in DIFFICULTIES:
+        problems.append(f"{cid}: unknown difficulty {task['difficulty']!r}")
+    if task["safety_tier"] not in SAFETY_TIERS:
+        problems.append(f"{cid}: unknown safety_tier {task['safety_tier']!r}")
+    for lane in getattr(case, "lanes", None) or []:
+        if lane not in LANES:
+            problems.append(f"{cid}: unknown lane {lane!r}")
+    # The regression split gates releases, so every case in it that changes
+    # state must say how its end state is checked.
+    if (
+        task["split"] == "regression"
+        and _normalize_risk(getattr(case, "risk_level", None)) != "read_only"
+        and not getattr(case, "post_conditions", None)
+    ):
+        problems.append(
+            f"{cid}: mutating regression case without post_conditions — its end "
+            "state is unchecked; add post_conditions or move it to dev"
+        )
+    return problems
+
+
+def case_split(case: Any) -> str:
+    return str((getattr(case, "task", None) or {}).get("split") or "dev")
+
+
+def case_task_category(case: Any) -> str:
+    return str((getattr(case, "task", None) or {}).get("category") or "")
+
+
+def runs_on_lane(case: Any, lane: str) -> bool:
+    lanes = getattr(case, "lanes", None) or []
+    return not lanes or lane in lanes
+
+
 @dataclass
 class ConsultCase:
     id: str
@@ -146,6 +250,15 @@ class ConsultCase:
     # Declared market requirements, bound to real connectors before the run.
     # See bench/market_resolver.py; MARKETS_FIELD_DOC there is the schema.
     markets: dict[str, Any] = field(default_factory=dict)
+    # Task-bank metadata (Phase 4): task_id, version, category, difficulty,
+    # safety_tier, split, states, milestones, reference solution, limitations.
+    # See TASK_FIELD_DOC.
+    task: dict[str, Any] = field(default_factory=dict)
+    # Lanes the case can run on; empty means both. ["mock"] for cases that need
+    # a fault only the mock can stage (see mock_faults).
+    lanes: list[str] = field(default_factory=list)
+    # Faults armed on the mock before each trial: [{"kind": "5xx", "path": "/…"}].
+    mock_faults: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def domain(self) -> str:
@@ -188,6 +301,15 @@ class TickCase:
     # Declared market requirements, bound to real connectors before the run.
     # See bench/market_resolver.py; MARKETS_FIELD_DOC there is the schema.
     markets: dict[str, Any] = field(default_factory=dict)
+    # Task-bank metadata (Phase 4): task_id, version, category, difficulty,
+    # safety_tier, split, states, milestones, reference solution, limitations.
+    # See TASK_FIELD_DOC.
+    task: dict[str, Any] = field(default_factory=dict)
+    # Lanes the case can run on; empty means both. ["mock"] for cases that need
+    # a fault only the mock can stage (see mock_faults).
+    lanes: list[str] = field(default_factory=list)
+    # Faults armed on the mock before each trial: [{"kind": "5xx", "path": "/…"}].
+    mock_faults: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def domain(self) -> str:
@@ -216,9 +338,22 @@ class ToolCase:
     tags: list[str] = field(default_factory=list)
     category: str = "tool"
     type: str = "tool"
+    # Assertions checked against the API after the run, before teardown. A tool
+    # case that creates something needs one as much as a build case does: the
+    # tool's own "created" response is not proof the thing is there.
+    post_conditions: dict[str, Any] = field(default_factory=dict)
     # Declared market requirements, bound to real connectors before the run.
     # See bench/market_resolver.py; MARKETS_FIELD_DOC there is the schema.
     markets: dict[str, Any] = field(default_factory=dict)
+    # Task-bank metadata (Phase 4): task_id, version, category, difficulty,
+    # safety_tier, split, states, milestones, reference solution, limitations.
+    # See TASK_FIELD_DOC.
+    task: dict[str, Any] = field(default_factory=dict)
+    # Lanes the case can run on; empty means both. ["mock"] for cases that need
+    # a fault only the mock can stage (see mock_faults).
+    lanes: list[str] = field(default_factory=list)
+    # Faults armed on the mock before each trial: [{"kind": "5xx", "path": "/…"}].
+    mock_faults: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def domain(self) -> str:
@@ -262,6 +397,15 @@ class AgentCase:
     # Declared market requirements, bound to real connectors before the run.
     # See bench/market_resolver.py; MARKETS_FIELD_DOC there is the schema.
     markets: dict[str, Any] = field(default_factory=dict)
+    # Task-bank metadata (Phase 4): task_id, version, category, difficulty,
+    # safety_tier, split, states, milestones, reference solution, limitations.
+    # See TASK_FIELD_DOC.
+    task: dict[str, Any] = field(default_factory=dict)
+    # Lanes the case can run on; empty means both. ["mock"] for cases that need
+    # a fault only the mock can stage (see mock_faults).
+    lanes: list[str] = field(default_factory=list)
+    # Faults armed on the mock before each trial: [{"kind": "5xx", "path": "/…"}].
+    mock_faults: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def domain(self) -> str:
@@ -295,7 +439,9 @@ def _iter_jsonl(path: Path) -> Iterable[dict]:
     return records
 
 
-def load_consult_cases(path: Path | None = None) -> list[ConsultCase]:
+def load_consult_cases(
+    path: Path | None = None, *, records: Iterable[dict] | None = None
+) -> list[ConsultCase]:
     path = path or DATASETS_DIR / "consult.jsonl"
     return [
         ConsultCase(
@@ -315,15 +461,18 @@ def load_consult_cases(path: Path | None = None) -> list[ConsultCase]:
             risk_level=_normalize_risk(data.get("risk_level")),
             agent_slug=data.get("agent_slug"),
             markets=data.get("markets", {}),
+            **_task_fields(data),
         )
-        for data in _iter_jsonl(path)
+        for data in (records if records is not None else _iter_jsonl(path))
     ]
 
 
-def load_tick_cases(path: Path | None = None) -> list[TickCase]:
+def load_tick_cases(
+    path: Path | None = None, *, records: Iterable[dict] | None = None
+) -> list[TickCase]:
     path = path or DATASETS_DIR / "tick.jsonl"
     cases = []
-    for data in _iter_jsonl(path):
+    for data in (records if records is not None else _iter_jsonl(path)):
         cases.append(
             TickCase(
                 id=data["id"],
@@ -351,12 +500,15 @@ def load_tick_cases(path: Path | None = None) -> list[TickCase]:
                 # rather than to None.
                 agent_slug=data.get("agent_slug") or f"bench_{data['id']}",
                 markets=data.get("markets", {}),
+            **_task_fields(data),
             )
         )
     return cases
 
 
-def load_tool_cases(path: Path | None = None) -> list[ToolCase]:
+def load_tool_cases(
+    path: Path | None = None, *, records: Iterable[dict] | None = None
+) -> list[ToolCase]:
     path = path or DATASETS_DIR / "tools.jsonl"
     return [
         ToolCase(
@@ -370,16 +522,20 @@ def load_tool_cases(path: Path | None = None) -> list[ToolCase]:
             expected_tool_params=data.get("expected_tool_params", {}),
             expected_no_calls=data.get("expected_no_calls", []),
             live_expected=data.get("live_expected", {}),
+            post_conditions=data.get("post_conditions", {}),
             risk_level=_normalize_risk(data.get("risk_level")),
             agent_slug=data.get("agent_slug"),
             tags=data.get("tags", []),
             markets=data.get("markets", {}),
+            **_task_fields(data),
         )
-        for data in _iter_jsonl(path)
+        for data in (records if records is not None else _iter_jsonl(path))
     ]
 
 
-def load_agent_cases(path: Path | None = None) -> list[AgentCase]:
+def load_agent_cases(
+    path: Path | None = None, *, records: Iterable[dict] | None = None
+) -> list[AgentCase]:
     path = path or DATASETS_DIR / "agents.jsonl"
     return [
         AgentCase(
@@ -399,12 +555,46 @@ def load_agent_cases(path: Path | None = None) -> list[AgentCase]:
             risk_level=_normalize_risk(data.get("risk_level")),
             tags=data.get("tags", []),
             markets=data.get("markets", {}),
+            **_task_fields(data),
         )
-        for data in _iter_jsonl(path)
+        for data in (records if records is not None else _iter_jsonl(path))
     ]
 
 
-def load_all_cases(*, layers: Iterable[str] | None = None) -> list[Case]:
+HOLDOUT_PATH = DATASETS_DIR / "holdout.jsonl"
+
+_LOADERS_BY_TYPE = ("consult", "tick", "tool", "agent")
+
+
+def load_holdout_cases(path: Path | None = None) -> list[Case]:
+    """The holdout split, one file of mixed layers dispatched on ``type``.
+
+    Never part of :func:`load_all_cases` unless asked: holdout is invisible to
+    ``--tags core``, the dashboard and every default sweep, and runs only with
+    ``--release``. A task the iteration loop has seen is no longer held out.
+    """
+    path = path or HOLDOUT_PATH
+    by_type: dict[str, list[dict]] = {}
+    for data in _iter_jsonl(path):
+        kind = data.get("type") or "consult"
+        if kind not in _LOADERS_BY_TYPE:
+            raise ValueError(f"holdout case {data.get('id')} has unknown type {kind!r}")
+        by_type.setdefault(kind, []).append(data)
+    loaders = {
+        "consult": load_consult_cases,
+        "tick": load_tick_cases,
+        "tool": load_tool_cases,
+        "agent": load_agent_cases,
+    }
+    cases: list[Case] = []
+    for kind, records in by_type.items():
+        cases += loaders[kind](records=records)
+    return cases
+
+
+def load_all_cases(
+    *, layers: Iterable[str] | None = None, include_holdout: bool = False
+) -> list[Case]:
     """Load every dataset layer, or just the named ones.
 
     ``layers`` accepts any of ``consult``, ``tick``, ``tool``, ``agent``.
@@ -426,6 +616,8 @@ def load_all_cases(*, layers: Iterable[str] | None = None) -> list[Case]:
         cases += load_tool_cases()
     if "agent" in wanted:
         cases += load_agent_cases()
+    if include_holdout:
+        cases += [c for c in load_holdout_cases() if c.type in wanted]
     return [bind_agent_id(case) for case in cases]
 
 
@@ -576,6 +768,8 @@ def filter_cases(
     layers: Iterable[str] | None = None,
     risk_levels: Iterable[str] | None = None,
     tags: Iterable[str] | None = None,
+    splits: Iterable[str] | None = None,
+    task_categories: Iterable[str] | None = None,
 ) -> list[Case]:
     """Apply the CLI/dashboard filters in one place.
 
@@ -610,4 +804,10 @@ def filter_cases(
             for c in out
             if wanted_tags.issubset(set(getattr(c, "tags", None) or []))
         ]
+    if splits:
+        wanted_splits = set(splits)
+        out = [c for c in out if case_split(c) in wanted_splits]
+    if task_categories:
+        wanted_cats = set(task_categories)
+        out = [c for c in out if case_task_category(c) in wanted_cats]
     return out

@@ -1,0 +1,7 @@
+{
+  "case_id": "tool_stop_executors_none_001",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 3.087,
+  "timestamp": "2026-10-19T18:39:46.419207+00:00",
+  "fingerprint": "f16bfde2e902"
+}

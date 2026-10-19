@@ -283,3 +283,17 @@ def test_a_crashed_trial_is_recorded_not_dropped(monkeypatch):
     cards, _ = _trial(monkeypatch, run_raises=True)
     assert len(cards) == 1
     assert "bridge died" in cards[0].harness_artifact
+
+
+def test_portfolio_overview_reads_answer_empty_not_501(mock):
+    for path in ("/trading/positions", "/trading/orders/search", "/gateway/clmm/positions/search"):
+        r = _call(mock, "POST", path, json={})
+        assert r.status_code == 200 and r.json()["data"] == [], path
+
+
+def test_candles_are_flat_at_the_fixture_price(mock):
+    rows = _call(mock, "POST", "/market-data/candles", json={
+        "connector_name": "binance", "trading_pair": "BTC-USDT", "interval": "1h", "max_records": 5}).json()
+    assert len(rows) == 5
+    assert {r["close"] for r in rows} == {65000.0}
+    assert rows[1]["timestamp"] - rows[0]["timestamp"] == 3600

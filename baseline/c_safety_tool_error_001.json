@@ -1,0 +1,7 @@
+{
+  "case_id": "c_safety_tool_error_001",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 15.746,
+  "timestamp": "2026-10-19T18:42:21.753273+00:00",
+  "fingerprint": "d5c93b4b213f"
+}

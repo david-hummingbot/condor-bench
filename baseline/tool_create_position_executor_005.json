@@ -1,0 +1,7 @@
+{
+  "case_id": "tool_create_position_executor_005",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 17.211,
+  "timestamp": "2026-10-19T18:40:37.609588+00:00",
+  "fingerprint": "706c978404f5"
+}

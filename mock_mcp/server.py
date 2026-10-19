@@ -214,6 +214,25 @@ def create_app(state: MockState | None = None) -> FastAPI:
             "timestamp": now - STALE_PRICE_AGE_S if stale else now,
         }
 
+    @app.post("/market-data/candles", dependencies=[Depends(auth)])
+    async def candles(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Flat candles at the fixture price: deterministic, so no trend to read into."""
+        connector = payload.get("connector_name")
+        pair = payload.get("trading_pair")
+        price = state.market["prices"].get(connector, {}).get(pair)
+        if price is None:
+            raise HTTPException(status_code=404, detail=f"No market {connector}/{pair}")
+        step = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(
+            str(payload.get("interval") or "1m"), 60
+        )
+        n = min(int(payload.get("max_records") or 100), 1000)
+        end = int(time.time()) // step * step
+        return [
+            {"timestamp": end - (n - 1 - i) * step, "open": price, "high": price,
+             "low": price, "close": price, "volume": 0.0}
+            for i in range(n)
+        ]
+
     @app.post("/market-data/trading-pair/add", dependencies=[Depends(auth)])
     async def add_pair(payload: dict[str, Any]) -> dict[str, Any]:
         connector = payload.get("connector_name")
@@ -250,6 +269,20 @@ def create_app(state: MockState | None = None) -> FastAPI:
                     )
                 out[account][connector] = priced
         return out
+
+    # Open orders, perp positions and CLMM positions: the fixture holds none, and
+    # get_portfolio_overview reads all three, so they answer empty rather than 501.
+    @app.post("/trading/positions", dependencies=[Depends(auth)])
+    async def positions(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {"data": [], "pagination": {"has_more": False, "next_cursor": None}}
+
+    @app.post("/trading/orders/search", dependencies=[Depends(auth)])
+    async def orders(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {"data": [], "pagination": {"has_more": False, "next_cursor": None}}
+
+    @app.post("/gateway/clmm/positions/search", dependencies=[Depends(auth)])
+    async def clmm_positions(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {"data": [], "pagination": {"has_more": False, "next_cursor": None}}
 
     # ── executors ───────────────────────────────────────────────────────────
     @app.post("/executors/", dependencies=[Depends(auth)])
@@ -316,6 +349,12 @@ def create_app(state: MockState | None = None) -> FastAPI:
         if executor is None:
             raise HTTPException(status_code=404, detail=f"Executor {executor_id} not found")
         return copy.deepcopy(executor)
+
+    @app.get("/executors/{executor_id}/logs", dependencies=[Depends(auth)])
+    async def executor_logs(executor_id: str) -> dict[str, Any]:
+        if executor_id not in state.executors:
+            raise HTTPException(status_code=404, detail=f"Executor {executor_id} not found")
+        return {"executor_id": executor_id, "logs": [], "total": 0}
 
     @app.post("/executors/{executor_id}/stop", dependencies=[Depends(auth)])
     async def stop_executor(executor_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:

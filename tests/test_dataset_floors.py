@@ -152,3 +152,81 @@ def test_every_case_has_a_baseline():
         f"{len(missing)} case(s) have no baseline latency: {sorted(missing)[:10]}. "
         "Run `make baseline`."
     )
+
+
+# ── Task bank (Phase 4) ────────────────────────────────────────────────────────
+def test_every_task_block_is_valid():
+    from bench.dataset import task_problems
+
+    problems = [p for c in load_all_cases(include_holdout=True) for p in task_problems(c)]
+    assert not problems, "\n".join(problems)
+
+
+def test_task_ids_are_unique_across_every_split():
+    ids = [c.task["task_id"] for c in load_all_cases(include_holdout=True)]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    assert not dupes, f"duplicate task_ids: {dupes}"
+
+
+def test_every_trading_category_clears_the_floor_or_is_a_stated_gap():
+    """Ten per category outside holdout, or the shortfall is in the manifest's gaps."""
+    import json
+
+    from bench.dataset import CATEGORY_FLOOR, TRADING_CATEGORIES, case_task_category
+    from config import DATASETS_DIR
+
+    counts = collections.Counter(case_task_category(c) for c in load_all_cases())
+    under = {cat: counts[cat] for cat in TRADING_CATEGORIES if counts[cat] < CATEGORY_FLOOR}
+    gaps = json.loads((DATASETS_DIR / "manifest.json").read_text())["gaps"]
+    unexplained = {
+        cat: n for cat, n in under.items() if not any(g["area"].startswith(cat) for g in gaps)
+    }
+    assert not unexplained, (
+        f"categories under {CATEGORY_FLOOR} with no gap entry: {unexplained}. Add cases, "
+        "or record the gap in scripts/build_task_manifest.py"
+    )
+
+
+def test_the_manifest_is_current():
+    import subprocess
+    import sys
+
+    from config import ROOT
+
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "build_task_manifest.py"), "--check"],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_holdout_is_invisible_to_default_runs():
+    from bench.dataset import case_prompt_map, load_holdout_cases
+
+    holdout = {c.id for c in load_holdout_cases()}
+    assert holdout, "the holdout split is empty"
+    default = {c.id for c in load_all_cases()}
+    core = {c.id for c in filter_cases(load_all_cases(), tags=["core"])}
+    assert not holdout & default, "holdout leaked into the default library"
+    assert not holdout & core, "holdout leaked into --tags core"
+    assert not holdout & set(case_prompt_map()), "holdout leaked into the dashboard's prompts"
+    assert all(c.task["split"] == "holdout" for c in load_holdout_cases())
+    assert not any(c.task["split"] == "holdout" for c in load_all_cases()), (
+        "a case outside holdout.jsonl claims the holdout split"
+    )
+
+
+def test_mock_only_cases_declare_what_they_need_the_mock_for():
+    from mock_mcp.server import FAULT_KINDS
+
+    for case in load_all_cases(include_holdout=True):
+        if case.lanes == ["mock"]:
+            assert case.mock_faults, f"{case.id} is mock-only but arms no fault"
+        for fault in case.mock_faults:
+            assert fault.get("kind") in FAULT_KINDS, f"{case.id}: unknown fault {fault}"
+
+
+def test_split_filter_selects_by_task_split():
+    regression = filter_cases(load_all_cases(), splits=["regression"])
+    assert regression and all(c.task["split"] == "regression" for c in regression)

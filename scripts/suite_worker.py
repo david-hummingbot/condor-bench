@@ -34,6 +34,7 @@ async def _run(job: dict) -> dict:
     from bench.baseline import BaselineStore
     from bench.cleanup import teardown
     from bench.client import run_case
+    from bench.cleanup import created_resources
     from bench.dataset import is_mutating
     from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.probe_journal import ensure_probe_journal
@@ -123,7 +124,7 @@ async def _run(job: dict) -> dict:
             card = await score_case(case, result, baseline_latency, trial_idx=trial)
             scorecards.append(card)
             responses[trial_key(case.id, trial)] = result.response
-            if is_mutating(case):
+            if is_mutating(case) or created_resources(result):
                 await teardown(
                     result,
                     model,

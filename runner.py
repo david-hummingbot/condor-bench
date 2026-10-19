@@ -82,6 +82,7 @@ def baseline(
     from bench.dataset import load_all_cases
 
     m = model or BASELINE_MODEL
+    _enter_lane("live")
     cases = load_all_cases()
     store = BaselineStore()
     # Naming cases means you mean them: re-measuring a handful otherwise required
@@ -245,6 +246,15 @@ def test(
         "artifacts instead of refusing the run. Opt-in: the run is thinner than "
         "it looks, so routing published from it under-covers those domains.",
     ),
+    split: Optional[str] = typer.Option(
+        None, "--split", help="Comma-separated task splits to run (dev, regression)"
+    ),
+    release: bool = typer.Option(
+        False,
+        "--release",
+        help="Release run: add the holdout split. Holdout never runs otherwise — not "
+        "with --tags core, not from the dashboard.",
+    ),
     trials: int = typer.Option(
         1,
         "--trials",
@@ -281,13 +291,15 @@ def test(
         raise typer.Exit(1) from exc
 
     cases = filter_cases(
-        load_all_cases(),
+        load_all_cases(include_holdout=release),
         domain=domain,
         category=category,
         layers=_resolve_layers(consult_only, tick_only, layers),
         risk_levels=_resolve_risk_levels(risk),
         tags=_resolve_tags(tags),
+        splits=_resolve_splits(split, release),
     )
+    cases = _cases_for_lane(cases)
     if case_ids:
         wanted = [c.strip() for c in case_ids.split(",") if c.strip()]
         unknown = set(wanted) - {c.id for c in cases}
@@ -343,6 +355,7 @@ def test(
         models=[model],
         shared_loaded=True,
         trials=trials,
+        cases=cases,
     )
     pin["market_bindings"] = bindings_summary(resolutions)
     if memory_reset is not None:
@@ -360,6 +373,39 @@ def test(
     )
     console.print(f"\n[bold]Run saved:[/bold] {run_dir}")
     _print_summary(scorecards, model, PASS_THRESHOLD)
+
+
+def _resolve_splits(split: str | None, release: bool) -> list[str] | None:
+    """--split values, plus holdout on a release run. None means every split."""
+    from bench.dataset import SPLITS
+
+    wanted = [s.strip() for s in split.split(",") if s.strip()] if split else []
+    unknown = set(wanted) - set(SPLITS)
+    if unknown:
+        console.print(f"[red]Unknown split(s): {', '.join(sorted(unknown))} — choose from {', '.join(SPLITS)}[/red]")
+        raise typer.Exit(2)
+    if "holdout" in wanted and not release:
+        console.print("[red]The holdout split runs only with --release.[/red]")
+        raise typer.Exit(2)
+    if wanted and release and "holdout" not in wanted:
+        wanted.append("holdout")
+    return wanted or None
+
+
+def _cases_for_lane(cases: list) -> list:
+    """Drop cases that cannot run on this lane, and say how many."""
+    from bench.dataset import runs_on_lane
+    from config import staging_config
+
+    lane = str(staging_config().get("env_mode") or "live")
+    kept = [c for c in cases if runs_on_lane(c, lane)]
+    if len(kept) < len(cases):
+        skipped = sorted(c.id for c in cases if not runs_on_lane(c, lane))
+        console.print(
+            f"[dim]{len(skipped)} case(s) need another lane and are not part of this "
+            f"run: {', '.join(skipped)}[/dim]"
+        )
+    return kept
 
 
 def _enter_lane(default: str) -> str:
@@ -464,7 +510,7 @@ async def _run_cases(cases, model: str, store, trials: int = 1):
 
 async def _run_trial(case, model: str, store, trial: int, scorecards: list, responses: dict) -> None:
     """One trial of one case: run, score, record, and tear down what it created."""
-    from bench.cleanup import teardown
+    from bench.cleanup import created_resources, teardown
     from bench.client import run_case
     from bench.dataset import is_mutating
     from bench.reporter import trial_key
@@ -476,7 +522,7 @@ async def _run_trial(case, model: str, store, trial: int, scorecards: list, resp
         # must not inherit the executor the previous one created. A trial that
         # cannot be seeded is retried once, then recorded as infra — never scored
         # against a state it did not start from, and never silently dropped.
-        reason = _seed_mock_with_retry()
+        reason = _seed_mock_with_retry(getattr(case, "mock_faults", None) or [])
         if reason:
             scorecards.append(harness_card(case, model, reason, trial_idx=trial))
             console.print(f"[yellow]harness: {reason}[/yellow]")
@@ -489,6 +535,8 @@ async def _run_trial(case, model: str, store, trial: int, scorecards: list, resp
         result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
         baseline_latency = baseline.latency_s if baseline else result.latency_s
         card = await score_case(case, result, baseline_latency, trial_idx=trial)
+        if staging_config().get("env_mode") == "mock":
+            _flag_mock_gaps(card)
         scorecards.append(card)
         responses[trial_key(case.id, trial)] = result.response
 
@@ -504,9 +552,11 @@ async def _run_trial(case, model: str, store, trial: int, scorecards: list, resp
         if card.harness_artifact:
             console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
 
-        # Undo what a mutating case created, whatever its score — an aborted
-        # half-created resource still needs removing.
-        if is_mutating(case):
+        # Undo what the trial created, whatever its score — an aborted half-created
+        # resource still needs removing. Keyed on the trace as well as the case's
+        # risk level: a read-only case is exactly where a model that falls for a
+        # prompt injection creates something nobody planned to clean up.
+        if is_mutating(case) or created_resources(result):
             report = await teardown(
                 result,
                 model,
@@ -545,18 +595,44 @@ async def _run_trial(case, model: str, store, trial: int, scorecards: list, resp
         console.print(f"[red]ERROR: {exc} — recorded as a harness artifact[/red]")
 
 
-def _seed_mock_with_retry(attempts: int = 2) -> str | None:
-    """Reset the mock to its fixture. Returns why it failed, or None on success."""
-    from bench.lanes import reset_mock
+def _seed_mock_with_retry(faults: list | None = None, attempts: int = 2) -> str | None:
+    """Reset the mock to its fixture and arm the case's faults.
+
+    Returns why seeding failed, or None on success.
+    """
+    from bench.lanes import arm_mock_faults, reset_mock
 
     last = ""
     for _ in range(attempts):
         try:
             reset_mock()
+            arm_mock_faults(faults or [])
             return None
         except Exception as exc:  # noqa: BLE001 — any failure means "not seeded"
             last = f"{type(exc).__name__}: {exc}"
     return f"mock could not be reset to its fixture after {attempts} attempts ({last})"
+
+
+def _flag_mock_gaps(card) -> None:
+    """A trial that hit an endpoint the mock does not implement measured the mock.
+
+    The model got a 501 for a call that would have worked on a real API, so the row
+    is a harness artifact — excluded and named — not a model failure.
+    """
+    from bench.lanes import mock_state
+
+    try:
+        gaps = mock_state().get("unhandled") or []
+    except Exception:  # noqa: BLE001 — a dead mock is caught by the next reset
+        return
+    # A forbidden call is the model's whatever else the mock lacked: excluding it
+    # as a harness artifact would launder an unsafe action out of the unsafe rate.
+    if gaps and not card.harness_artifact and not card.forbidden_violations:
+        card.harness_artifact = (
+            f"mock lane does not implement {', '.join(gaps[:4])}"
+            + (f" (+{len(gaps) - 4} more)" if len(gaps) > 4 else "")
+            + " — run this case on the live lane"
+        )
 
 
 def _order_cases(cases: list, order: str, store) -> list:
@@ -670,6 +746,15 @@ def sweep(
         help="Record cases whose declared markets cannot bind as harness "
         "artifacts instead of refusing the run.",
     ),
+    split: Optional[str] = typer.Option(
+        None, "--split", help="Comma-separated task splits to run (dev, regression)"
+    ),
+    release: bool = typer.Option(
+        False,
+        "--release",
+        help="Release run: add the holdout split. Holdout never runs otherwise — not "
+        "with --tags core, not from the dashboard.",
+    ),
     trials: int = typer.Option(
         1,
         "--trials",
@@ -722,12 +807,14 @@ def sweep(
         ]
 
     cases = filter_cases(
-        load_all_cases(),
+        load_all_cases(include_holdout=release),
         domain=domain,
         layers=_resolve_layers(False, False, layers),
         risk_levels=_resolve_risk_levels(risk),
         tags=_resolve_tags(tags),
+        splits=_resolve_splits(split, release),
     )
+    cases = _cases_for_lane(cases)
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
         raise typer.Exit(1)
@@ -770,6 +857,7 @@ def sweep(
             models=[entry.key],
             shared_loaded=True,
             trials=trials,
+            cases=cases,
         )
         pin["sweep"] = True
         pin["market_bindings"] = bindings_summary(resolutions)

@@ -175,6 +175,21 @@ def _domain_breakdown(scorecards: list[ScoreCard]) -> dict[str, Any]:
     return out
 
 
+def _group_rates(valid: list[ScoreCard], attr: str) -> dict[str, Any]:
+    """Pass rate with a Wilson interval per task category or split."""
+    groups: dict[str, list[ScoreCard]] = {}
+    for s in valid:
+        key = getattr(s, attr, "") or ""
+        if key:
+            groups.setdefault(key, []).append(s)
+    out: dict[str, Any] = {}
+    for key, cards in sorted(groups.items()):
+        passes = sum(1 for c in cards if c.passed)
+        rate = stats.rate_summary(passes, len(cards))
+        out[key] = {"scored": len(cards), "passed": passes, "pass_rate": rate["rate"], "pass_rate_ci": rate["ci"]}
+    return out
+
+
 def _trial_stats(valid: list[ScoreCard]) -> dict[str, Any]:
     """Phase 2 statistics over the scored rows (one row per case × trial).
 
@@ -325,6 +340,13 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
             else None
         ),
         **_trial_stats(valid),
+        "task_categories": _group_rates(valid, "task_category"),
+        "splits": _group_rates(valid, "split"),
+        # Regression tasks that failed in this run. Each one is a drop to look at:
+        # the split exists so a release cannot quietly lose ground it held.
+        "regression_failures": sorted(
+            {s.task_id or s.case_id for s in valid if s.split == "regression" and not s.passed}
+        ),
         "usage": _usage_totals(scorecards),
         "judge_usage": _judge_totals(scorecards),
         "domains": _domain_breakdown(scorecards),

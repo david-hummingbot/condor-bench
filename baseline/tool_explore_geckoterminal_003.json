@@ -1,0 +1,7 @@
+{
+  "case_id": "tool_explore_geckoterminal_003",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 8.941,
+  "timestamp": "2026-10-19T18:41:30.737843+00:00",
+  "fingerprint": "66db5d959631"
+}

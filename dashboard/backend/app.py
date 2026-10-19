@@ -216,7 +216,7 @@ async def _await_resume(run_id: str, state: dict) -> None:
 
 async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.baseline import BaselineStore
-    from bench.cleanup import teardown
+    from bench.cleanup import created_resources, teardown
     from bench.client import case_input_text, run_case
     from bench.dataset import case_prompt_map, filter_cases, is_mutating, load_all_cases
     from bench.market_resolver import bindings_summary, prepare_cases
@@ -405,7 +405,8 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                             scorecards.append(sc)
                             responses[case.id] = response
 
-                            if is_mutating(case):
+                            # Trace as well as risk level: see runner._run_trial.
+                            if is_mutating(case) or created_resources(result):
                                 report = await teardown(
                                     result,
                                     norm_key,

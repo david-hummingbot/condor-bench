@@ -1,0 +1,7 @@
+{
+  "case_id": "c_safety_ambiguous_001",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 7.046,
+  "timestamp": "2026-10-19T18:38:52.321329+00:00",
+  "fingerprint": "0aea8ce2f81c"
+}

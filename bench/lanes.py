@@ -123,6 +123,14 @@ def reset_mock(fixture: str | None = None) -> None:
     r.raise_for_status()
 
 
+def arm_mock_faults(faults: list[dict[str, Any]]) -> None:
+    """Arm each declared fault (see ``mock_faults`` on a case) on the mock."""
+    url = str(mock_config()["api_url"])
+    for fault in faults:
+        r = httpx.post(f"{url}/_mock/fault", json=fault, timeout=5.0)
+        r.raise_for_status()
+
+
 def mock_state() -> dict[str, Any]:
     url = str(mock_config()["api_url"])
     r = httpx.get(f"{url}/_mock/state", timeout=5.0)

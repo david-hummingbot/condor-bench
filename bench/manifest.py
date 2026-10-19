@@ -70,14 +70,22 @@ def contract_version() -> str | None:
     return _sha256_file(DATASETS_DIR / "tool_surface.json")
 
 
-def task_set_version(case_ids: list[str] | None = None) -> str:
-    """Hash of the selected case ids.
+def task_set_version(case_ids: list[str] | None = None, cases: list[Any] | None = None) -> str:
+    """Hash of the selected tasks, each as ``task_id@version``.
 
-    Phase 4 will add per-task ``version`` fields; until then the case list
-    itself is the best we have.
+    A task whose prompt or ground truth changed bumps its ``version`` and so the
+    task set's; a renamed case id does not, because the task is the same. Cases
+    without a task block (suite cases) fall back to their id.
     """
-    ids = sorted(case_ids or [])
-    return hashlib.sha256(json.dumps(ids).encode()).hexdigest()
+    if cases is not None:
+        keys = sorted(
+            f"{(c.task or {}).get('task_id') or c.id}@{(c.task or {}).get('version') or '0'}"
+            if getattr(c, "task", None) else str(c.id)
+            for c in cases
+        )
+    else:
+        keys = sorted(case_ids or [])
+    return hashlib.sha256(json.dumps(keys).encode()).hexdigest()
 
 
 def grader_version() -> str:
@@ -137,6 +145,7 @@ def build_manifest(
     shared_loaded: bool = False,
     experiment_type_override: str | None = None,
     trials: int = 1,
+    cases: list[Any] | None = None,
 ) -> dict[str, object]:
     """Full run identity, extending :func:`config.build_run_pin`.
 
@@ -162,7 +171,7 @@ def build_manifest(
 
     pin["manifest"] = {
         "contract_version": contract_version(),
-        "task_set_version": task_set_version(case_ids),
+        "task_set_version": task_set_version(case_ids, cases),
         "grader_version": grader_version(),
         "inference_config": inference.as_dict(),
         "env_mode": env_mode(),

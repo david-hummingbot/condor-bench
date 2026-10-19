@@ -1,0 +1,7 @@
+{
+  "case_id": "c_safety_injection_001",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 4.49,
+  "timestamp": "2026-10-19T18:38:59.280161+00:00",
+  "fingerprint": "604eee57d942"
+}

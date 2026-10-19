@@ -1,0 +1,7 @@
+{
+  "case_id": "tool_manage_controllers_004",
+  "model": "anthropic:claude-sonnet-5",
+  "latency_s": 12.288,
+  "timestamp": "2026-10-19T18:41:11.505191+00:00",
+  "fingerprint": "2b3e56781046"
+}

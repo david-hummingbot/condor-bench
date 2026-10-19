@@ -247,28 +247,65 @@ Results are saved to `results/<run-id>_<model>/` as JSON.
 
 ## Dataset
 
-Three layers.
+Four layers, plus a holdout file.
 
 | File | Cases | What it measures |
 |---|---|---|
-| `datasets/consult.jsonl` | 12 | **Layer 1** — coordinator jobs: user/server/agent lookups, routine authoring, conversation-only design, journal roundtrips. Everyday portfolio/bots/history lookups live on the tool and specialist layers instead. |
-| `datasets/tick.jsonl` | 8 | **Layer 1** — strategy ticks: normal, profit-taking, risk-blocked, near-capacity, error recovery, dry-run, wide-spread stand-down, learnings adherence. Agent-scoped. |
-| `datasets/tools.jsonl` | 38 | **Layer 2** — focused cases per MCP tool. The whole production surface is covered; a drift test fails if a tool isn't. |
+| `datasets/consult.jsonl` | 20 | **Layer 1** — coordinator jobs: user/server/agent lookups, routine authoring, conversation-only design, journal roundtrips, limit-order placement, and the negative/safety tasks (ambiguous intent, prompt injection, duplicate execution, insufficient balance, recoverable tool errors). |
+| `datasets/tick.jsonl` | 10 | **Layer 1** — strategy ticks: normal, profit-taking, risk-blocked, near-capacity, error recovery, dry-run, wide-spread stand-down, learnings adherence. Agent-scoped. |
+| `datasets/tools.jsonl` | 52 | **Layer 2** — focused cases per MCP tool. The whole production surface is covered; a drift test fails if a tool isn't. |
 | `datasets/agents.jsonl` | 22 | **Layer 3** — routed to a specific Condor agent with its own prompt and stores. |
+| `datasets/holdout.jsonl` | 7 | **Holdout** — one unseen task per category. Runs only with `--release`. |
+| `datasets/manifest.json` | — | Generated table of contents: task-set version, counts per category and split, split membership, known gaps. `scripts/build_task_manifest.py` rebuilds it. |
 | `datasets/models.json` | — | Model registry with parameter counts. Drives sweep order and routing. |
 
-Tag `core` (65 cases) still meets the routing floors and is the cheap iteration sweep — see [docs/CASE_LIST.md](docs/CASE_LIST.md). Publish routing from the full 80.
+Tag `core` (still floor-valid) is the cheap iteration sweep — see
+[docs/CASE_LIST.md](docs/CASE_LIST.md). Publish routing from the full library.
+
+### Task bank
+
+Every case carries a `task` block (schema: `TASK_FIELD_DOC` in `bench/dataset.py`):
+a stable `task_id` (`T-<category>-<nnn>`; the case `id` stays as its alias), a
+`version` bumped whenever the prompt or ground truth changes, `difficulty`,
+`safety_tier`, `split`, the initial and expected final state, forbidden
+transitions, partial-credit milestones, a reference solution, and known
+limitations stated out loud.
+
+| Category | What it covers |
+|---|---|
+| `market_reads` | prices, portfolio, history |
+| `order_creation` | opening a single order, position or grid; leverage setup |
+| `executor_lifecycle` | listing, managing, stopping and recovering executors |
+| `bots_controllers` | bot status and logs, controller types and configs |
+| `dex_gateway` | DEX pools, GeckoTerminal, Meteora/Solana LP |
+| `negative_safety` | should-not-act: blocked risk, ambiguity, injection, duplicates, faults |
+| `platform` | Condor's own tooling: servers, models, routines, memory, journal, delegation |
+
+The six trading categories each hold at least ten tasks outside holdout; a
+shortfall must be listed in the manifest's `gaps`. Splits:
+
+* **`regression`** — the release gate. Every case in it that changes state has
+  `post_conditions`, so its end state is read back from the API rather than taken
+  from the model's word. A regression task that fails is flagged on the Runs page.
+* **`dev`** — everything else that still discriminates, including mutating cases
+  whose end state bench cannot yet read back (the reason is in `known_limitations`).
+* **`holdout`** — invisible to `--tags core`, the dashboard and every default run;
+  `test --release` / `sweep --release` add it. A production failure becomes a
+  regression task only after a root-cause review.
+
+Select by split with `--split regression`. Cases that need a fault only the mock
+can stage declare `"lanes": ["mock"]` and `mock_faults`, and are left out of live
+runs automatically.
 
 Every case carries a `risk_level` (`read_only` / `mutating` / `destructive`) and
-resolves to a **routing domain**. Every risk level runs — the level drives teardown
-and the destructive score floor, not whether the case is allowed; isolation comes
-from pointing at a test-connector-only API. Layer 2 domains are namespaced `tool:` because a
-capability bucket like "market data" is not something Condor can route to — those
-verdicts come out of the matrix's per-tool axis instead.
-
-`FRAMEWORK_IMPROVEMENTS.md` §10 proposed a per-tool competency matrix and a
-capability→recommendation report as future work. Layers 2 and 3 plus the Matrix
-and Router tabs are that work; the section is kept as the rationale.
+resolves to a **routing domain**. Every risk level runs — the level drives the
+destructive score floor, not whether the case is allowed; isolation comes from
+pointing at a test-connector-only API. Teardown runs after any trial that created
+something, whatever the case's level — a read-only case is exactly where a model
+that falls for a prompt injection creates something nobody planned for. Layer 2
+domains are namespaced `tool:` because a capability bucket like "market data" is
+not something Condor can route to — those verdicts come out of the matrix's
+per-tool axis instead.
 
 ---
 
