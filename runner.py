@@ -237,6 +237,9 @@ def test(
     case_ids: Optional[str] = typer.Option(
         None, "--cases", help="Comma-separated case ids — run just these (after the other filters)"
     ),
+    task_category: Optional[str] = typer.Option(
+        None, "--task-category", help="Comma-separated task categories (e.g. negative_safety)"
+    ),
     consult_only: bool = typer.Option(False, help="Only consult cases"),
     tick_only: bool = typer.Option(False, help="Only tick cases"),
     skip_unavailable: bool = typer.Option(
@@ -298,6 +301,7 @@ def test(
         risk_levels=_resolve_risk_levels(risk),
         tags=_resolve_tags(tags),
         splits=_resolve_splits(split, release),
+        task_categories=[c.strip() for c in task_category.split(",") if c.strip()] if task_category else None,
     )
     cases = _cases_for_lane(cases)
     if case_ids:
@@ -1282,6 +1286,9 @@ def suite_run_cmd(
     trials: Optional[int] = typer.Option(
         None, "--trials", min=1, help="Trials per case (default: the suite's `trials`, else 1)"
     ),
+    preset: Optional[str] = typer.Option(
+        None, "--preset", help="Experiment preset from experiments/ (e.g. a_example); enforces its freeze rules"
+    ),
 ) -> None:
     """Run a suite across its environments via subprocess workers."""
     import uuid
@@ -1303,9 +1310,14 @@ def suite_run_cmd(
             experiment_type=experiment,
             adhoc=adhoc,
             trials=trials,
+            preset=preset,
         )
 
-    result = asyncio.run(_go())
+    try:
+        result = asyncio.run(_go())
+    except ValueError as exc:  # FreezeViolationError, a bad preset
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
     console.print(f"[bold]run_group_id[/bold] {result['run_group_id']}")
     for m in result["members"]:
         console.print(f"  {m}")
@@ -1362,7 +1374,16 @@ def ladder(
     from eval.l0_contracts.contracts import format_report, run_l0
 
     l0 = asyncio.run(run_l0())
-    (out_dir / "l0.json").write_text(_json.dumps({**l0, "env_mode": lane}, indent=2))
+    from config import condor_checkout_state
+
+    # The checkout the contract was checked on: a promotion report only accepts
+    # an L0 pass bit for the exact commit it promotes.
+    condor = condor_checkout_state()
+    (out_dir / "l0.json").write_text(_json.dumps(
+        {**l0, "env_mode": lane, "ladder_id": ladder_id,
+         "condor": {k: condor.get(k) for k in ("path", "branch", "commit", "dirty_files")}},
+        indent=2, default=str,
+    ))
     console.print(format_report(l0))
     if l0["failed"]:
         console.print(f"[red]L0 failed — not climbing to {upto}.[/red] Report: {out_dir / 'l0.json'}")
@@ -1395,6 +1416,34 @@ def ladder(
 
     _print_summary(scorecards, model, PASS_THRESHOLD)
     console.print(f"\n[bold]L1 run saved:[/bold] {run_dir}")
+
+
+@app.command()
+def promote(
+    baseline_run: str = typer.Option(..., "--baseline", help="Run dir on the current Condor contract"),
+    candidate_run: str = typer.Option(..., "--candidate", help="Run dir on the new Condor contract"),
+    ladder_id: Optional[str] = typer.Option(
+        None, "--ladder", help="Ladder id whose L0/L1 ran on the candidate commit (the lower-layer pass bits)"
+    ),
+) -> None:
+    """Contract promotion report: Experiment A gates on the holdout split.
+
+    Exits non-zero unless the report can claim a live promotion — every gate
+    passing, both runs live with the full holdout, and L0/L1 pass bits for the
+    candidate's commit.
+    """
+    from bench.promotion import PromotionError, build_report, format_report, save_report
+
+    try:
+        report = build_report(baseline_run, candidate_run, ladder_id=ladder_id)
+    except PromotionError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    path = save_report(report)
+    console.print(format_report(report))
+    console.print(f"\n[bold]Report saved:[/bold] {path}")
+    if not report["claims_live_promotion"]:
+        raise typer.Exit(1)
 
 
 @app.command("nim-smoke")

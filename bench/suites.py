@@ -214,6 +214,18 @@ def get_suite(suite_id: str) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
+def _checked_preset(name: Any) -> str | None:
+    """A preset name that loads, or None. Refused at save, not first at run time."""
+    if not name:
+        return None
+    from bench.presets import PresetError, load_preset
+
+    try:
+        return load_preset(str(name))["name"]
+    except PresetError as exc:
+        raise SuiteStoreError(str(exc)) from exc
+
+
 def create_suite(payload: dict[str, Any]) -> dict[str, Any]:
     ensure_store_dirs()
     suite_id = _validate_id(
@@ -234,6 +246,7 @@ def create_suite(payload: dict[str, Any]) -> dict[str, Any]:
         "models": models,
         "include_in_matrix": bool(payload.get("include_in_matrix", False)),
         "notes": str(payload.get("notes") or ""),
+        "preset": _checked_preset(payload.get("preset")),
         "updated_at": _utcnow(),
     }
     _suite_dir(suite_id).mkdir(parents=True, exist_ok=True)
@@ -259,6 +272,8 @@ def update_suite(
     for key in ("name", "models", "include_in_matrix", "notes"):
         if key in patch:
             current[key] = patch[key]
+    if "preset" in patch:
+        current["preset"] = _checked_preset(patch["preset"])
     current["version"] = int(current.get("version", 0)) + 1
     current["updated_at"] = _utcnow()
     atomic_write_json(_suite_meta_path(suite_id), current)

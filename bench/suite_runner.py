@@ -173,6 +173,7 @@ async def run_suite(
     experiment_type: str | None = None,
     adhoc: bool = False,
     trials: int | None = None,
+    preset: str | None = None,
 ) -> dict[str, Any]:
     """Fan out suite × environments × models via subprocess workers.
 
@@ -187,6 +188,17 @@ async def run_suite(
     model_cfgs = models or list(suite.get("models") or [])
     if not model_cfgs:
         raise ValueError("Suite has no models configured")
+
+    # A preset declares the experiment; its freeze block is what the check below
+    # enforces. A bad preset or a contradiction with the caller refuses the run.
+    preset = preset or suite.get("preset")
+    if preset:
+        from bench.presets import PresetError, apply_preset
+
+        try:
+            suite = apply_preset(suite, preset, experiment_type=experiment_type, adhoc=adhoc)
+        except PresetError as exc:
+            raise FreezeViolationError(str(exc)) from exc
 
     # Enforce A/B freeze rules before scheduling members
     effective_exp_type = check_experiment_freeze(
@@ -281,6 +293,7 @@ async def run_suite(
             ),
             "require_clean": bool(env.get("require_clean", True)),
             "experiment_type": effective_exp_type,
+            "preset": suite.get("preset"),
             "trials": trials,
         }
         job_path = Path(tempfile.mkstemp(prefix="suite_job_", suffix=".json")[1])

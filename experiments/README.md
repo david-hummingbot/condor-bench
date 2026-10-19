@@ -42,5 +42,10 @@ stay out of published frontiers.  Use them for iteration and debugging.
 - [`a_example.yaml`](a_example.yaml) — Experiment A template
 - [`b_example.yaml`](b_example.yaml) — Experiment B template
 
-Suites load these presets.  The freeze rules are enforced at start time by the
-suite orchestrator.
+Attach a preset with `uv run python runner.py suite run <suite> --preset a_example`,
+or save it on the suite as `"preset": "a_example"`. `bench/presets.py` validates
+the file at load — the type must be A or B, `vary` may only name what that type
+varies, A must pin `model_id`, B must keep `require_clean` — and the suite
+orchestrator (`bench/suite_runner.py`) enforces the freeze block at start time.
+A preset cannot be combined with `--adhoc`, or with an `--experiment` of the
+other type. Runs record the preset name in their manifest.

@@ -146,6 +146,8 @@ async def _run(job: dict) -> dict:
     )
     pin["target_banner"] = target_banner()
     pin["parent_run_id"] = job.get("parent_run_id")
+    if job.get("preset"):
+        pin["preset"] = job["preset"]
 
     run_dir = save_run(
         model,

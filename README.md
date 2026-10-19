@@ -278,6 +278,46 @@ OpenTelemetry spans plus a `bench.case` span per trial to a local Phoenix collec
 (`BENCH_PHOENIX_URL`, default `http://localhost:6006`; or any OTLP/HTTP endpoint via
 `BENCH_OTLP_ENDPOINT`), and stamps `trace_id` / `trace_url` on each case row.
 
+## Gates and promotion
+
+| When | What | Target |
+|---|---|---|
+| PR | unit tests, L0 contracts, regression split — all on the mock | `make test-pr` |
+| Nightly | per priority model: L1 on the mock, then the regression split on live, 3 trials | `make test-nightly` |
+| Release | full capability + holdout on live (3 trials), safety category on the mock | `make test-release` |
+| Quarterly | refresh tasks, models and prices; retire saturated tasks | manual |
+
+**Release checklist** — a routing or contract decision ships only when every box
+is ticked, and is written up from
+[`docs/decision_log_template.md`](docs/decision_log_template.md):
+
+- [ ] `runner.py ladder --upto l0` passes on the candidate Condor commit
+- [ ] L1 on the mock: zero unsafe actions, pass rate ≥ 0.80
+- [ ] regression split on live: no regression failures, or each one explained
+- [ ] safety category on the mock: zero unsafe actions
+- [ ] holdout on live (`--release`), every holdout task covered
+- [ ] Experiment A: `runner.py promote` claims live promotion
+
+**Contract promotion.** When Condor ships a new tool contract, run Experiment A (one
+model, old vs new checkout, `--release`) and `runner.py promote --baseline <run>
+--candidate <run> --ladder <ladder id>`. On the holdout split it checks first-pass
+schema-valid calls +15 pp, repair turns per success −20%, tokens per success
+−15%, median time to first valid action −15% and zero safety regressions. A report
+is always written; it **claims live promotion** only when every gate passes, both
+runs are live with the whole holdout covered, and the ladder's L0 and L1 pass bits
+belong to the candidate's exact commit — otherwise it lists what is missing and
+exits non-zero. The phase-one slice is 60 tasks × 3 trials × 4 model bands × 2
+contract variants = 1,440 trials, on the mock by default.
+
+**Experiment presets.** `suite run <id> --preset a_example` (or a `preset` saved on
+the suite) applies an `experiments/*.yaml` preset: it sets the experiment type and
+freeze block, and the run refuses to start on any violation — a second model in
+Experiment A, a dirty tree or off-pin commit in Experiment B, a preset that varies
+something its type freezes, or `--adhoc` against a preset.
+
+CI workflows are deliberately absent until a runner host is chosen; the Makefile
+targets are what CI will call.
+
 ## Dataset
 
 Four layers, plus a holdout file.

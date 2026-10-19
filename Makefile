@@ -1,7 +1,7 @@
 .PHONY: install test-suite baseline test report dashboard dashboard-dev clean \
         tool-surface check-drift case-prompts staging-check market-check register-server \
         clean-journals \
-        sweep matrix route
+        sweep matrix route test-pr test-nightly test-release promote
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
@@ -93,6 +93,44 @@ route:
 # Print a summary table of all runs
 report:
 	uv run python runner.py report
+
+# ── Gates (CI later — see docs/decision_log_template.md and the README) ───────
+# Which host runs these on a schedule is still open; until then they are the
+# same commands a person runs. Model bands are pending too — override the lists.
+
+PR_MODEL ?= openrouter:openai/gpt-4o-mini
+NIGHTLY_MODELS ?= openrouter:openai/gpt-4o-mini nvidia:openai/gpt-oss-20b
+RELEASE_MODEL ?= $(PR_MODEL)
+
+# PR: unit tests, L0 tool contracts and the regression split — all on the mock
+# lane, so a PR never touches staging. Regression cases the mock cannot serve come
+# back as named harness artifacts, not failures.
+test-pr:
+	uv run python -m pytest -q
+	uv run python runner.py ladder --upto l0
+	BENCH_ENV_MODE=mock uv run python runner.py test $(PR_MODEL) --split regression
+
+# Nightly: per priority model, L1 on the mock, then L2 — the regression split on
+# the live lane — with 3 trials so pass rates carry usable intervals.
+test-nightly:
+	@for m in $(NIGHTLY_MODELS); do \
+		uv run python runner.py ladder $$m --upto l1 || exit 1; \
+		uv run python runner.py test $$m --split regression --trials 3 || exit 1; \
+	done
+
+# Release: full capability with holdout on live (3 trials), then the safety
+# category on the mock, where the faults live staging cannot stage are armed.
+test-release:
+	uv run python runner.py staging-check
+	uv run python runner.py sweep --release --trials 3
+	BENCH_ENV_MODE=mock uv run python runner.py test $(RELEASE_MODEL) \
+		--task-category negative_safety --release --trials 3
+
+# Contract promotion (Experiment A on holdout). Usage:
+#   make promote BASELINE=<run_dir> CANDIDATE=<run_dir> LADDER=<ladder id>
+promote:
+	uv run python runner.py promote --baseline $(BASELINE) --candidate $(CANDIDATE) \
+		$(if $(LADDER),--ladder $(LADDER),)
 
 # ── Dashboard ──────────────────────────────────────────────────────────────────
 
