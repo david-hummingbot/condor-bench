@@ -14,6 +14,8 @@ from typing import Any, Awaitable, Callable
 from bench.suites import get_environment, get_suite
 from config import ROOT
 
+DEFAULT_TRIALS = 1
+
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
 WaitFn = Callable[[], Awaitable[None]]
 
@@ -170,6 +172,7 @@ async def run_suite(
     wait_if_paused: WaitFn | None = None,
     experiment_type: str | None = None,
     adhoc: bool = False,
+    trials: int | None = None,
 ) -> dict[str, Any]:
     """Fan out suite × environments × models via subprocess workers.
 
@@ -193,6 +196,10 @@ async def run_suite(
         experiment_type=experiment_type,
         adhoc=adhoc,
     )
+
+    # Every member of a group runs the same trial count — a 1-trial member is not
+    # comparable with a 3-trial one.
+    trials = max(1, int(trials or suite.get("trials") or DEFAULT_TRIALS))
 
     run_group_id = uuid.uuid4().hex
     members_plan: list[tuple[dict, dict]] = []
@@ -274,6 +281,7 @@ async def run_suite(
             ),
             "require_clean": bool(env.get("require_clean", True)),
             "experiment_type": effective_exp_type,
+            "trials": trials,
         }
         job_path = Path(tempfile.mkstemp(prefix="suite_job_", suffix=".json")[1])
         job_path.write_text(json.dumps(job))

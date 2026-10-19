@@ -105,25 +105,31 @@ async def _run(job: dict) -> dict:
     scorecards = []
     responses: dict[str, str] = {}
 
+    from bench.reporter import trial_key
+    from bench.scorer import with_trial
+
+    trials = max(1, int(job.get("trials") or 1))
     for case in cases:
         ensure_probe_journal(case)
         warmup = await ensure_markets_for_case(case)
         if not warmup.ok:
-            scorecards.append(warmup_failure_card(case, model, warmup))
+            card = warmup_failure_card(case, model, warmup)
+            scorecards.extend(with_trial(card, t) for t in range(1, trials + 1))
             continue
-        result = await run_case(case, model)
-        baseline = store.load(case.id)
-        baseline_latency = baseline.latency_s if baseline else result.latency_s
-        card = await score_case(case, result, baseline_latency)
-        scorecards.append(card)
-        responses[case.id] = result.response
-        if is_mutating(case):
-            await teardown(
-                result,
-                model,
-                agent_slug=getattr(case, "agent_slug", None),
-                tick=getattr(case, "type", "") == "tick",
-            )
+        for trial in range(1, trials + 1):
+            result = await run_case(case, model)
+            baseline = store.load(case.id)
+            baseline_latency = baseline.latency_s if baseline else result.latency_s
+            card = await score_case(case, result, baseline_latency, trial_idx=trial)
+            scorecards.append(card)
+            responses[trial_key(case.id, trial)] = result.response
+            if is_mutating(case):
+                await teardown(
+                    result,
+                    model,
+                    agent_slug=getattr(case, "agent_slug", None),
+                    tick=getattr(case, "type", "") == "tick",
+                )
 
     pin = build_manifest(
         run_type="suite",
@@ -135,6 +141,7 @@ async def _run(job: dict) -> dict:
         include_in_matrix=include_in_matrix,
         shared_loaded=True,
         experiment_type_override=job.get("experiment_type"),
+        trials=trials,
     )
     pin["target_banner"] = target_banner()
     pin["parent_run_id"] = job.get("parent_run_id")

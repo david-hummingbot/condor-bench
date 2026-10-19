@@ -15,7 +15,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from config import RESULTS_DIR
+from bench import stats
+from config import PASS_THRESHOLD, RESULTS_DIR
 
 
 def load_summary(run_dir: str | Path) -> dict[str, Any]:
@@ -116,7 +117,10 @@ def varied_variables(members: list[dict[str, Any]]) -> list[str]:
     return varied
 
 
-def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
+def compare_summaries(
+    members: list[dict[str, Any]],
+    cases: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Compare 2+ member summaries. Returns comparable + differences + deltas.
 
     ``differences`` holds the reasons a comparison was refused and is empty when
@@ -141,12 +145,17 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
         differences.append("partial_group")
 
     varied = varied_variables(members)
+    if "manifest:trials" in varied:
+        # Not a variable under test: a 1-trial and a 3-trial run measure the same
+        # thing with different precision, and their rates cannot be differenced.
+        differences.append("manifest:trials")
+        varied = [v for v in varied if v != "manifest:trials"]
     if len(varied) > 1:
         differences.extend(varied)
     manifest_diffs = diff_manifests(members)
 
     comparable = not differences
-    deltas = _build_deltas(members) if comparable else None
+    deltas = _build_deltas(members, cases) if comparable else None
 
     return {
         "comparable": comparable,
@@ -174,7 +183,44 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _build_deltas(members: list[dict[str, Any]]) -> dict[str, Any]:
+def _scored_by_trial(records: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    """Scored rows keyed ``case_id#trial`` — the pairing unit for A/B deltas."""
+    composite: dict[str, float] = {}
+    passed: dict[str, float] = {}
+    for r in records:
+        if r.get("error") or r.get("harness_artifact"):
+            continue
+        key = f"{r.get('case_id')}#{int(r.get('trial_idx') or 1)}"
+        composite[key] = float(r.get("composite") or 0.0)
+        verdict = r.get("passed")
+        if verdict is None:  # saved before `passed` was persisted
+            verdict = composite[key] >= PASS_THRESHOLD
+        passed[key] = 1.0 if verdict else 0.0
+    return {"composite": composite, "passed": passed}
+
+
+def paired_deltas(
+    base_records: list[dict[str, Any]], other_records: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Per-(case, trial) paired differences, other minus base, with bootstrap CIs.
+
+    Pairing on the same task and trial index removes between-task variance, which
+    is what lets a 3-trial A/B on a few dozen tasks resolve a real difference.
+    Rows scored on only one side are left out and counted.
+    """
+    base = _scored_by_trial(base_records)
+    other = _scored_by_trial(other_records)
+    out: dict[str, Any] = {}
+    for metric in ("composite", "passed"):
+        out[metric] = stats.paired_deltas(base[metric], other[metric])
+    out["unpaired"] = len(set(base["composite"]) ^ set(other["composite"]))
+    return out
+
+
+def _build_deltas(
+    members: list[dict[str, Any]],
+    cases: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Pairwise deltas vs the first member (baseline)."""
     base = members[0]
     base_n = int(base.get("cases_scored") or base.get("cases_total") or 0)
@@ -194,6 +240,14 @@ def _build_deltas(members: list[dict[str, Any]]) -> dict[str, Any]:
             "latency_n": {"baseline": base_n, "compare": other_n},
             "avg_total_tokens_delta": _usage_delta(base, other),
             "domains": _domain_deltas(base, other),
+            "paired": (
+                paired_deltas(
+                    cases.get(str(base.get("run_dir")), []),
+                    cases.get(str(other.get("run_dir")), []),
+                )
+                if cases
+                else None
+            ),
         }
         out["pairs"].append(pair)
     return out
@@ -247,4 +301,7 @@ def compare_runs(
             "members": [],
             "deltas": None,
         }
-    return compare_summaries(members)
+    from bench.reporter import load_run_cases
+
+    cases = {str(m.get("run_dir")): load_run_cases(str(m.get("run_dir"))) for m in members}
+    return compare_summaries(members, cases)

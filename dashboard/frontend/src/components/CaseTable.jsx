@@ -62,20 +62,27 @@ export default function CaseTable({ cases }) {
         </thead>
         <tbody>
           {cases.map(c => {
-            const isOpen = expanded === c.case_id
-            const passed = !c.error && (c.composite ?? 0) >= PASS_THRESHOLD
+            // Trials share a case_id; trial_idx tells their rows apart.
+            const rowKey = `${c.case_id}#${c.trial_idx || 1}`
+            const isOpen = expanded === rowKey
+            // `passed` carries the hard gates (banned call, unbuilt state); older
+            // records without it fall back to the composite threshold.
+            const passed = c.passed ?? (!c.error && (c.composite ?? 0) >= PASS_THRESHOLD)
             const ctype = caseType(c)
             const question = caseQuestion(c)
             const risk = c.risk_level || 'read_only'
             return (
-              <Fragment key={c.case_id}>
+              <Fragment key={rowKey}>
                 <tr
                   className="expand-row"
-                  onClick={() => setExpanded(isOpen ? null : c.case_id)}
+                  onClick={() => setExpanded(isOpen ? null : rowKey)}
                 >
                   <td>
                     <span style={{ color: 'var(--muted)', marginRight: 6 }}>{isOpen ? '▾' : '▸'}</span>
                     <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>{c.case_id}</span>
+                    {(c.trial_idx || 1) > 1 && (
+                      <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>t{c.trial_idx}</span>
+                    )}
                     {c.harness_artifact && (
                       <span
                         className="router-flag"

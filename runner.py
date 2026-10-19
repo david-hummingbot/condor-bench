@@ -242,6 +242,14 @@ def test(
         "artifacts instead of refusing the run. Opt-in: the run is thinner than "
         "it looks, so routing published from it under-covers those domains.",
     ),
+    trials: int = typer.Option(
+        1,
+        "--trials",
+        min=1,
+        help="Trials per case (opt in with --trials 3). Each is its own row "
+        "(trial_idx); pass rates carry Wilson intervals over every trial. A 1-trial "
+        "run is not comparable with a 3-trial one.",
+    ),
     order: str = typer.Option(
         "easiest-first",
         help="Case order: 'easiest-first' (cheap read-only probes first, "
@@ -258,6 +266,7 @@ def test(
     from bench.mcp_provider import target_banner
     from bench.manifest import build_manifest
     from bench.reporter import save_run
+    from bench.scorer import with_trial
     from bench.staging_health import StagingUnhealthy, assert_ready
     from config import PASS_THRESHOLD
 
@@ -303,14 +312,18 @@ def test(
         )
 
     run_id = uuid.uuid4().hex[:8]
-    console.print(f"\nBenchmarking [bold]{model}[/bold] on {len(cases)} cases (run {run_id})")
+    console.print(
+        f"\nBenchmarking [bold]{model}[/bold] on {len(cases)} cases × {trials} trial(s) (run {run_id})"
+    )
     console.print(f"  target: {target_banner()}\n")
 
     memory_reset = _reset_acp_memory(model, run_id)
 
-    scorecards, responses = asyncio.run(_run_cases(cases, model, store))
+    scorecards, responses = asyncio.run(_run_cases(cases, model, store, trials))
     scorecards = [
-        unresolvable_card(case, model, resolutions[case.id]) for case in market_skips
+        with_trial(unresolvable_card(case, model, resolutions[case.id]), t)
+        for case in market_skips
+        for t in range(1, trials + 1)
     ] + scorecards
 
     pin = build_manifest(
@@ -318,6 +331,7 @@ def test(
         case_ids=[c.id for c in cases],
         models=[model],
         shared_loaded=True,
+        trials=trials,
     )
     pin["market_bindings"] = bindings_summary(resolutions)
     if memory_reset is not None:
@@ -380,90 +394,109 @@ def _reset_acp_memory(model: str, run_id: str):
     return reset
 
 
-async def _run_cases(cases, model: str, store):
-    """Run and score every case, returning (scorecards, responses)."""
-    from bench.cleanup import teardown
-    from bench.client import run_case
-    from bench.dataset import is_mutating
+async def _run_cases(cases, model: str, store, trials: int = 1):
+    """Run and score every case *trials* times, returning (scorecards, responses).
+
+    A case's trials run back to back on the same market binding (bound once,
+    before this is called), so trial groups pair across runs. Responses are keyed
+    by :func:`bench.reporter.trial_key`. Warmup is checked once per case: a
+    failure costs every trial, and each trial gets its own skip card so the
+    run's row count stays cases × trials.
+    """
     from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.probe_journal import ensure_probe_journal
-    from bench.scorer import score_case
-    from bench.scorer import timeout_card
-    from config import PASS_THRESHOLD, case_timeout_s
+    from bench.scorer import with_trial
 
     scorecards, responses = [], {}
     for case in cases:
-        console.print(f"  [dim]{case.id}[/dim] ({case.type})", end=" ")
         try:
             journal_note = ensure_probe_journal(case)
             warmup = await ensure_markets_for_case(case)
-            if not warmup.ok:
-                card = warmup_failure_card(case, model, warmup)
-                scorecards.append(card)
-                console.print(f"→ [yellow]harness skip[/yellow]")
-                console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
-                continue
-            for note in ([journal_note] if journal_note else []) + warmup.notes:
-                console.print(f"      [dim]{note}[/dim]")
-
-            # Baseline first: the ceiling is sized from it, so a slow case gets room
-            # proportional to how slow it has always been.
-            baseline = store.load(case.id)
-            timeout_s = case_timeout_s(baseline.latency_s if baseline else None)
-            result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
-            baseline_latency = baseline.latency_s if baseline else result.latency_s
-            card = await score_case(case, result, baseline_latency)
-            scorecards.append(card)
-            responses[case.id] = result.response
-
-            status = (
-                f"[green]{card.composite:.2f}[/green]"
-                if card.composite >= PASS_THRESHOLD
-                else f"[red]{card.composite:.2f}[/red]"
-            )
-            extra = ""
-            if card.usage.get("total_tokens"):
-                extra = f", {card.usage['total_tokens']:,} tok"
-            console.print(f"→ {status} ({result.latency_s:.1f}s{extra})")
-            if card.harness_artifact:
-                console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
-
-            # Undo what a mutating case created, whatever its score — an aborted
-            # half-created resource still needs removing.
-            if is_mutating(case):
-                report = await teardown(
-                    result,
-                    model,
-                    agent_slug=getattr(case, "agent_slug", None),
-                    tick=getattr(case, "type", "") == "tick",
-                )
-                if report.removed:
-                    console.print(f"      [dim]cleaned up {len(report.removed)} resource(s)[/dim]")
-                for row in report.kept_positions:
-                    console.print(
-                        f"      [yellow]position kept: {row.get('tool')} "
-                        f"{row.get('identifier')} — {row.get('note')}[/yellow]"
-                    )
-                for row in report.failed + report.manual:
-                    console.print(
-                        f"      [yellow]left behind: {row.get('tool')} "
-                        f"{row.get('identifier')} — {row.get('error') or row.get('reason', 'manual')}[/yellow]"
-                    )
-        except asyncio.TimeoutError:
-            # Record it. Appending nothing made the case vanish from the run entirely,
-            # so a thinned domain looked like a domain nobody had asked about.
-            baseline = store.load(case.id)
-            base_s = baseline.latency_s if baseline else 0.0
-            scorecards.append(
-                timeout_card(case, model, case_timeout_s(base_s or None), base_s)
-            )
-            console.print(
-                f"[red]TIMEOUT after {case_timeout_s(base_s or None):.0f}s — "
-                "recorded as a harness artifact[/red]"
-            )
         except Exception as exc:
-            console.print(f"[red]ERROR: {exc}[/red]")
+            console.print(f"  [dim]{case.id}[/dim] [red]ERROR: {exc}[/red]")
+            continue
+        if not warmup.ok:
+            card = warmup_failure_card(case, model, warmup)
+            scorecards.extend(with_trial(card, t) for t in range(1, trials + 1))
+            console.print(f"  [dim]{case.id}[/dim] ({case.type}) → [yellow]harness skip[/yellow]")
+            console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
+            continue
+        for note in ([journal_note] if journal_note else []) + warmup.notes:
+            console.print(f"      [dim]{note}[/dim]")
+        for trial in range(1, trials + 1):
+            label = f" [dim]t{trial}/{trials}[/dim]" if trials > 1 else ""
+            console.print(f"  [dim]{case.id}[/dim] ({case.type}){label}", end=" ")
+            await _run_trial(case, model, store, trial, scorecards, responses)
     return scorecards, responses
+
+
+async def _run_trial(case, model: str, store, trial: int, scorecards: list, responses: dict) -> None:
+    """One trial of one case: run, score, record, and tear down what it created."""
+    from bench.cleanup import teardown
+    from bench.client import run_case
+    from bench.dataset import is_mutating
+    from bench.reporter import trial_key
+    from bench.scorer import score_case, timeout_card, with_trial
+    from config import PASS_THRESHOLD, case_timeout_s
+
+    try:
+        # Baseline first: the ceiling is sized from it, so a slow case gets room
+        # proportional to how slow it has always been.
+        baseline = store.load(case.id)
+        timeout_s = case_timeout_s(baseline.latency_s if baseline else None)
+        result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
+        baseline_latency = baseline.latency_s if baseline else result.latency_s
+        card = await score_case(case, result, baseline_latency, trial_idx=trial)
+        scorecards.append(card)
+        responses[trial_key(case.id, trial)] = result.response
+
+        status = (
+            f"[green]{card.composite:.2f}[/green]"
+            if card.composite >= PASS_THRESHOLD
+            else f"[red]{card.composite:.2f}[/red]"
+        )
+        extra = ""
+        if card.usage.get("total_tokens"):
+            extra = f", {card.usage['total_tokens']:,} tok"
+        console.print(f"→ {status} ({result.latency_s:.1f}s{extra})")
+        if card.harness_artifact:
+            console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
+
+        # Undo what a mutating case created, whatever its score — an aborted
+        # half-created resource still needs removing.
+        if is_mutating(case):
+            report = await teardown(
+                result,
+                model,
+                agent_slug=getattr(case, "agent_slug", None),
+                tick=getattr(case, "type", "") == "tick",
+            )
+            if report.removed:
+                console.print(f"      [dim]cleaned up {len(report.removed)} resource(s)[/dim]")
+            for row in report.kept_positions:
+                console.print(
+                    f"      [yellow]position kept: {row.get('tool')} "
+                    f"{row.get('identifier')} — {row.get('note')}[/yellow]"
+                )
+            for row in report.failed + report.manual:
+                console.print(
+                    f"      [yellow]left behind: {row.get('tool')} "
+                    f"{row.get('identifier')} — {row.get('error') or row.get('reason', 'manual')}[/yellow]"
+                )
+    except asyncio.TimeoutError:
+        # Record it. Appending nothing made the case vanish from the run entirely,
+        # so a thinned domain looked like a domain nobody had asked about.
+        baseline = store.load(case.id)
+        base_s = baseline.latency_s if baseline else 0.0
+        scorecards.append(
+            with_trial(timeout_card(case, model, case_timeout_s(base_s or None), base_s), trial)
+        )
+        console.print(
+            f"[red]TIMEOUT after {case_timeout_s(base_s or None):.0f}s — "
+            "recorded as a harness artifact[/red]"
+        )
+    except Exception as exc:
+        console.print(f"[red]ERROR: {exc}[/red]")
 
 
 def _order_cases(cases: list, order: str, store) -> list:
@@ -577,6 +610,14 @@ def sweep(
         help="Record cases whose declared markets cannot bind as harness "
         "artifacts instead of refusing the run.",
     ),
+    trials: int = typer.Option(
+        1,
+        "--trials",
+        min=1,
+        help="Trials per case (opt in with --trials 3). Each is its own row "
+        "(trial_idx); pass rates carry Wilson intervals over every trial. A 1-trial "
+        "run is not comparable with a 3-trial one.",
+    ),
     order: str = typer.Option(
         "easiest-first",
         help="Case order: 'easiest-first' or 'dataset'. See `test --help`.",
@@ -592,6 +633,7 @@ def sweep(
     from bench.matrix import load_models
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
+    from bench.scorer import with_trial
     from bench.staging_health import StagingUnhealthy, assert_ready
     from config import PASS_THRESHOLD
 
@@ -642,7 +684,7 @@ def sweep(
         }
     )
     console.print(
-        f"\nSweeping [bold]{len(registry)}[/bold] model(s) × {len(cases)} case(s)"
+        f"\nSweeping [bold]{len(registry)}[/bold] model(s) × {len(cases)} case(s) × {trials} trial(s)"
     )
     console.print(f"  target: {target_banner()}\n")
 
@@ -652,10 +694,11 @@ def sweep(
         console.print(f"[bold]{entry.key}[/bold] ({size})")
         sweep_run_id = uuid.uuid4().hex[:8]
         memory_reset = _reset_acp_memory(entry.key, sweep_run_id)
-        scorecards, responses = asyncio.run(_run_cases(cases, entry.key, store))
+        scorecards, responses = asyncio.run(_run_cases(cases, entry.key, store, trials))
         scorecards = [
-            unresolvable_card(case, entry.key, resolutions[case.id])
+            with_trial(unresolvable_card(case, entry.key, resolutions[case.id]), t)
             for case in market_skips
+            for t in range(1, trials + 1)
         ] + scorecards
         if not scorecards:
             console.print("  [yellow]no cases scored — skipping save[/yellow]")
@@ -665,6 +708,7 @@ def sweep(
             case_ids=[c.id for c in cases],
             models=[entry.key],
             shared_loaded=True,
+            trials=trials,
         )
         pin["sweep"] = True
         pin["market_bindings"] = bindings_summary(resolutions)
@@ -780,11 +824,20 @@ def _cell_label(cell: dict | None) -> str:
     rate = cell.get("pass_rate")
     if rate is None:
         return "[dim]—[/dim]"
-    colour = "green" if rate >= 0.8 else ("yellow" if rate >= 0.5 else "red")
+    # Colour follows the interval, not the point: green only when the Wilson lower
+    # bound clears the gate, yellow while the interval straddles it.
+    status = cell.get("gate_status")
+    if status is None:
+        status = "passing" if rate >= 0.8 else ("not_yet_passing" if rate >= 0.5 else "failing")
+    colour = {"passing": "green", "not_yet_passing": "yellow"}.get(status, "red")
+    ci = cell.get("pass_rate_ci")
+    span = f" [dim][{ci[0]:.0%}–{ci[1]:.0%}][/dim]" if ci else ""
     suffix = f" [dim]({cell['scored']})[/dim]"
     if cell.get("destructive_failures"):
         suffix += " [red]![/red]"
-    return f"[{colour}]{rate:.0%}[/{colour}]{suffix}"
+    if cell.get("unsafe"):
+        suffix += f" [red]unsafe {cell['unsafe']}[/red]"
+    return f"[{colour}]{rate:.0%}[/{colour}]{span}{suffix}"
 
 
 @app.command()
@@ -813,7 +866,7 @@ def route(
     ),
     models: Path = typer.Option(Path("datasets/models.json"), help="Model registry"),
 ) -> None:
-    """Generate routing recommendations: the smallest model that passes each domain."""
+    """Routing recommendations: the cheapest model whose Wilson lower bound passes each domain."""
     from bench.matrix import save_matrix
     from bench.routing import generate, save_routing
     from config import MIN_TOOL_CASES, TOOL_PASS_RATE
@@ -841,6 +894,8 @@ def route(
     table.add_column("Model")
     table.add_column("Size", justify="right")
     table.add_column("Pass", justify="right")
+    table.add_column("95% CI", justify="right")
+    table.add_column("$/success", justify="right")
     table.add_column("Avg tokens", justify="right")
     table.add_column("Rationale")
     for domain, rec in routing["recommendations"].items():
@@ -848,11 +903,15 @@ def route(
         note = rec["rationale"]
         if rec.get("no_local_passed"):
             note += " (no local model passed)"
+        ci = rec.get("pass_rate_ci")
+        cps = rec.get("cost_per_success")
         table.add_row(
             domain,
             rec["model"],
             f"{rec['params_b']}B" if rec.get("params_b") else "cloud",
             f"{rec['pass_rate']:.0%}" if rec.get("pass_rate") is not None else "—",
+            f"{ci[0]:.0%}–{ci[1]:.0%}" if ci else "—",
+            f"${cps:.4f}" if cps is not None else "[dim]n/a[/dim]",
             f"{tokens:,.0f}" if tokens else "[dim]n/a[/dim]",
             note,
         )
@@ -863,8 +922,9 @@ def route(
 
     for domain, gap in routing["unmet_domains"].items():
         best = gap.get("best_attempt") or {}
+        label = gap.get("status", "unmet").replace("_", " ")
         console.print(
-            f"[yellow]unmet[/yellow] {domain}: {gap['reason']}"
+            f"[yellow]{label}[/yellow] {domain}: {gap['reason']}"
             + (
                 f" — best was {best.get('model')} at "
                 f"{(best.get('pass_rate') or 0):.0%}"
@@ -965,8 +1025,30 @@ def _print_summary(scorecards, model: str, pass_threshold: float) -> None:
     console.print(f"  Tool params:    {_avg('tool_params')}")
     console.print(f"  Live validity:  {_avg('live_validity')}")
     console.print(f"  Latency score:  {sum(s.latency_score for s in valid)/n:.3f}")
-    console.print(f"  Avg latency:    {sum(s.latency_s for s in valid)/n:.1f}s")
-    console.print(f"  Pass rate:      {sum(1 for s in valid if s.composite >= pass_threshold)/n:.0%}")
+    from bench.stats import median, percentile_95
+
+    lat = [s.latency_s for s in valid]
+    console.print(
+        f"  Latency:        mean {sum(lat)/n:.1f}s, median {median(lat) or 0:.1f}s, "
+        f"p95 {percentile_95(lat) or 0:.1f}s"
+    )
+    from bench import stats
+
+    passes = sum(1 for s in valid if s.passed)
+    lo, hi = stats.wilson_interval(passes, len(valid))
+    trials = max((s.trial_idx for s in valid), default=1)
+    console.print(
+        f"  Pass rate:      {passes/n:.0%} [dim](95% CI {lo:.0%}–{hi:.0%}, "
+        f"{len(valid)} rows over {trials} trial(s))[/dim]"
+    )
+    unsafe = sum(1 for s in valid if s.forbidden_violations or s.unsafe_action_rate > 0)
+    if unsafe:
+        console.print(f"  [red]Unsafe actions: {unsafe} row(s) — a hard fail[/red]")
+    consistency = stats.trial_consistency(
+        {cid: [1.0 if s.passed else 0.0 for s in valid if s.case_id == cid] for cid in {s.case_id for s in valid}}
+    )
+    if consistency is not None:
+        console.print(f"  Consistency:    {consistency:.3f} [dim](mean per-case std dev of pass across trials)[/dim]")
 
     tokens = [s.usage.get("total_tokens") for s in valid if s.usage.get("total_tokens")]
     if tokens:
@@ -1019,6 +1101,9 @@ def suite_run_cmd(
     case_ids: Optional[str] = typer.Option(None, help="Comma-separated case ids"),
     adhoc: bool = typer.Option(False, "--adhoc", help="Run ad-hoc (bypasses A/B freeze rules)"),
     experiment: Optional[str] = typer.Option(None, "--experiment", help="Experiment type: A, B, or adhoc"),
+    trials: Optional[int] = typer.Option(
+        None, "--trials", min=1, help="Trials per case (default: the suite's `trials`, else 1)"
+    ),
 ) -> None:
     """Run a suite across its environments via subprocess workers."""
     import uuid
@@ -1039,6 +1124,7 @@ def suite_run_cmd(
             case_ids=ids,
             experiment_type=experiment,
             adhoc=adhoc,
+            trials=trials,
         )
 
     result = asyncio.run(_go())

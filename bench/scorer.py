@@ -73,6 +73,13 @@ def model_family(model_name: str) -> str:
     return parts[0].strip() or "unknown"
 
 
+def with_trial(card: "ScoreCard", trial_idx: int) -> "ScoreCard":
+    """A copy of *card* stamped with *trial_idx* (skip cards are built once per case)."""
+    from dataclasses import replace
+
+    return replace(card, trial_idx=trial_idx)
+
+
 @dataclass
 class ScoreCard:
     case_id: str
