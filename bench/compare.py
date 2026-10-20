@@ -1,4 +1,13 @@
-"""N-way Compare for suite run-group members — sound by default."""
+"""N-way Compare for suite run-group members — sound by default.
+
+One variable under test: members may differ in exactly one *variable* —
+the model, the Condor checkout, or a single manifest key — and Compare refuses
+when more than one differs, listing every one. The model and its inference
+config count as one variable (Experiment B lets each model use its own params);
+the Condor commit and the contract version it ships count as another
+(Experiment A). Runs without a ``manifest`` block (pre-Phase 0) are compared on
+model and checkout alone.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +15,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from config import RESULTS_DIR
+from bench import stats
+from bench.matrix import summary_lane
+from config import PASS_THRESHOLD, RESULTS_DIR
 
 
 def load_summary(run_dir: str | Path) -> dict[str, Any]:
@@ -36,8 +47,87 @@ def _case_set(summary: dict) -> tuple[str, ...]:
     return tuple(sorted(str(i) for i in ids))
 
 
-def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
-    """Compare 2+ member summaries. Returns comparable + differences + deltas."""
+# ── Manifest diff ──────────────────────────────────────────────────────────────
+# Keys within the manifest block that are compared.  ``runtime`` is included
+# because different timeouts or concurrency can change outcomes.
+_MANIFEST_COMPARE_KEYS = (
+    "contract_version",
+    "task_set_version",
+    "grader_version",
+    "inference_config",
+    "env_mode",
+    "experiment_type",
+    "uv_lock_hash",
+    "trials",
+    "runtime",
+)
+
+
+def diff_manifests(members: list[dict[str, Any]]) -> list[str]:
+    """Return the manifest keys that differ across *members*.
+
+    Returns an empty list when all manifests agree (or when none of the
+    members have a manifest block — backwards compatibility).
+    """
+    manifests = [m.get("manifest") or {} for m in members]
+    if all(not m for m in manifests):
+        return []
+
+    diffs: list[str] = []
+    for key in _MANIFEST_COMPARE_KEYS:
+        values = {json.dumps(m.get(key), sort_keys=True, default=str) for m in manifests}
+        if len(values) > 1:
+            diffs.append(key)
+    return diffs
+
+
+# Manifest keys that travel with another variable rather than counting alone.
+_VARIABLE_OF_KEY = {
+    "inference_config": "model",
+    "contract_version": "condor_checkout",
+    "task_set_version": "case_set",
+}
+
+
+def _condor_identity(summary: dict) -> str | None:
+    """Commit + dirty state of the checkout a run measured, or None if unrecorded."""
+    condor = summary.get("condor") or {}
+    commit = condor.get("commit")
+    if not commit:
+        return None
+    return f"{commit}{'+dirty' if condor.get('dirty_files') else ''}"
+
+
+def varied_variables(members: list[dict[str, Any]]) -> list[str]:
+    """The distinct variables that differ across *members*, in a stable order."""
+    varied: list[str] = []
+
+    def _add(name: str) -> None:
+        if name not in varied:
+            varied.append(name)
+
+    if len({tuple(m.get("models") or [m.get("model")]) for m in members}) > 1:
+        _add("model")
+    condors = {_condor_identity(m) for m in members}
+    if len(condors) > 1 and None not in condors:
+        _add("condor_checkout")
+    if len({_case_set(m) for m in members}) > 1:
+        _add("case_set")
+    for key in diff_manifests(members):
+        _add(_VARIABLE_OF_KEY.get(key, f"manifest:{key}"))
+    return varied
+
+
+def compare_summaries(
+    members: list[dict[str, Any]],
+    cases: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Compare 2+ member summaries. Returns comparable + differences + deltas.
+
+    ``differences`` holds the reasons a comparison was refused and is empty when
+    it is comparable; ``variable_under_test`` names the one variable that
+    differs, or None when the members are identical.
+    """
     if len(members) < 2:
         return {
             "comparable": False,
@@ -48,14 +138,6 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
 
     differences: list[str] = []
 
-    models = {tuple(m.get("models") or [m.get("model")]) for m in members}
-    if len(models) > 1:
-        differences.append("model")
-
-    case_sets = {_case_set(m) for m in members}
-    if len(case_sets) > 1:
-        differences.append("case_set")
-
     if any(int(m.get("harness_artifacts") or 0) > 0 for m in members):
         differences.append("harness_artifacts")
 
@@ -63,12 +145,30 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
     if "skipped" in statuses or "failed" in statuses:
         differences.append("partial_group")
 
+    varied = varied_variables(members)
+    # Not variables under test. A 1-trial and a 3-trial run measure the same thing
+    # with different precision, so their rates cannot be differenced; a mock and a
+    # live run measured different worlds.
+    for hard in ("manifest:trials", "manifest:env_mode"):
+        if hard in varied:
+            differences.append(hard)
+            varied = [v for v in varied if v != hard]
+    lanes = {summary_lane(m) for m in members}
+    if None in lanes and "manifest:env_mode" not in differences:
+        differences.append("unknown_lane")
+    if len(varied) > 1:
+        differences.extend(varied)
+    manifest_diffs = diff_manifests(members)
+
     comparable = not differences
-    deltas = _build_deltas(members) if comparable else None
+    deltas = _build_deltas(members, cases) if comparable else None
 
     return {
         "comparable": comparable,
         "differences": differences,
+        "variable_under_test": varied[0] if len(varied) == 1 else None,
+        "varied": varied,
+        "manifest_diffs": manifest_diffs,
         "members": [
             {
                 "run_dir": m.get("run_dir"),
@@ -81,6 +181,7 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
                 "cases_scored": m.get("cases_scored"),
                 "n": m.get("cases_scored") or m.get("cases_total"),
                 "condor": m.get("condor"),
+                "manifest": m.get("manifest"),
             }
             for m in members
         ],
@@ -88,7 +189,44 @@ def compare_summaries(members: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _build_deltas(members: list[dict[str, Any]]) -> dict[str, Any]:
+def _scored_by_trial(records: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    """Scored rows keyed ``case_id#trial`` — the pairing unit for A/B deltas."""
+    composite: dict[str, float] = {}
+    passed: dict[str, float] = {}
+    for r in records:
+        if r.get("error") or r.get("harness_artifact"):
+            continue
+        key = f"{r.get('case_id')}#{int(r.get('trial_idx') or 1)}"
+        composite[key] = float(r.get("composite") or 0.0)
+        verdict = r.get("passed")
+        if verdict is None:  # saved before `passed` was persisted
+            verdict = composite[key] >= PASS_THRESHOLD
+        passed[key] = 1.0 if verdict else 0.0
+    return {"composite": composite, "passed": passed}
+
+
+def paired_deltas(
+    base_records: list[dict[str, Any]], other_records: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Per-(case, trial) paired differences, other minus base, with bootstrap CIs.
+
+    Pairing on the same task and trial index removes between-task variance, which
+    is what lets a 3-trial A/B on a few dozen tasks resolve a real difference.
+    Rows scored on only one side are left out and counted.
+    """
+    base = _scored_by_trial(base_records)
+    other = _scored_by_trial(other_records)
+    out: dict[str, Any] = {}
+    for metric in ("composite", "passed"):
+        out[metric] = stats.paired_deltas(base[metric], other[metric])
+    out["unpaired"] = len(set(base["composite"]) ^ set(other["composite"]))
+    return out
+
+
+def _build_deltas(
+    members: list[dict[str, Any]],
+    cases: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Pairwise deltas vs the first member (baseline)."""
     base = members[0]
     base_n = int(base.get("cases_scored") or base.get("cases_total") or 0)
@@ -108,6 +246,14 @@ def _build_deltas(members: list[dict[str, Any]]) -> dict[str, Any]:
             "latency_n": {"baseline": base_n, "compare": other_n},
             "avg_total_tokens_delta": _usage_delta(base, other),
             "domains": _domain_deltas(base, other),
+            "paired": (
+                paired_deltas(
+                    cases.get(str(base.get("run_dir")), []),
+                    cases.get(str(other.get("run_dir")), []),
+                )
+                if cases
+                else None
+            ),
         }
         out["pairs"].append(pair)
     return out
@@ -161,4 +307,7 @@ def compare_runs(
             "members": [],
             "deltas": None,
         }
-    return compare_summaries(members)
+    from bench.reporter import load_run_cases
+
+    cases = {str(m.get("run_dir")): load_run_cases(str(m.get("run_dir"))) for m in members}
+    return compare_summaries(members, cases)

@@ -191,7 +191,8 @@ function RunFlags({ s }) {
   const artifacts = s?.harness_artifacts || 0
   const unbuilt = s?.post_condition_failures || 0
   const infra = s?.infra_excluded || 0
-  if (!artifacts && !unbuilt && !infra) return null
+  const regression = s?.regression_failures || []
+  if (!artifacts && !unbuilt && !infra && !regression.length) return null
   return (
     <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
       {infra > 0 && (
@@ -207,6 +208,15 @@ function RunFlags({ s }) {
       {unbuilt > 0 && (
         <span className="router-flag" title={(s.post_condition_failure_cases || []).map(c => `${c.case_id}: ${c.reason}`).join('\n')}>
           {unbuilt} post-condition failure{unbuilt !== 1 ? 's' : ''}
+        </span>
+      )}
+      {regression.length > 0 && (
+        <span
+          className="router-flag"
+          style={{ color: 'var(--red)' }}
+          title={`Regression-split tasks that failed in this run — each is ground the release would lose:\n${regression.join('\n')}`}
+        >
+          {regression.length} regression failure{regression.length !== 1 ? 's' : ''}
         </span>
       )}
     </div>

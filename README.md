@@ -12,15 +12,30 @@ a leaderboard.
 
 ## How runs execute
 
-Every run goes through condor's real MCP servers against a staging
-`hummingbot-api`. There is no offline or mocked mode: param correctness and
-response validity only mean something against a real API — a model can pick the
-right tool with plausible arguments and get an error back every single time, and
-canned payloads score that 1.0.
+Every run goes through condor's real MCP servers. What sits behind them is the
+**lane**, set by `BENCH_ENV_MODE`:
 
-That means a **condor checkout** and a **staging hummingbot-api** are required for
-any run, and a fail-closed pre-flight refuses to start until the URL the MCP
-subprocess resolves to is provably the staging one.
+| Lane | Target | Used for | Default for |
+|------|--------|----------|-------------|
+| `live` | a staging `hummingbot-api` | routing, L2, every published number | `test`, `sweep`, `matrix`, `route` |
+| `mock` | the stateful stand-in in `mock_mcp/` | CI and safety cases (insufficient funds, stale prices, 5xx, rate limits) | CI / ladder commands |
+
+**The routing lane has no offline mode; CI and safety cases run against the
+mock.** Param correctness and response validity only mean something against a
+real API — a model can pick the right tool with plausible arguments and get an
+error back every time — so routing is published from live only. The mock is not a
+canned payload either: it keeps state (an executor a model creates is listed and
+stoppable afterwards) and cases are scored on the end state they leave, so
+describing an action scores nothing. Mock and live rows never share a frontier:
+each lane has its own matrix and routing file, and Compare refuses to difference
+across lanes.
+
+The live lane needs a **condor checkout** and a **staging hummingbot-api**, and a
+fail-closed pre-flight refuses to start until the URL the MCP subprocess resolves
+to is provably the staging one. Capital-risk rules stay on the live lane. The mock
+lane needs only the condor checkout: `BENCH_ENV_MODE=mock` points every API call
+— bench's and condor's — at the mock, ignores `HUMMINGBOT_*` entirely, and starts
+the mock in-process when nothing answers at `BENCH_MOCK_URL`.
 
 Setup, guard rails and the failure modes they defend against:
 **[docs/STAGING.md](docs/STAGING.md)**.
@@ -212,6 +227,17 @@ uv run python runner.py test ollama:qwen2.5:14b --mode live
 # Live pre-flight (exits non-zero on a blocking failure — usable as a CI gate)
 uv run python runner.py staging-check
 
+# Evaluation ladder on the mock lane: L0 tool contracts (no model), then L1 single-tool cases
+uv run python runner.py ladder --upto l0
+uv run python runner.py ladder nvidia:openai/gpt-oss-20b --upto l1
+
+# NVIDIA NIM: gate catalog models before sweeping them (listed ≠ callable)
+uv run python runner.py nim-smoke
+
+# Mock lane: same commands, deterministic target, no staging needed
+BENCH_ENV_MODE=mock uv run python runner.py test openrouter:openai/gpt-4o-mini --cases tool_get_market_data_001
+uv run python runner.py mock-serve              # or: docker compose up  (in mock_mcp/)
+
 # Sweep, aggregate, recommend
 uv run python runner.py sweep --max-params-b 14
 uv run python runner.py sweep --only ollama:qwen2.5:14b,ollama:qwen2.5:7b
@@ -226,30 +252,133 @@ Results are saved to `results/<run-id>_<model>/` as JSON.
 
 ---
 
+## Ladder, NVIDIA NIM and traces
+
+**Ladder.** `runner.py ladder` climbs rungs on the mock lane and stops at the first
+that fails. **L0** checks Condor's tool contract with no model in the loop — a
+Pydantic Evals dataset (`eval/l0_contracts/`) that asserts every measured tool's
+schema compiles and that a missing or out-of-enum argument is rejected before the
+tool runs, in a form bench's own scorer reads as an error naming the field. **L1**
+runs one model on the single-tool cases the mock serves (market reads, order
+creation, executor lifecycle). Bots, controllers, DEX and platform work is L2 and
+lives on the live lane. Live needs `BENCH_ENV_MODE=live` *and* a passing pre-flight.
+
+**NVIDIA NIM.** `nvidia:<catalog id>` models (key: `NVIDIA_API_KEY`) run through the
+same OpenAI-compatible path as OpenRouter, one request at a time with retry and
+backoff. Every HTTP exchange — status, request id, 429s, a truncated raw body,
+usage, client latency — is recorded in the row's `wiring.provider_log`. NIM rows are
+**functional-only**: shared hosted capacity makes their wall clock a measure of the
+endpoint, so they carry `latency_representative: false`, score no latency
+component, and stay out of every latency statistic. A catalog listing does not mean
+the model is enabled for your account — run `nim-smoke` (listed, real tool call,
+~60k-token context) before adding one to `datasets/models.json`.
+
+**Traces (optional, off by default).** `BENCH_TRACES=phoenix` exports pydantic-ai's
+OpenTelemetry spans plus a `bench.case` span per trial to a local Phoenix collector
+(`BENCH_PHOENIX_URL`, default `http://localhost:6006`; or any OTLP/HTTP endpoint via
+`BENCH_OTLP_ENDPOINT`), and stamps `trace_id` / `trace_url` on each case row.
+
+## Gates and promotion
+
+| When | What | Target |
+|---|---|---|
+| PR | unit tests, L0 contracts, regression split — all on the mock | `make test-pr` |
+| Nightly | per priority model: L1 on the mock, then the regression split on live, 3 trials | `make test-nightly` |
+| Release | full capability + holdout on live (3 trials), safety category on the mock | `make test-release` |
+| Quarterly | refresh tasks, models and prices; retire saturated tasks | manual |
+
+**Release checklist** — a routing or contract decision ships only when every box
+is ticked, and is written up from
+[`docs/decision_log_template.md`](docs/decision_log_template.md):
+
+- [ ] `runner.py ladder --upto l0` passes on the candidate Condor commit
+- [ ] L1 on the mock: zero unsafe actions, pass rate ≥ 0.80
+- [ ] regression split on live: no regression failures, or each one explained
+- [ ] safety category on the mock: zero unsafe actions
+- [ ] holdout on live (`--release`), every holdout task covered
+- [ ] Experiment A: `runner.py promote` claims live promotion
+
+**Contract promotion.** When Condor ships a new tool contract, run Experiment A (one
+model, old vs new checkout, `--release`) and `runner.py promote --baseline <run>
+--candidate <run> --ladder <ladder id>`. On the holdout split it checks first-pass
+schema-valid calls +15 pp, repair turns per success −20%, tokens per success
+−15%, median time to first valid action −15% and zero safety regressions. A report
+is always written; it **claims live promotion** only when every gate passes, both
+runs are live with the whole holdout covered, and the ladder's L0 and L1 pass bits
+belong to the candidate's exact commit — otherwise it lists what is missing and
+exits non-zero. The phase-one slice is 60 tasks × 3 trials × 4 model bands × 2
+contract variants = 1,440 trials, on the mock by default.
+
+**Experiment presets.** `suite run <id> --preset a_example` (or a `preset` saved on
+the suite) applies an `experiments/*.yaml` preset: it sets the experiment type and
+freeze block, and the run refuses to start on any violation — a second model in
+Experiment A, a dirty tree or off-pin commit in Experiment B, a preset that varies
+something its type freezes, or `--adhoc` against a preset.
+
+CI workflows are deliberately absent until a runner host is chosen; the Makefile
+targets are what CI will call.
+
 ## Dataset
 
-Three layers.
+Four layers, plus a holdout file.
 
 | File | Cases | What it measures |
 |---|---|---|
-| `datasets/consult.jsonl` | 12 | **Layer 1** — coordinator jobs: user/server/agent lookups, routine authoring, conversation-only design, journal roundtrips. Everyday portfolio/bots/history lookups live on the tool and specialist layers instead. |
-| `datasets/tick.jsonl` | 8 | **Layer 1** — strategy ticks: normal, profit-taking, risk-blocked, near-capacity, error recovery, dry-run, wide-spread stand-down, learnings adherence. Agent-scoped. |
-| `datasets/tools.jsonl` | 38 | **Layer 2** — focused cases per MCP tool. The whole production surface is covered; a drift test fails if a tool isn't. |
+| `datasets/consult.jsonl` | 20 | **Layer 1** — coordinator jobs: user/server/agent lookups, routine authoring, conversation-only design, journal roundtrips, limit-order placement, and the negative/safety tasks (ambiguous intent, prompt injection, duplicate execution, insufficient balance, recoverable tool errors). |
+| `datasets/tick.jsonl` | 10 | **Layer 1** — strategy ticks: normal, profit-taking, risk-blocked, near-capacity, error recovery, dry-run, wide-spread stand-down, learnings adherence. Agent-scoped. |
+| `datasets/tools.jsonl` | 52 | **Layer 2** — focused cases per MCP tool. The whole production surface is covered; a drift test fails if a tool isn't. |
 | `datasets/agents.jsonl` | 22 | **Layer 3** — routed to a specific Condor agent with its own prompt and stores. |
+| `datasets/holdout.jsonl` | 7 | **Holdout** — one unseen task per category. Runs only with `--release`. |
+| `datasets/manifest.json` | — | Generated table of contents: task-set version, counts per category and split, split membership, known gaps. `scripts/build_task_manifest.py` rebuilds it. |
 | `datasets/models.json` | — | Model registry with parameter counts. Drives sweep order and routing. |
 
-Tag `core` (65 cases) still meets the routing floors and is the cheap iteration sweep — see [docs/CASE_LIST.md](docs/CASE_LIST.md). Publish routing from the full 80.
+Tag `core` (still floor-valid) is the cheap iteration sweep — see
+[docs/CASE_LIST.md](docs/CASE_LIST.md). Publish routing from the full library.
+
+### Task bank
+
+Every case carries a `task` block (schema: `TASK_FIELD_DOC` in `bench/dataset.py`):
+a stable `task_id` (`T-<category>-<nnn>`; the case `id` stays as its alias), a
+`version` bumped whenever the prompt or ground truth changes, `difficulty`,
+`safety_tier`, `split`, the initial and expected final state, forbidden
+transitions, partial-credit milestones, a reference solution, and known
+limitations stated out loud.
+
+| Category | What it covers |
+|---|---|
+| `market_reads` | prices, portfolio, history |
+| `order_creation` | opening a single order, position or grid; leverage setup |
+| `executor_lifecycle` | listing, managing, stopping and recovering executors |
+| `bots_controllers` | bot status and logs, controller types and configs |
+| `dex_gateway` | DEX pools, GeckoTerminal, Meteora/Solana LP |
+| `negative_safety` | should-not-act: blocked risk, ambiguity, injection, duplicates, faults |
+| `platform` | Condor's own tooling: servers, models, routines, memory, journal, delegation |
+
+The six trading categories each hold at least ten tasks outside holdout; a
+shortfall must be listed in the manifest's `gaps`. Splits:
+
+* **`regression`** — the release gate. Every case in it that changes state has
+  `post_conditions`, so its end state is read back from the API rather than taken
+  from the model's word. A regression task that fails is flagged on the Runs page.
+* **`dev`** — everything else that still discriminates, including mutating cases
+  whose end state bench cannot yet read back (the reason is in `known_limitations`).
+* **`holdout`** — invisible to `--tags core`, the dashboard and every default run;
+  `test --release` / `sweep --release` add it. A production failure becomes a
+  regression task only after a root-cause review.
+
+Select by split with `--split regression`. Cases that need a fault only the mock
+can stage declare `"lanes": ["mock"]` and `mock_faults`, and are left out of live
+runs automatically.
 
 Every case carries a `risk_level` (`read_only` / `mutating` / `destructive`) and
-resolves to a **routing domain**. Every risk level runs — the level drives teardown
-and the destructive score floor, not whether the case is allowed; isolation comes
-from pointing at a test-connector-only API. Layer 2 domains are namespaced `tool:` because a
-capability bucket like "market data" is not something Condor can route to — those
-verdicts come out of the matrix's per-tool axis instead.
-
-`FRAMEWORK_IMPROVEMENTS.md` §10 proposed a per-tool competency matrix and a
-capability→recommendation report as future work. Layers 2 and 3 plus the Matrix
-and Router tabs are that work; the section is kept as the rationale.
+resolves to a **routing domain**. Every risk level runs — the level drives the
+destructive score floor, not whether the case is allowed; isolation comes from
+pointing at a test-connector-only API. Teardown runs after any trial that created
+something, whatever the case's level — a read-only case is exactly where a model
+that falls for a prompt injection creates something nobody planned for. Layer 2
+domains are namespaced `tool:` because a capability bucket like "market data" is
+not something Condor can route to — those verdicts come out of the matrix's
+per-tool axis instead.
 
 ---
 

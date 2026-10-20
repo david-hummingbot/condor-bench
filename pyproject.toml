@@ -29,8 +29,6 @@ dependencies = [
     #             Revisit when pydantic-ai 1.x accepts that field.
     "genai-prices>=0.0.73,<0.1.0",
     "httpx>=0.27",
-    # Evaluation
-    "deepeval>=2.0",
     "anthropic>=0.40",
     # CLI + dashboard API
     "rich>=13.0",

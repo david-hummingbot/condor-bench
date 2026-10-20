@@ -216,7 +216,7 @@ async def _await_resume(run_id: str, state: dict) -> None:
 
 async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.baseline import BaselineStore
-    from bench.cleanup import teardown
+    from bench.cleanup import created_resources, teardown
     from bench.client import case_input_text, run_case
     from bench.dataset import case_prompt_map, filter_cases, is_mutating, load_all_cases
     from bench.market_resolver import bindings_summary, prepare_cases
@@ -224,8 +224,9 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
     from bench.mcp_provider import target_banner
     from bench.probe_journal import ensure_probe_journal
     from bench.reporter import save_run
+    from bench.manifest import build_manifest
     from bench.scorer import score_case, timeout_card
-    from config import build_run_pin, case_timeout_s
+    from config import case_timeout_s
 
     state = _active_runs[run_id]
     state["status"] = "running"
@@ -319,7 +320,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                 """
                 if not scorecards:
                     return None
-                pin = build_run_pin(
+                pin = build_manifest(
                     run_type="adhoc",
                     # The cases actually scored, not the ones planned: a pin that
                     # claimed all 93 on a run cancelled at 12 would misdescribe
@@ -330,6 +331,9 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     models=[norm_key],
                     shared_loaded=True,
                 )
+                # No A/B preset behind a dashboard run: kept out of Matrix/Router
+                # (see config.summary_counts_for_matrix).
+                pin["source"] = "dashboard"
                 pin["market_bindings"] = bindings_summary(resolutions)
                 pin["case_order"] = "easiest-first"
                 if partial:
@@ -401,7 +405,8 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                             scorecards.append(sc)
                             responses[case.id] = response
 
-                            if is_mutating(case):
+                            # Trace as well as risk level: see runner._run_trial.
+                            if is_mutating(case) or created_resources(result):
                                 report = await teardown(
                                     result,
                                     norm_key,
@@ -561,9 +566,9 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
                 sc.case_id = cp_case_id
 
                 # Persist to disk so this run appears on the Runs page
-                from config import build_run_pin
+                from bench.manifest import build_manifest
 
-                pin = build_run_pin(
+                pin = build_manifest(
                     run_type="custom_prompt",
                     case_ids=[cp_case_id],
                     models=[norm_key],

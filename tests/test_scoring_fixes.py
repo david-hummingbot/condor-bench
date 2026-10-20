@@ -377,15 +377,15 @@ def test_a_created_strategy_is_still_deleted_as_a_strategy():
     from bench.cleanup import _undo_args, created_resources
 
     result = _Result([{
-            "tool": "mcp__condor__manage_strategies",
+            "tool": "mcp__condor__manage_loops",
             "tool_call_id": "t1",
             "args": {"action": "create", "agent_slug": "bench_dca_sol",
                  "name": "bench_dca_sol"},
-    }], [{"tool_call_id": "t1", "output": '{"strategy_id": "bench_dca_sol.bench_dca_sol"}'}])
+    }], [{"tool_call_id": "t1", "output": '{"loop_id": "bench_dca_sol.bench_dca_sol"}'}])
     (resource,) = created_resources(result)
     assert _undo_args(resource, "delete") == {
         "action": "delete",
-        "strategy_id": "bench_dca_sol.bench_dca_sol",
+        "loop_id": "bench_dca_sol.bench_dca_sol",
     }
 
 
@@ -708,3 +708,18 @@ def test_a_setter_whose_response_is_a_refusal_is_also_skipped():
         [{"tool_call_id": "t1", "output": '{"error": "Failed to set leverage: 500"}'}],
     )
     assert created_resources(result) == []
+
+
+def test_an_expired_agent_login_is_infra_not_an_answer():
+    """Claude Code reports a dead login as its turn's text, with no error flag."""
+    from metrics.answer_quality import is_infra_failure
+
+    assert is_infra_failure("Failed to authenticate: OAuth session expired and could not be refreshed")
+    assert is_infra_failure("Invalid API key · Please run /login")
+    assert is_infra_failure("Credit balance is too low")
+    assert is_infra_failure("Your OAuth token has expired. Please run /login.")
+    assert is_infra_failure("Claude AI usage limit reached|1792468800")
+    assert is_infra_failure("You've hit your limit · resets 8am (Europe/London)")
+    # A real answer that mentions logging in is still an answer.
+    long_answer = "To deploy the bot, first run /login in the CLI, then " + "configure it. " * 60
+    assert not is_infra_failure(long_answer)

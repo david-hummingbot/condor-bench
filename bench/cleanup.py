@@ -39,7 +39,12 @@ _CREATE_ACTIONS = {
     "manage_skill": {"create", "write"},
     "manage_memory": {"write", "create"},
     "manage_agents": {"create"},
-    "manage_strategies": {"create"},
+    # Renamed from manage_strategies in condor 8e4860fa; it still answers to the
+    # funnel-era spellings, so both create forms are undone.
+    "manage_loops": {"create", "create_strategy"},
+    # `write` puts controller source in the agent's own folder of the condor
+    # checkout; left behind, it becomes part of the next run's CONTROLLERS index.
+    "manage_agent_controllers": {"write"},
     "manage_bots": {"deploy"},
     "manage_controllers": {"create", "save"},
     # `delegate(action="start")` is a creation with a heartbeat: it detaches an
@@ -110,10 +115,10 @@ _UNDO = {
 }
 
 # Some tools create more than one kind of thing, and the undo differs per kind.
-# `manage_agents` / `manage_strategies` replaced the old mega-tool: `create` on
-# manage_agents makes an AGENT.md identity removed with `delete(agent_slug=…)`,
-# while `create` on manage_strategies makes a playbook removed with
-# `delete(strategy_id=…)`. Keyed on the tool alone, every agent this benchmark
+# `manage_agents` / `manage_loops` (formerly `manage_strategies`) replaced the old
+# mega-tool: `create` on manage_agents makes an AGENT.md identity removed with
+# `delete(agent_slug=…)`, while `create` on manage_loops makes a playbook removed
+# with `delete(loop_id=…)`. Keyed on the tool alone, every agent this benchmark
 # created used to be "cleaned up" by deleting a strategy that did not exist —
 # which is why `bench_dca_sol` stayed in the condor checkout.
 #
@@ -125,10 +130,20 @@ _UNDO_BY_CREATE: dict[tuple[str, str], tuple[str, str, tuple[str, ...]]] = {
         "agent_slug",
         ("agent_slug", "slug"),
     ),
-    ("manage_strategies", "create"): (
+    ("manage_loops", "create"): (
         "delete",
-        "strategy_id",
-        ("strategy_id", "id"),
+        "loop_id",
+        ("loop_id", "id"),
+    ),
+    ("manage_loops", "create_strategy"): (
+        "delete",
+        "loop_id",
+        ("loop_id", "strategy_id", "id"),
+    ),
+    ("manage_agent_controllers", "write"): (
+        "delete",
+        "name",
+        ("name",),
     ),
     # The task id exists only in the response — `start` is called with an agent
     # slug and a task string, neither of which names the delegation.
@@ -307,19 +322,25 @@ def _identifier(tool: str, args: dict, response: Any, action: str = "") -> str |
         if args.get(key):
             return str(args[key])
 
-    for key in ("executor_id", "strategy_id", "agent_id", "bot_name", "name", "key", "config_name"):
+    for key in ("executor_id", "loop_id", "strategy_id", "agent_id", "bot_name", "name", "key", "config_name"):
         value = args.get(key)
         if value:
             return str(value)
     if isinstance(parsed, dict):
-        for key in ("executor_id", "strategy_id", "agent_id", "id", "name"):
+        for key in ("executor_id", "loop_id", "strategy_id", "agent_id", "id", "name"):
             value = parsed.get(key)
             if value:
                 return str(value)
     # Typed create tools return a formatted string, not JSON, with
-    # "Executor ID: <id>" on its own line.
-    if isinstance(response, str):
-        match = re.search(r"Executor ID:\s*(\S+)", response)
+    # "Executor ID: <id>" on its own line. Over ACP that string arrives wrapped as
+    # {"result": "..."} — unwrap it first, or the match runs over the escaped text
+    # and captures "<id>\\nType:", and teardown stops an executor that does not
+    # exist while the real one keeps running (six were left on staging this way).
+    text = response
+    if isinstance(parsed, dict) and isinstance(parsed.get("result"), str):
+        text = parsed["result"]
+    if isinstance(text, str):
+        match = re.search(r"Executor ID:\s*([^\s\\]+)", text)
         if match and match.group(1) not in ("N/A",):
             return match.group(1)
     return None

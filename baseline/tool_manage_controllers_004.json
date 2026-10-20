@@ -1,0 +1,7 @@
+{
+  "case_id": "tool_manage_controllers_004",
+  "model": "claude-code:sonnet",
+  "latency_s": 23.343,
+  "timestamp": "2026-10-20T07:04:17.548175+00:00",
+  "fingerprint": "2b3e56781046"
+}

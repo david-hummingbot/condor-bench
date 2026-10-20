@@ -1,0 +1,35 @@
+{
+  "_comment": "Fixed market snapshot for the mock lane. Prices and balances are deliberately round so a case can assert exact values; trading rules list only the pairs below, so a case that names any other pair fails the way it would on a real API.",
+  "accounts": ["master_account"],
+  "connectors": ["binance", "binance_perpetual"],
+  "credentials": {"master_account": ["binance", "binance_perpetual"]},
+  "gateway_connectors": [],
+  "prices": {
+    "binance": {"BTC-USDT": 65000.0, "ETH-USDT": 3200.0, "SOL-USDT": 150.0},
+    "binance_perpetual": {"BTC-USDT": 65010.0, "ETH-USDT": 3201.0, "SOL-USDT": 150.1}
+  },
+  "trading_rules": {
+    "binance": {
+      "BTC-USDT": {"min_order_size": 0.00001, "min_notional_size": 5.0, "min_price_increment": 0.01, "min_base_amount_increment": 0.00001},
+      "ETH-USDT": {"min_order_size": 0.0001, "min_notional_size": 5.0, "min_price_increment": 0.01, "min_base_amount_increment": 0.0001},
+      "SOL-USDT": {"min_order_size": 0.001, "min_notional_size": 5.0, "min_price_increment": 0.001, "min_base_amount_increment": 0.001}
+    },
+    "binance_perpetual": {
+      "BTC-USDT": {"min_order_size": 0.001, "min_notional_size": 5.0, "min_price_increment": 0.1, "min_base_amount_increment": 0.001},
+      "ETH-USDT": {"min_order_size": 0.001, "min_notional_size": 5.0, "min_price_increment": 0.01, "min_base_amount_increment": 0.001},
+      "SOL-USDT": {"min_order_size": 0.01, "min_notional_size": 5.0, "min_price_increment": 0.001, "min_base_amount_increment": 0.01}
+    }
+  },
+  "balances": {
+    "master_account": {
+      "binance": [
+        {"token": "USDT", "units": 10000.0, "available_units": 10000.0},
+        {"token": "BTC", "units": 0.1, "available_units": 0.1},
+        {"token": "ETH", "units": 2.0, "available_units": 2.0}
+      ],
+      "binance_perpetual": [
+        {"token": "USDT", "units": 5000.0, "available_units": 5000.0}
+      ]
+    }
+  }
+}

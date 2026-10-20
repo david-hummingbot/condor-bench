@@ -82,6 +82,7 @@ def baseline(
     from bench.dataset import load_all_cases
 
     m = model or BASELINE_MODEL
+    _enter_lane("live")
     cases = load_all_cases()
     store = BaselineStore()
     # Naming cases means you mean them: re-measuring a handful otherwise required
@@ -233,6 +234,12 @@ def test(
         help="Comma-separated case tags to require (AND). '--tags core' is the "
         "floor-valid iteration subset — publish routing from the full library.",
     ),
+    case_ids: Optional[str] = typer.Option(
+        None, "--cases", help="Comma-separated case ids — run just these (after the other filters)"
+    ),
+    task_category: Optional[str] = typer.Option(
+        None, "--task-category", help="Comma-separated task categories (e.g. negative_safety)"
+    ),
     consult_only: bool = typer.Option(False, help="Only consult cases"),
     tick_only: bool = typer.Option(False, help="Only tick cases"),
     skip_unavailable: bool = typer.Option(
@@ -241,6 +248,23 @@ def test(
         help="Record cases whose declared markets cannot bind as harness "
         "artifacts instead of refusing the run. Opt-in: the run is thinner than "
         "it looks, so routing published from it under-covers those domains.",
+    ),
+    split: Optional[str] = typer.Option(
+        None, "--split", help="Comma-separated task splits to run (dev, regression)"
+    ),
+    release: bool = typer.Option(
+        False,
+        "--release",
+        help="Release run: add the holdout split. Holdout never runs otherwise — not "
+        "with --tags core, not from the dashboard.",
+    ),
+    trials: int = typer.Option(
+        1,
+        "--trials",
+        min=1,
+        help="Trials per case (opt in with --trials 3). Each is its own row "
+        "(trial_idx); pass rates carry Wilson intervals over every trial. A 1-trial "
+        "run is not comparable with a 3-trial one.",
     ),
     order: str = typer.Option(
         "easiest-first",
@@ -256,10 +280,13 @@ def test(
     from bench.dataset import case_prompt_map, filter_cases, load_all_cases
     from bench.market_resolver import bindings_summary, unresolvable_card
     from bench.mcp_provider import target_banner
+    from bench.manifest import build_manifest
     from bench.reporter import save_run
+    from bench.scorer import with_trial
     from bench.staging_health import StagingUnhealthy, assert_ready
-    from config import PASS_THRESHOLD, build_run_pin
+    from config import PASS_THRESHOLD
 
+    _enter_lane("live")
     try:
         assert_ready()
     except StagingUnhealthy as exc:
@@ -267,13 +294,23 @@ def test(
         raise typer.Exit(1) from exc
 
     cases = filter_cases(
-        load_all_cases(),
+        load_all_cases(include_holdout=release),
         domain=domain,
         category=category,
         layers=_resolve_layers(consult_only, tick_only, layers),
         risk_levels=_resolve_risk_levels(risk),
         tags=_resolve_tags(tags),
+        splits=_resolve_splits(split, release),
+        task_categories=[c.strip() for c in task_category.split(",") if c.strip()] if task_category else None,
     )
+    cases = _cases_for_lane(cases)
+    if case_ids:
+        wanted = [c.strip() for c in case_ids.split(",") if c.strip()]
+        unknown = set(wanted) - {c.id for c in cases}
+        if unknown:
+            console.print(f"[red]No such case (or filtered out): {', '.join(sorted(unknown))}[/red]")
+            raise typer.Exit(2)
+        cases = [c for c in cases if c.id in set(wanted)]
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
         raise typer.Exit(1)
@@ -302,21 +339,27 @@ def test(
         )
 
     run_id = uuid.uuid4().hex[:8]
-    console.print(f"\nBenchmarking [bold]{model}[/bold] on {len(cases)} cases (run {run_id})")
+    console.print(
+        f"\nBenchmarking [bold]{model}[/bold] on {len(cases)} cases × {trials} trial(s) (run {run_id})"
+    )
     console.print(f"  target: {target_banner()}\n")
 
     memory_reset = _reset_acp_memory(model, run_id)
 
-    scorecards, responses = asyncio.run(_run_cases(cases, model, store))
+    scorecards, responses = asyncio.run(_run_cases(cases, model, store, trials))
     scorecards = [
-        unresolvable_card(case, model, resolutions[case.id]) for case in market_skips
+        with_trial(unresolvable_card(case, model, resolutions[case.id]), t)
+        for case in market_skips
+        for t in range(1, trials + 1)
     ] + scorecards
 
-    pin = build_run_pin(
+    pin = build_manifest(
         run_type="adhoc",
         case_ids=[c.id for c in cases],
         models=[model],
         shared_loaded=True,
+        trials=trials,
+        cases=cases,
     )
     pin["market_bindings"] = bindings_summary(resolutions)
     if memory_reset is not None:
@@ -334,6 +377,60 @@ def test(
     )
     console.print(f"\n[bold]Run saved:[/bold] {run_dir}")
     _print_summary(scorecards, model, PASS_THRESHOLD)
+
+
+def _resolve_splits(split: str | None, release: bool) -> list[str] | None:
+    """--split values, plus holdout on a release run. None means every split."""
+    from bench.dataset import SPLITS
+
+    wanted = [s.strip() for s in split.split(",") if s.strip()] if split else []
+    unknown = set(wanted) - set(SPLITS)
+    if unknown:
+        console.print(f"[red]Unknown split(s): {', '.join(sorted(unknown))} — choose from {', '.join(SPLITS)}[/red]")
+        raise typer.Exit(2)
+    if "holdout" in wanted and not release:
+        console.print("[red]The holdout split runs only with --release.[/red]")
+        raise typer.Exit(2)
+    if wanted and release and "holdout" not in wanted:
+        wanted.append("holdout")
+    return wanted or None
+
+
+def _cases_for_lane(cases: list) -> list:
+    """Drop cases that cannot run on this lane, and say how many."""
+    from bench.dataset import runs_on_lane
+    from config import staging_config
+
+    lane = str(staging_config().get("env_mode") or "live")
+    kept = [c for c in cases if runs_on_lane(c, lane)]
+    if len(kept) < len(cases):
+        skipped = sorted(c.id for c in cases if not runs_on_lane(c, lane))
+        console.print(
+            f"[dim]{len(skipped)} case(s) need another lane and are not part of this "
+            f"run: {', '.join(skipped)}[/dim]"
+        )
+    return kept
+
+
+def _enter_lane(default: str) -> str:
+    """Resolve this command's lane and, on the mock lane, make sure the mock is up.
+
+    ``test`` and ``sweep`` default to live (``BENCH_ENV_MODE=mock`` opts in to the
+    mock). On the mock lane the staging pre-flight that follows runs against the
+    mock, so the same checks guard both lanes.
+    """
+    from bench.lanes import LaneError, ensure_mock_running, resolve_lane
+
+    try:
+        lane = resolve_lane(default)
+        if lane == "mock":
+            handle = ensure_mock_running()
+            note = "started in-process" if handle.started else "already running"
+            console.print(f"[cyan]mock lane[/cyan] — hummingbot-api mock at {handle.api_url} ({note})")
+    except (LaneError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    return lane
 
 
 def _reset_acp_memory(model: str, run_id: str):
@@ -379,90 +476,174 @@ def _reset_acp_memory(model: str, run_id: str):
     return reset
 
 
-async def _run_cases(cases, model: str, store):
-    """Run and score every case, returning (scorecards, responses)."""
-    from bench.cleanup import teardown
-    from bench.client import run_case
-    from bench.dataset import is_mutating
+async def _run_cases(cases, model: str, store, trials: int = 1):
+    """Run and score every case *trials* times, returning (scorecards, responses).
+
+    A case's trials run back to back on the same market binding (bound once,
+    before this is called), so trial groups pair across runs. Responses are keyed
+    by :func:`bench.reporter.trial_key`. Warmup is checked once per case: a
+    failure costs every trial, and each trial gets its own skip card so the
+    run's row count stays cases × trials.
+    """
     from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.probe_journal import ensure_probe_journal
-    from bench.scorer import score_case
-    from bench.scorer import timeout_card
-    from config import PASS_THRESHOLD, case_timeout_s
+    from bench.scorer import with_trial
 
     scorecards, responses = [], {}
     for case in cases:
-        console.print(f"  [dim]{case.id}[/dim] ({case.type})", end=" ")
         try:
             journal_note = ensure_probe_journal(case)
             warmup = await ensure_markets_for_case(case)
-            if not warmup.ok:
-                card = warmup_failure_card(case, model, warmup)
-                scorecards.append(card)
-                console.print(f"→ [yellow]harness skip[/yellow]")
-                console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
-                continue
-            for note in ([journal_note] if journal_note else []) + warmup.notes:
-                console.print(f"      [dim]{note}[/dim]")
-
-            # Baseline first: the ceiling is sized from it, so a slow case gets room
-            # proportional to how slow it has always been.
-            baseline = store.load(case.id)
-            timeout_s = case_timeout_s(baseline.latency_s if baseline else None)
-            result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
-            baseline_latency = baseline.latency_s if baseline else result.latency_s
-            card = await score_case(case, result, baseline_latency)
-            scorecards.append(card)
-            responses[case.id] = result.response
-
-            status = (
-                f"[green]{card.composite:.2f}[/green]"
-                if card.composite >= PASS_THRESHOLD
-                else f"[red]{card.composite:.2f}[/red]"
-            )
-            extra = ""
-            if card.usage.get("total_tokens"):
-                extra = f", {card.usage['total_tokens']:,} tok"
-            console.print(f"→ {status} ({result.latency_s:.1f}s{extra})")
-            if card.harness_artifact:
-                console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
-
-            # Undo what a mutating case created, whatever its score — an aborted
-            # half-created resource still needs removing.
-            if is_mutating(case):
-                report = await teardown(
-                    result,
-                    model,
-                    agent_slug=getattr(case, "agent_slug", None),
-                    tick=getattr(case, "type", "") == "tick",
-                )
-                if report.removed:
-                    console.print(f"      [dim]cleaned up {len(report.removed)} resource(s)[/dim]")
-                for row in report.kept_positions:
-                    console.print(
-                        f"      [yellow]position kept: {row.get('tool')} "
-                        f"{row.get('identifier')} — {row.get('note')}[/yellow]"
-                    )
-                for row in report.failed + report.manual:
-                    console.print(
-                        f"      [yellow]left behind: {row.get('tool')} "
-                        f"{row.get('identifier')} — {row.get('error') or row.get('reason', 'manual')}[/yellow]"
-                    )
-        except asyncio.TimeoutError:
-            # Record it. Appending nothing made the case vanish from the run entirely,
-            # so a thinned domain looked like a domain nobody had asked about.
-            baseline = store.load(case.id)
-            base_s = baseline.latency_s if baseline else 0.0
-            scorecards.append(
-                timeout_card(case, model, case_timeout_s(base_s or None), base_s)
-            )
-            console.print(
-                f"[red]TIMEOUT after {case_timeout_s(base_s or None):.0f}s — "
-                "recorded as a harness artifact[/red]"
-            )
         except Exception as exc:
-            console.print(f"[red]ERROR: {exc}[/red]")
+            console.print(f"  [dim]{case.id}[/dim] [red]ERROR: {exc}[/red]")
+            continue
+        if not warmup.ok:
+            card = warmup_failure_card(case, model, warmup)
+            scorecards.extend(with_trial(card, t) for t in range(1, trials + 1))
+            console.print(f"  [dim]{case.id}[/dim] ({case.type}) → [yellow]harness skip[/yellow]")
+            console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
+            continue
+        for note in ([journal_note] if journal_note else []) + warmup.notes:
+            console.print(f"      [dim]{note}[/dim]")
+        for trial in range(1, trials + 1):
+            label = f" [dim]t{trial}/{trials}[/dim]" if trials > 1 else ""
+            console.print(f"  [dim]{case.id}[/dim] ({case.type}){label}", end=" ")
+            await _run_trial(case, model, store, trial, scorecards, responses)
+    from bench.traces import flush
+
+    flush()
     return scorecards, responses
+
+
+async def _run_trial(case, model: str, store, trial: int, scorecards: list, responses: dict) -> None:
+    """One trial of one case: run, score, record, and tear down what it created."""
+    from bench.cleanup import created_resources, teardown
+    from bench.client import run_case
+    from bench.dataset import is_mutating
+    from bench.reporter import trial_key
+    from bench.scorer import harness_card, score_case, timeout_card, with_trial
+    from bench.traces import case_span
+    from config import PASS_THRESHOLD, case_timeout_s, staging_config
+
+    if staging_config().get("env_mode") == "mock":
+        # Every trial starts from the fixture: the mock is stateful, and a trial
+        # must not inherit the executor the previous one created. A trial that
+        # cannot be seeded is retried once, then recorded as infra — never scored
+        # against a state it did not start from, and never silently dropped.
+        reason = _seed_mock_with_retry(getattr(case, "mock_faults", None) or [])
+        if reason:
+            scorecards.append(harness_card(case, model, reason, trial_idx=trial))
+            console.print(f"[yellow]harness: {reason}[/yellow]")
+            return
+    try:
+        # Baseline first: the ceiling is sized from it, so a slow case gets room
+        # proportional to how slow it has always been.
+        baseline = store.load(case.id)
+        timeout_s = case_timeout_s(baseline.latency_s if baseline else None)
+        lane = str(staging_config().get("env_mode") or "live")
+        with case_span(case.id, trial=trial, model=model, lane=lane) as trace_link:
+            result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
+        baseline_latency = baseline.latency_s if baseline else result.latency_s
+        card = await score_case(case, result, baseline_latency, trial_idx=trial)
+        card.trace_id, card.trace_url = trace_link["trace_id"], trace_link["trace_url"]
+        if staging_config().get("env_mode") == "mock":
+            _flag_mock_gaps(card)
+        scorecards.append(card)
+        responses[trial_key(case.id, trial)] = result.response
+
+        status = (
+            f"[green]{card.composite:.2f}[/green]"
+            if card.composite >= PASS_THRESHOLD
+            else f"[red]{card.composite:.2f}[/red]"
+        )
+        extra = ""
+        if card.usage.get("total_tokens"):
+            extra = f", {card.usage['total_tokens']:,} tok"
+        console.print(f"→ {status} ({result.latency_s:.1f}s{extra})")
+        if card.harness_artifact:
+            console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
+
+        # Undo what the trial created, whatever its score — an aborted half-created
+        # resource still needs removing. Keyed on the trace as well as the case's
+        # risk level: a read-only case is exactly where a model that falls for a
+        # prompt injection creates something nobody planned to clean up.
+        if is_mutating(case) or created_resources(result):
+            report = await teardown(
+                result,
+                model,
+                agent_slug=getattr(case, "agent_slug", None),
+                tick=getattr(case, "type", "") == "tick",
+            )
+            if report.removed:
+                console.print(f"      [dim]cleaned up {len(report.removed)} resource(s)[/dim]")
+            for row in report.kept_positions:
+                console.print(
+                    f"      [yellow]position kept: {row.get('tool')} "
+                    f"{row.get('identifier')} — {row.get('note')}[/yellow]"
+                )
+            for row in report.failed + report.manual:
+                console.print(
+                    f"      [yellow]left behind: {row.get('tool')} "
+                    f"{row.get('identifier')} — {row.get('error') or row.get('reason', 'manual')}[/yellow]"
+                )
+    except asyncio.TimeoutError:
+        # Record it. Appending nothing made the case vanish from the run entirely,
+        # so a thinned domain looked like a domain nobody had asked about.
+        baseline = store.load(case.id)
+        base_s = baseline.latency_s if baseline else 0.0
+        scorecards.append(
+            with_trial(timeout_card(case, model, case_timeout_s(base_s or None), base_s), trial)
+        )
+        console.print(
+            f"[red]TIMEOUT after {case_timeout_s(base_s or None):.0f}s — "
+            "recorded as a harness artifact[/red]"
+        )
+    except Exception as exc:
+        # Recorded, not dropped: a vanished trial makes thin evidence look complete.
+        scorecards.append(
+            harness_card(case, model, f"harness error: {type(exc).__name__}: {exc}", trial_idx=trial)
+        )
+        console.print(f"[red]ERROR: {exc} — recorded as a harness artifact[/red]")
+
+
+def _seed_mock_with_retry(faults: list | None = None, attempts: int = 2) -> str | None:
+    """Reset the mock to its fixture and arm the case's faults.
+
+    Returns why seeding failed, or None on success.
+    """
+    from bench.lanes import arm_mock_faults, reset_mock
+
+    last = ""
+    for _ in range(attempts):
+        try:
+            reset_mock()
+            arm_mock_faults(faults or [])
+            return None
+        except Exception as exc:  # noqa: BLE001 — any failure means "not seeded"
+            last = f"{type(exc).__name__}: {exc}"
+    return f"mock could not be reset to its fixture after {attempts} attempts ({last})"
+
+
+def _flag_mock_gaps(card) -> None:
+    """A trial that hit an endpoint the mock does not implement measured the mock.
+
+    The model got a 501 for a call that would have worked on a real API, so the row
+    is a harness artifact — excluded and named — not a model failure.
+    """
+    from bench.lanes import mock_state
+
+    try:
+        gaps = mock_state().get("unhandled") or []
+    except Exception:  # noqa: BLE001 — a dead mock is caught by the next reset
+        return
+    # A forbidden call is the model's whatever else the mock lacked: excluding it
+    # as a harness artifact would launder an unsafe action out of the unsafe rate.
+    if gaps and not card.harness_artifact and not card.forbidden_violations:
+        card.harness_artifact = (
+            f"mock lane does not implement {', '.join(gaps[:4])}"
+            + (f" (+{len(gaps) - 4} more)" if len(gaps) > 4 else "")
+            + " — run this case on the live lane"
+        )
 
 
 def _order_cases(cases: list, order: str, store) -> list:
@@ -576,6 +757,23 @@ def sweep(
         help="Record cases whose declared markets cannot bind as harness "
         "artifacts instead of refusing the run.",
     ),
+    split: Optional[str] = typer.Option(
+        None, "--split", help="Comma-separated task splits to run (dev, regression)"
+    ),
+    release: bool = typer.Option(
+        False,
+        "--release",
+        help="Release run: add the holdout split. Holdout never runs otherwise — not "
+        "with --tags core, not from the dashboard.",
+    ),
+    trials: int = typer.Option(
+        1,
+        "--trials",
+        min=1,
+        help="Trials per case (opt in with --trials 3). Each is its own row "
+        "(trial_idx); pass rates carry Wilson intervals over every trial. A 1-trial "
+        "run is not comparable with a 3-trial one.",
+    ),
     order: str = typer.Option(
         "easiest-first",
         help="Case order: 'easiest-first' or 'dataset'. See `test --help`.",
@@ -587,12 +785,15 @@ def sweep(
     from bench.baseline import BaselineStore
     from bench.dataset import case_prompt_map, filter_cases, load_all_cases
     from bench.market_resolver import bindings_summary, unresolvable_card
+    from bench.manifest import build_manifest
     from bench.matrix import load_models
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
+    from bench.scorer import with_trial
     from bench.staging_health import StagingUnhealthy, assert_ready
-    from config import PASS_THRESHOLD, build_run_pin
+    from config import PASS_THRESHOLD
 
+    _enter_lane("live")
     try:
         assert_ready()
     except StagingUnhealthy as exc:
@@ -617,12 +818,14 @@ def sweep(
         ]
 
     cases = filter_cases(
-        load_all_cases(),
+        load_all_cases(include_holdout=release),
         domain=domain,
         layers=_resolve_layers(False, False, layers),
         risk_levels=_resolve_risk_levels(risk),
         tags=_resolve_tags(tags),
+        splits=_resolve_splits(split, release),
     )
+    cases = _cases_for_lane(cases)
     if not cases:
         console.print("[red]No cases matched the filters.[/red]")
         raise typer.Exit(1)
@@ -640,7 +843,7 @@ def sweep(
         }
     )
     console.print(
-        f"\nSweeping [bold]{len(registry)}[/bold] model(s) × {len(cases)} case(s)"
+        f"\nSweeping [bold]{len(registry)}[/bold] model(s) × {len(cases)} case(s) × {trials} trial(s)"
     )
     console.print(f"  target: {target_banner()}\n")
 
@@ -650,19 +853,22 @@ def sweep(
         console.print(f"[bold]{entry.key}[/bold] ({size})")
         sweep_run_id = uuid.uuid4().hex[:8]
         memory_reset = _reset_acp_memory(entry.key, sweep_run_id)
-        scorecards, responses = asyncio.run(_run_cases(cases, entry.key, store))
+        scorecards, responses = asyncio.run(_run_cases(cases, entry.key, store, trials))
         scorecards = [
-            unresolvable_card(case, entry.key, resolutions[case.id])
+            with_trial(unresolvable_card(case, entry.key, resolutions[case.id]), t)
             for case in market_skips
+            for t in range(1, trials + 1)
         ] + scorecards
         if not scorecards:
             console.print("  [yellow]no cases scored — skipping save[/yellow]")
             continue
-        pin = build_run_pin(
+        pin = build_manifest(
             run_type="adhoc",
             case_ids=[c.id for c in cases],
             models=[entry.key],
-                shared_loaded=True,
+            shared_loaded=True,
+            trials=trials,
+            cases=cases,
         )
         pin["sweep"] = True
         pin["market_bindings"] = bindings_summary(resolutions)
@@ -703,7 +909,12 @@ def matrix(
         console.print("[red]--axis must be 'domains' or 'tools'.[/red]")
         raise typer.Exit(2)
 
-    data = build_matrix(models_path=models)
+    from config import env_mode
+
+    lane = env_mode("live")
+    data = build_matrix(models_path=models, lane=lane)
+    if lane != "live":
+        console.print(f"[cyan]{lane} lane[/cyan] — this matrix is not a routing source")
     if not data["models"]:
         console.print("[yellow]No runs found. Run 'sweep' or 'test' first.[/yellow]")
         raise typer.Exit(1)
@@ -778,11 +989,20 @@ def _cell_label(cell: dict | None) -> str:
     rate = cell.get("pass_rate")
     if rate is None:
         return "[dim]—[/dim]"
-    colour = "green" if rate >= 0.8 else ("yellow" if rate >= 0.5 else "red")
+    # Colour follows the interval, not the point: green only when the Wilson lower
+    # bound clears the gate, yellow while the interval straddles it.
+    status = cell.get("gate_status")
+    if status is None:
+        status = "passing" if rate >= 0.8 else ("not_yet_passing" if rate >= 0.5 else "failing")
+    colour = {"passing": "green", "not_yet_passing": "yellow"}.get(status, "red")
+    ci = cell.get("pass_rate_ci")
+    span = f" [dim][{ci[0]:.0%}–{ci[1]:.0%}][/dim]" if ci else ""
     suffix = f" [dim]({cell['scored']})[/dim]"
     if cell.get("destructive_failures"):
         suffix += " [red]![/red]"
-    return f"[{colour}]{rate:.0%}[/{colour}]{suffix}"
+    if cell.get("unsafe"):
+        suffix += f" [red]unsafe {cell['unsafe']}[/red]"
+    return f"[{colour}]{rate:.0%}[/{colour}]{span}{suffix}"
 
 
 @app.command()
@@ -811,12 +1031,21 @@ def route(
     ),
     models: Path = typer.Option(Path("datasets/models.json"), help="Model registry"),
 ) -> None:
-    """Generate routing recommendations: the smallest model that passes each domain."""
+    """Routing recommendations: the cheapest model whose Wilson lower bound passes each domain."""
     from bench.matrix import save_matrix
     from bench.routing import generate, save_routing
     from config import MIN_TOOL_CASES, TOOL_PASS_RATE
 
+    from config import env_mode
+
+    lane = env_mode("live")
+    if lane != "live":
+        console.print(
+            f"[cyan]{lane} lane[/cyan] — recommendations are a CI artefact, saved apart "
+            "from the live routing file; publish routing from the live lane"
+        )
     matrix_data, routing = generate(
+        lane=lane,
         min_pass_rate=min_pass_rate,
         min_cases=min_cases,
         min_tool_pass_rate=(
@@ -839,6 +1068,8 @@ def route(
     table.add_column("Model")
     table.add_column("Size", justify="right")
     table.add_column("Pass", justify="right")
+    table.add_column("95% CI", justify="right")
+    table.add_column("$/success", justify="right")
     table.add_column("Avg tokens", justify="right")
     table.add_column("Rationale")
     for domain, rec in routing["recommendations"].items():
@@ -846,11 +1077,15 @@ def route(
         note = rec["rationale"]
         if rec.get("no_local_passed"):
             note += " (no local model passed)"
+        ci = rec.get("pass_rate_ci")
+        cps = rec.get("cost_per_success")
         table.add_row(
             domain,
             rec["model"],
             f"{rec['params_b']}B" if rec.get("params_b") else "cloud",
             f"{rec['pass_rate']:.0%}" if rec.get("pass_rate") is not None else "—",
+            f"{ci[0]:.0%}–{ci[1]:.0%}" if ci else "—",
+            f"${cps:.4f}" if cps is not None else "[dim]n/a[/dim]",
             f"{tokens:,.0f}" if tokens else "[dim]n/a[/dim]",
             note,
         )
@@ -861,8 +1096,9 @@ def route(
 
     for domain, gap in routing["unmet_domains"].items():
         best = gap.get("best_attempt") or {}
+        label = gap.get("status", "unmet").replace("_", " ")
         console.print(
-            f"[yellow]unmet[/yellow] {domain}: {gap['reason']}"
+            f"[yellow]{label}[/yellow] {domain}: {gap['reason']}"
             + (
                 f" — best was {best.get('model')} at "
                 f"{(best.get('pass_rate') or 0):.0%}"
@@ -926,7 +1162,7 @@ def report() -> None:
             f"{r.get('answer_quality_avg', 0):.2f}" if r.get("answer_quality_avg") is not None else "—",
             f"{r.get('tool_accuracy_avg', 0):.2f}" if r.get("tool_accuracy_avg") is not None else "—",
             f"{r.get('tool_params_avg', 0):.2f}" if r.get("tool_params_avg") is not None else "—",
-            f"{r.get('latency_score_avg', 0):.2f}",
+            f"{r['latency_score_avg']:.2f}" if r.get("latency_score_avg") is not None else "n/a",
             f"{avg_tokens:,.0f}" if avg_tokens else "—",
             str(r.get("cases_scored", "?")),
         )
@@ -962,9 +1198,39 @@ def _print_summary(scorecards, model: str, pass_threshold: float) -> None:
     console.print(f"  Tool accuracy:  {_avg('tool_accuracy')}")
     console.print(f"  Tool params:    {_avg('tool_params')}")
     console.print(f"  Live validity:  {_avg('live_validity')}")
-    console.print(f"  Latency score:  {sum(s.latency_score for s in valid)/n:.3f}")
-    console.print(f"  Avg latency:    {sum(s.latency_s for s in valid)/n:.1f}s")
-    console.print(f"  Pass rate:      {sum(1 for s in valid if s.composite >= pass_threshold)/n:.0%}")
+    scored_latency = [s.latency_score for s in valid if s.latency_score is not None]
+    console.print(
+        f"  Latency score:  {sum(scored_latency)/len(scored_latency):.3f}"
+        if scored_latency
+        else "  Latency score:  n/a [dim](provider latency not representative — excluded)[/dim]"
+    )
+    from bench.stats import median, percentile_95
+
+    lat = [s.latency_s for s in valid if s.latency_representative]
+    if lat:
+        console.print(
+            f"  Latency:        mean {sum(lat)/len(lat):.1f}s, median {median(lat) or 0:.1f}s, "
+            f"p95 {percentile_95(lat) or 0:.1f}s"
+        )
+    else:
+        console.print("  Latency:        n/a [dim](hosted endpoint — wall clock not representative)[/dim]")
+    from bench import stats
+
+    passes = sum(1 for s in valid if s.passed)
+    lo, hi = stats.wilson_interval(passes, len(valid))
+    trials = max((s.trial_idx for s in valid), default=1)
+    console.print(
+        f"  Pass rate:      {passes/n:.0%} [dim](95% CI {lo:.0%}–{hi:.0%}, "
+        f"{len(valid)} rows over {trials} trial(s))[/dim]"
+    )
+    unsafe = sum(1 for s in valid if s.forbidden_violations or s.unsafe_action_rate > 0)
+    if unsafe:
+        console.print(f"  [red]Unsafe actions: {unsafe} row(s) — a hard fail[/red]")
+    consistency = stats.trial_consistency(
+        {cid: [1.0 if s.passed else 0.0 for s in valid if s.case_id == cid] for cid in {s.case_id for s in valid}}
+    )
+    if consistency is not None:
+        console.print(f"  Consistency:    {consistency:.3f} [dim](mean per-case std dev of pass across trials)[/dim]")
 
     tokens = [s.usage.get("total_tokens") for s in valid if s.usage.get("total_tokens")]
     if tokens:
@@ -1015,6 +1281,14 @@ def suite_list() -> None:
 def suite_run_cmd(
     suite_id: str = typer.Argument(..., help="Suite id"),
     case_ids: Optional[str] = typer.Option(None, help="Comma-separated case ids"),
+    adhoc: bool = typer.Option(False, "--adhoc", help="Run ad-hoc (bypasses A/B freeze rules)"),
+    experiment: Optional[str] = typer.Option(None, "--experiment", help="Experiment type: A, B, or adhoc"),
+    trials: Optional[int] = typer.Option(
+        None, "--trials", min=1, help="Trials per case (default: the suite's `trials`, else 1)"
+    ),
+    preset: Optional[str] = typer.Option(
+        None, "--preset", help="Experiment preset from experiments/ (e.g. a_example); enforces its freeze rules"
+    ),
 ) -> None:
     """Run a suite across its environments via subprocess workers."""
     import uuid
@@ -1033,12 +1307,203 @@ def suite_run_cmd(
             parent_run_id=run_id,
             emit=emit,
             case_ids=ids,
+            experiment_type=experiment,
+            adhoc=adhoc,
+            trials=trials,
+            preset=preset,
         )
 
-    result = asyncio.run(_go())
+    try:
+        result = asyncio.run(_go())
+    except ValueError as exc:  # FreezeViolationError, a bad preset
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
     console.print(f"[bold]run_group_id[/bold] {result['run_group_id']}")
     for m in result["members"]:
         console.print(f"  {m}")
+
+
+LADDER_RUNGS = ("l0", "l1")
+#: L1 is single-tool calling on what the mock serves: the trading reads, creates
+#: and executor management. Bots, controllers, DEX and platform tools need the
+#: live lane (L2), where routing is published from.
+L1_CATEGORIES = ("market_reads", "order_creation", "executor_lifecycle")
+
+
+@app.command()
+def ladder(
+    model: Optional[str] = typer.Argument(None, help="Model for L1 and up (L0 needs none)"),
+    upto: str = typer.Option("l0", "--upto", help="Highest rung to run: l0 | l1"),
+    trials: int = typer.Option(1, "--trials", min=1, help="Trials per L1 case"),
+) -> None:
+    """Climb the evaluation ladder on the mock lane, stopping at the first failed rung.
+
+    L0 — Condor's tool contract, no model: every measured tool's schema compiles,
+    and missing or out-of-enum arguments are rejected in a stable, scoreable form.
+    L1 — one model on the single-tool cases the mock serves.
+
+    Defaults to the mock lane. ``BENCH_ENV_MODE=live`` is honoured only with a
+    passing staging pre-flight.
+    """
+    import json as _json
+    import uuid
+
+    from bench.staging_health import StagingUnhealthy, assert_ready
+
+    if upto not in LADDER_RUNGS:
+        console.print(f"[red]--upto must be one of {', '.join(LADDER_RUNGS)}[/red]")
+        raise typer.Exit(2)
+    rungs = LADDER_RUNGS[: LADDER_RUNGS.index(upto) + 1]
+    if "l1" in rungs and not model:
+        console.print("[red]L1 needs a model: runner.py ladder <model> --upto l1[/red]")
+        raise typer.Exit(2)
+
+    lane = _enter_lane("mock")
+    try:
+        assert_ready()
+    except StagingUnhealthy as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    from config import RESULTS_DIR
+
+    ladder_id = uuid.uuid4().hex[:8]
+    out_dir = RESULTS_DIR / f"ladder_{ladder_id}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    from eval.l0_contracts.contracts import format_report, run_l0
+
+    l0 = asyncio.run(run_l0())
+    from config import condor_checkout_state
+
+    # The checkout the contract was checked on: a promotion report only accepts
+    # an L0 pass bit for the exact commit it promotes.
+    condor = condor_checkout_state()
+    (out_dir / "l0.json").write_text(_json.dumps(
+        {**l0, "env_mode": lane, "ladder_id": ladder_id,
+         "condor": {k: condor.get(k) for k in ("path", "branch", "commit", "dirty_files")}},
+        indent=2, default=str,
+    ))
+    console.print(format_report(l0))
+    if l0["failed"]:
+        console.print(f"[red]L0 failed — not climbing to {upto}.[/red] Report: {out_dir / 'l0.json'}")
+        raise typer.Exit(1)
+    if "l1" not in rungs:
+        console.print(f"[green]L0 passed.[/green] Report: {out_dir / 'l0.json'}")
+        return
+
+    from bench.baseline import BaselineStore
+    from bench.dataset import filter_cases, load_all_cases
+    from bench.manifest import build_manifest
+    from bench.reporter import save_run
+
+    cases = filter_cases(
+        load_all_cases(), layers=["tool"], task_categories=L1_CATEGORIES,
+        splits=["dev", "regression"],
+    )
+    cases = _cases_for_lane(cases)
+    cases, resolutions, market_skips = _bind_markets(cases, False)
+    store = BaselineStore()
+    console.print(f"\nL1: [bold]{model}[/bold] on {len(cases)} single-tool case(s) × {trials} trial(s)")
+    scorecards, responses = asyncio.run(_run_cases(cases, model, store, trials))
+    pin = build_manifest(
+        run_type="ladder", case_ids=[c.id for c in cases], models=[model],
+        shared_loaded=True, trials=trials, cases=cases,
+    )
+    pin["ladder"] = {"id": ladder_id, "rung": "l1", "l0_report": str(out_dir / "l0.json")}
+    run_dir = save_run(model, scorecards, responses, f"{ladder_id}l1", extra_summary=pin)
+    from config import PASS_THRESHOLD
+
+    _print_summary(scorecards, model, PASS_THRESHOLD)
+    console.print(f"\n[bold]L1 run saved:[/bold] {run_dir}")
+
+
+@app.command()
+def promote(
+    baseline_run: str = typer.Option(..., "--baseline", help="Run dir on the current Condor contract"),
+    candidate_run: str = typer.Option(..., "--candidate", help="Run dir on the new Condor contract"),
+    ladder_id: Optional[str] = typer.Option(
+        None, "--ladder", help="Ladder id whose L0/L1 ran on the candidate commit (the lower-layer pass bits)"
+    ),
+) -> None:
+    """Contract promotion report: Experiment A gates on the holdout split.
+
+    Exits non-zero unless the report can claim a live promotion — every gate
+    passing, both runs live with the full holdout, and L0/L1 pass bits for the
+    candidate's commit.
+    """
+    from bench.promotion import PromotionError, build_report, format_report, save_report
+
+    try:
+        report = build_report(baseline_run, candidate_run, ladder_id=ladder_id)
+    except PromotionError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    path = save_report(report)
+    console.print(format_report(report))
+    console.print(f"\n[bold]Report saved:[/bold] {path}")
+    if not report["claims_live_promotion"]:
+        raise typer.Exit(1)
+
+
+@app.command("nim-smoke")
+def nim_smoke(
+    models: Optional[str] = typer.Argument(
+        None, help="Comma-separated nvidia:* keys (default: every nvidia:* model in the registry)"
+    ),
+) -> None:
+    """Gate NVIDIA NIM models before a sweep: listed, real tool call, bench-sized context.
+
+    A catalog listing is not proof a model is callable — several listed models
+    answer 404 for a given account — so run this before adding one to a sweep.
+    """
+    from bench.matrix import load_models
+    from bench.nim import is_nim_model, smoke
+
+    keys = (
+        [k.strip() for k in models.split(",") if k.strip()]
+        if models
+        else [m.key for m in load_models() if is_nim_model(m.key)]
+    )
+    if not keys:
+        console.print("[yellow]No nvidia:* models given or registered.[/yellow]")
+        raise typer.Exit(1)
+
+    async def _go():
+        return [await smoke(k) for k in keys]
+
+    results = asyncio.run(_go())
+    table = Table(title="NIM smoke")
+    for col in ("model", "listed", "tool call", "context", "verdict"):
+        table.add_column(col)
+    for r in results:
+        table.add_row(
+            r.model, r.detail.get("listed", ""), r.detail.get("tool_call", "—"),
+            r.detail.get("context", "—"), "[green]ok[/green]" if r.ok else "[red]fail[/red]",
+        )
+    console.print(table)
+    if not all(r.ok for r in results):
+        raise typer.Exit(1)
+
+
+@app.command("mock-serve")
+def mock_serve(
+    fixture: str = typer.Option("default", help="Fixture in mock_mcp/fixtures/ to serve"),
+) -> None:
+    """Serve the mock hummingbot-api (the mock lane's target) in the foreground."""
+    import os
+
+    import uvicorn
+
+    from config import mock_config
+    from mock_mcp.server import MockState, create_app
+
+    cfg = mock_config()
+    os.environ["BENCH_MOCK_FIXTURE"] = fixture
+    console.print(f"mock hummingbot-api on {cfg['api_url']} (fixture {fixture}) — Ctrl-C to stop")
+    uvicorn.run(
+        create_app(MockState(fixture)), host=str(cfg["host"]), port=int(cfg["port"]), log_level="warning"
+    )
 
 
 if __name__ == "__main__":

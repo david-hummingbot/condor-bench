@@ -12,6 +12,7 @@ Changes from production:
 from __future__ import annotations
 
 import asyncio
+import re
 import json
 import logging
 import os
@@ -55,13 +56,103 @@ _CLAUDE_ACP_BASES = {"claude-code", "claude-acp"}
 _ACP_MODEL_SENTINEL = "default"
 
 
+class ModelPinError(RuntimeError):
+    """A model pin the bridge cannot apply: it is not offered, or the switch failed.
+
+    Ported from condor (TASK-002, CORR-745/746). Raised instead of running the
+    session on the bridge's default: a pin is a comparability statement, and a
+    ``claude-code:haiku`` row that was really Opus measures the wrong model under
+    the right name.
+    """
+
+
 def resolve_acp(agent_key: str) -> tuple[str, dict[str, str]]:
-    base, _, model = agent_key.partition(":")
+    """``(command, env overlay)`` for an ACP model key.
+
+    The overlay is empty for the Claude bases. The ``:model`` suffix used to be
+    exported as ANTHROPIC_MODEL, a channel the bridge either ignored (0.21: the run
+    silently used the default) or trusted blindly (0.79: any string, typos
+    included, "applied"). Condor now pins over the protocol only — see
+    :func:`acp_model_pin` and :meth:`ACPClient._select_model` — and so does bench.
+    """
+    base, _, _model = agent_key.partition(":")
     command = ACP_COMMANDS.get(base, ACP_COMMANDS["claude-code"])
-    env: dict[str, str] = {}
+    return command, {}
+
+
+def acp_model_pin(agent_key: str) -> str:
+    """The ``:model`` pin for a Claude ACP key, or ``""`` for none / the sentinel."""
+    base, _, model = agent_key.partition(":")
     if model and model != _ACP_MODEL_SENTINEL and base in _CLAUDE_ACP_BASES:
-        env["ANTHROPIC_MODEL"] = model
-    return command, env
+        return model
+    return ""
+
+
+_CONTEXT_HINT = re.compile(r"\[\d+m\]$")
+_VERSION_TAIL = re.compile(r"^[-.]?\d[\d.\-]*$")
+
+
+def _canonical_family(value: str) -> str:
+    """``value`` without the vendor prefix or the trailing ``[1m]`` context hint."""
+    return _CONTEXT_HINT.sub("", value).removeprefix("claude-")
+
+
+def resolve_model_id(preference: str, available_models: list[dict]) -> str | None:
+    """Map a pin ("sonnet", "claude-sonnet-4-6") to an exact advertised ``modelId``.
+
+    Upstream's rules: exact id/name, then a forward substring (an alias inside a
+    full id), then an advertised family plus a version tail. Nothing looser — an
+    unanchored match let ``sonnet-typo-xyz`` pass as ``sonnet`` (CORR-745). None
+    when nothing matches, which the caller treats as a failure.
+    """
+    if not preference or not available_models:
+        return None
+    pref = preference.strip().lower()
+
+    def fields(m: dict) -> tuple[str, str]:
+        return str(m.get("modelId") or "").lower(), str(m.get("name") or "").lower()
+
+    for m in available_models:
+        mid, name = fields(m)
+        if pref in (mid, name):
+            return m.get("modelId")
+    canon_pref = _canonical_family(pref)
+    for m in available_models:
+        mid, name = fields(m)
+        if (mid and pref in mid) or (name and pref in name):
+            return m.get("modelId")
+        canon_mid = _canonical_family(mid)
+        if canon_mid and canon_pref.startswith(canon_mid):
+            if _VERSION_TAIL.match(canon_pref[len(canon_mid):]):
+                return m.get("modelId")
+    return None
+
+
+def model_pin_failure(problem: str, available: list[dict], current: str | None) -> str:
+    offered = ", ".join(str(m.get("modelId")) for m in available if m.get("modelId")) or "nothing"
+    return (
+        f"ACP model pin could not be applied: {problem}. It offers: {offered} "
+        f"(its default is {current or 'unknown'}). No session was started — pin one of "
+        "those, or drop the ':model' suffix to accept the default."
+    )
+
+
+def advertised_models(session: dict) -> tuple[list[dict], str | None, str | None]:
+    """``(models, current, config_id)`` from a ``session/new`` reply.
+
+    ``config_id`` None means switch with ``session/set_model``; a string means
+    ``session/set_config_option`` with that id (bridges from 0.66 on).
+    """
+    for option in session.get("configOptions") or []:
+        if isinstance(option, dict) and (option.get("category") == "model" or option.get("id") == "model"):
+            models = [
+                {"modelId": o.get("value"), "name": o.get("name", "")}
+                for o in option.get("options") or []
+                if isinstance(o, dict) and o.get("value")
+            ]
+            return models, option.get("currentValue"), option.get("id") or "model"
+    legacy = session.get("models") or {}
+    return legacy.get("availableModels") or [], legacy.get("currentModelId"), None
 
 
 def is_acp_model(model_key: str) -> bool:
@@ -261,8 +352,12 @@ class ACPClient:
         mcp_servers: list[dict[str, Any]] | None = None,
         permission_callback: PermissionCallback | None = None,
         extra_env: dict[str, str] | None = None,
+        model: str = "",
     ):
         self.command = command
+        # The ``:model`` pin, applied over the protocol after session/new.
+        self.model = model
+        self.active_model_id: str | None = None
         self.working_dir = working_dir or os.getcwd()
         self.mcp_servers: list[dict[str, Any]] = mcp_servers or []
         self.permission_callback = permission_callback
@@ -337,6 +432,39 @@ class ACPClient:
         # cosmetic mistake: claude-agent-acp fails every prompt in the run with a
         # 400 when the configured model rejects the thinking parameter it sends.
         self.session_models = parse_session_models(result)
+        await self._select_model(result)
+
+    async def _select_model(self, session: dict) -> None:
+        """Apply ``self.model`` over the protocol, or refuse to run the session.
+
+        Ported from condor's ACPClient._select_model: the pin must resolve to an
+        advertised model and the switch must succeed, otherwise the bridge is
+        stopped and :class:`ModelPinError` raised — never a run on the default.
+        """
+        available, current, config_id = advertised_models(session)
+        self.active_model_id = current
+        if not self.model:
+            return
+        target = resolve_model_id(self.model, available)
+        if not target:
+            await self.stop()
+            raise ModelPinError(model_pin_failure(
+                f"this bridge does not offer the pinned model {self.model!r}", available, current))
+        if target == current:
+            return
+        if config_id:
+            method, params = "session/set_config_option", {
+                "sessionId": self._session_id, "configId": config_id, "value": target}
+        else:
+            method, params = "session/set_model", {"sessionId": self._session_id, "modelId": target}
+        try:
+            await self._peer.send_request(method, params, self._process.stdin)
+        except Exception as exc:
+            await self.stop()
+            raise ModelPinError(model_pin_failure(
+                f"the bridge refused {method} for the pinned model {self.model!r} ({target!r}): {exc}",
+                available, current)) from exc
+        self.active_model_id = target
 
     async def stop(self) -> None:
         self._peer.cancel_all()

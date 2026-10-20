@@ -8,10 +8,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from config import PASS_THRESHOLD, RESULTS_DIR
+from config import DOMAIN_PASS_RATE, PASS_THRESHOLD, RESULTS_DIR
+from bench import stats
 from bench.scorer import ScoreCard
 
 log = logging.getLogger(__name__)
+
+
+def trial_key(case_id: str, trial_idx: int = 1) -> str:
+    """Key for one trial's case file and response.
+
+    Trial 1 keeps the bare case id, so single-trial runs — and every run saved
+    before trials existed — keep ``cases/<case_id>.json``.
+    """
+    return case_id if int(trial_idx or 1) <= 1 else f"{case_id}__t{int(trial_idx)}"
 
 
 def save_run(
@@ -36,11 +46,12 @@ def save_run(
     cases_dir = run_dir / "cases"
     cases_dir.mkdir(exist_ok=True)
     for sc in scorecards:
+        key = trial_key(sc.case_id, sc.trial_idx)
         record = sc.as_dict()
-        record["response"] = responses.get(sc.case_id, "")
+        record["response"] = responses.get(key, "")
         if prompts and sc.case_id in prompts:
             record["question"] = prompts[sc.case_id]
-        (cases_dir / f"{sc.case_id}.json").write_text(json.dumps(record, indent=2))
+        (cases_dir / f"{key}.json").write_text(json.dumps(record, indent=2))
 
     try:
         summary = _compute_summary(model, scorecards)
@@ -150,15 +161,75 @@ def _domain_breakdown(scorecards: list[ScoreCard]) -> dict[str, Any]:
                 "excluded": len(cards),
             }
             continue
-        passed = [c for c in scorable if c.composite >= PASS_THRESHOLD]
+        passed = [c for c in scorable if c.passed]
+        rate = stats.rate_summary(len(passed), len(scorable), gate=DOMAIN_PASS_RATE)
         out[domain] = {
             "cases": len(cards),
             "scored": len(scorable),
             "excluded": len(cards) - len(scorable),
             "pass_rate": round(len(passed) / len(scorable), 4),
+            "pass_rate_ci": rate["ci"],
+            "gate_status": rate["gate_status"],
             "avg_composite": round(_mean([c.composite for c in scorable]), 4),
         }
     return out
+
+
+def _group_rates(valid: list[ScoreCard], attr: str) -> dict[str, Any]:
+    """Pass rate with a Wilson interval per task category or split."""
+    groups: dict[str, list[ScoreCard]] = {}
+    for s in valid:
+        key = getattr(s, attr, "") or ""
+        if key:
+            groups.setdefault(key, []).append(s)
+    out: dict[str, Any] = {}
+    for key, cards in sorted(groups.items()):
+        passes = sum(1 for c in cards if c.passed)
+        rate = stats.rate_summary(passes, len(cards))
+        out[key] = {"scored": len(cards), "passed": passes, "pass_rate": rate["rate"], "pass_rate_ci": rate["ci"]}
+    return out
+
+
+def _trial_stats(valid: list[ScoreCard]) -> dict[str, Any]:
+    """Phase 2 statistics over the scored rows (one row per case × trial).
+
+    Pass and unsafe rates carry Wilson intervals; latency, tokens and cost carry
+    median, p95 and a bootstrap CI. ``cost_per_success`` is total spend over the
+    rows that reported a cost divided by the successes among them — the mean cost
+    of a *successful* row would hide what the failures cost.
+    """
+    n = len(valid)
+    passes = sum(1 for s in valid if s.passed)
+    unsafe = sum(1 for s in valid if s.unsafe_action_rate > 0.0 or s.forbidden_violations)
+    by_case: dict[str, list[float]] = {}
+    for s in valid:
+        by_case.setdefault(s.case_id, []).append(1.0 if s.passed else 0.0)
+    priced = [s for s in valid if (s.usage or {}).get("cost_usd") is not None]
+    priced_passes = sum(1 for s in priced if s.passed)
+    return {
+        "trials": max((s.trial_idx for s in valid), default=1),
+        "cases_unique": len(by_case),
+        "pass_rate_ci": stats.rate_summary(passes, n)["ci"],
+        "pass_gate_status": stats.rate_summary(passes, n, gate=DOMAIN_PASS_RATE)["gate_status"],
+        "unsafe_action_rate_ci": stats.rate_summary(unsafe, n)["ci"],
+        # Mean per-case std dev of pass/fail across trials; None on a 1-trial run.
+        "pass_consistency_std": stats.trial_consistency(by_case),
+        # Only rows whose wall clock measures the model (see bench.nim).
+        "latency_s": stats.distribution([s.latency_s for s in valid if s.latency_representative]),
+        "latency_representative": all(s.latency_representative for s in valid),
+        "total_tokens": stats.distribution(
+            [s.usage["total_tokens"] for s in valid if (s.usage or {}).get("total_tokens") is not None],
+            digits=1,
+        ),
+        "cost_usd": stats.distribution(
+            [s.usage["cost_usd"] for s in priced], digits=6
+        ),
+        "cost_per_success": (
+            round(sum(float(s.usage["cost_usd"]) for s in priced) / priced_passes, 6)
+            if priced_passes
+            else None
+        ),
+    }
 
 
 def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
@@ -240,13 +311,48 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
             if with_params else None,
         "live_validity_avg": round(_mean([s.live_validity for s in with_validity]), 4)
             if with_validity else None,
-        "latency_score_avg": round(_mean([s.latency_score for s in valid]), 4) if valid else 0.0,
+        "latency_score_avg": (
+            round(_mean([s.latency_score for s in valid if s.latency_score is not None]), 4)
+            if any(s.latency_score is not None for s in valid)
+            else None
+        ),
         "composite_avg": round(_mean([s.composite for s in valid]), 4) if valid else 0.0,
         "latency_s_avg": round(sum(s.latency_s for s in valid) / n, 2) if valid else 0.0,
         "baseline_latency_s_avg": round(sum(s.baseline_latency_s for s in valid) / n, 2) if valid else 0.0,
-        "pass_count": sum(1 for s in valid if s.composite >= PASS_THRESHOLD),
-        "pass_rate": round(sum(1 for s in valid if s.composite >= PASS_THRESHOLD) / n, 4)
-            if valid else 0.0,
+        "pass_count": sum(1 for s in valid if s.passed),
+        "pass_rate": round(sum(1 for s in valid if s.passed) / n, 4) if valid else 0.0,
+        # §5 scorecard metrics
+        "task_success_count": sum(1 for s in valid if s.task_success),
+        "task_success_rate": round(sum(1 for s in valid if s.task_success) / n, 4) if valid else 0.0,
+        "unsafe_action_rate": round(sum(1 for s in valid if s.unsafe_action_rate > 0.0 or s.forbidden_violations) / n, 4) if valid else 0.0,
+        "first_call_validity_avg": (
+            round(_mean([s.first_call_validity for s in valid if s.first_call_validity is not None]), 4)
+            if any(s.first_call_validity is not None for s in valid)
+            else None
+        ),
+        "repair_rate_avg": (
+            round(_mean([s.repair_rate for s in valid if s.repair_rate is not None]), 4)
+            if any(s.repair_rate is not None for s in valid)
+            else None
+        ),
+        "tool_calls_per_success_avg": (
+            round(_mean([s.tool_calls_per_success for s in valid if s.tool_calls_per_success is not None]), 2)
+            if any(s.tool_calls_per_success is not None for s in valid)
+            else None
+        ),
+        "cost_per_success_avg": (
+            round(_mean([s.cost_per_success for s in valid if s.cost_per_success is not None]), 6)
+            if any(s.cost_per_success is not None for s in valid)
+            else None
+        ),
+        **_trial_stats(valid),
+        "task_categories": _group_rates(valid, "task_category"),
+        "splits": _group_rates(valid, "split"),
+        # Regression tasks that failed in this run. Each one is a drop to look at:
+        # the split exists so a release cannot quietly lose ground it held.
+        "regression_failures": sorted(
+            {s.task_id or s.case_id for s in valid if s.split == "regression" and not s.passed}
+        ),
         "usage": _usage_totals(scorecards),
         "judge_usage": _judge_totals(scorecards),
         "domains": _domain_breakdown(scorecards),

@@ -34,14 +34,15 @@ async def _run(job: dict) -> dict:
     from bench.baseline import BaselineStore
     from bench.cleanup import teardown
     from bench.client import run_case
+    from bench.cleanup import created_resources
     from bench.dataset import is_mutating
     from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.probe_journal import ensure_probe_journal
+    from bench.manifest import build_manifest
     from bench.mcp_provider import target_banner
     from bench.reporter import save_run
     from bench.scorer import score_case
     from bench.suites import load_suite_cases_as_objects, suite_prompt_map
-    from config import build_run_pin
 
     suite_id = job["suite_id"]
     environment_id = job["environment_id"]
@@ -79,6 +80,20 @@ async def _run(job: dict) -> dict:
             ),
             "member_run_id": member_run_id,
         }
+    # Either side may be abbreviated: condor_checkout_state reports a short hash.
+    expected_commit = str(job.get("expected_commit") or "")
+    actual_commit = str(state.get("commit") or "")
+    if expected_commit and not (
+        actual_commit not in ("", "unknown")
+        and (actual_commit.startswith(expected_commit) or expected_commit.startswith(actual_commit))
+    ):
+        return {
+            "ok": False,
+            "error": (
+                f"expected commit '{expected_commit}', got '{state.get('commit')}'"
+            ),
+            "member_run_id": member_run_id,
+        }
     if job.get("require_clean") and int(state.get("dirty_files") or 0) > 0:
         return {
             "ok": False,
@@ -91,27 +106,33 @@ async def _run(job: dict) -> dict:
     scorecards = []
     responses: dict[str, str] = {}
 
+    from bench.reporter import trial_key
+    from bench.scorer import with_trial
+
+    trials = max(1, int(job.get("trials") or 1))
     for case in cases:
         ensure_probe_journal(case)
         warmup = await ensure_markets_for_case(case)
         if not warmup.ok:
-            scorecards.append(warmup_failure_card(case, model, warmup))
+            card = warmup_failure_card(case, model, warmup)
+            scorecards.extend(with_trial(card, t) for t in range(1, trials + 1))
             continue
-        result = await run_case(case, model)
-        baseline = store.load(case.id)
-        baseline_latency = baseline.latency_s if baseline else result.latency_s
-        card = await score_case(case, result, baseline_latency)
-        scorecards.append(card)
-        responses[case.id] = result.response
-        if is_mutating(case):
-            await teardown(
-                result,
-                model,
-                agent_slug=getattr(case, "agent_slug", None),
-                tick=getattr(case, "type", "") == "tick",
-            )
+        for trial in range(1, trials + 1):
+            result = await run_case(case, model)
+            baseline = store.load(case.id)
+            baseline_latency = baseline.latency_s if baseline else result.latency_s
+            card = await score_case(case, result, baseline_latency, trial_idx=trial)
+            scorecards.append(card)
+            responses[trial_key(case.id, trial)] = result.response
+            if is_mutating(case) or created_resources(result):
+                await teardown(
+                    result,
+                    model,
+                    agent_slug=getattr(case, "agent_slug", None),
+                    tick=getattr(case, "type", "") == "tick",
+                )
 
-    pin = build_run_pin(
+    pin = build_manifest(
         run_type="suite",
         suite_id=suite_id,
         environment_id=environment_id,
@@ -120,9 +141,13 @@ async def _run(job: dict) -> dict:
         models=[model],
         include_in_matrix=include_in_matrix,
         shared_loaded=True,
+        experiment_type_override=job.get("experiment_type"),
+        trials=trials,
     )
     pin["target_banner"] = target_banner()
     pin["parent_run_id"] = job.get("parent_run_id")
+    if job.get("preset"):
+        pin["preset"] = job["preset"]
 
     run_dir = save_run(
         model,

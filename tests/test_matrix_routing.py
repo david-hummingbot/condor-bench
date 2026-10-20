@@ -95,6 +95,16 @@ def _four(domain: str, composite: float, prefix: str, **kw) -> list[dict]:
     return [case(f"{prefix}{i}", domain, composite, **kw) for i in range(4)]
 
 
+# The router passes a model on the Wilson 95% *lower* bound, so a fixture that
+# should route needs enough rows for a clean sweep to clear 0.80: 16/16 gives a
+# lower bound of 0.806, while 4/4 gives 0.51 — "not yet passing".
+ROUTABLE_N = 16
+
+
+def _enough(domain: str, composite: float, prefix: str, **kw) -> list[dict]:
+    return [case(f"{prefix}{i}", domain, composite, **kw) for i in range(ROUTABLE_N)]
+
+
 def test_infra_failures_are_excluded_not_scored_zero(tmp_path, registry):
     """A staging outage must not read as the model getting worse."""
     results = tmp_path / "results"
@@ -143,8 +153,8 @@ def test_harness_artifacts_are_excluded(tmp_path, registry):
 
 def test_smallest_passing_model_wins(tmp_path, registry):
     results = tmp_path / "results"
-    write_run(results, "ollama:small:3b", _four("general_consult", 0.95, "s"))
-    write_run(results, "ollama:mid:14b", _four("general_consult", 0.99, "m"))
+    write_run(results, "ollama:small:3b", _enough("general_consult", 0.95, "s"))
+    write_run(results, "ollama:mid:14b", _enough("general_consult", 0.99, "m"))
 
     routing = recommend(
         build_matrix(results_dir=results, models_path=registry),
@@ -160,8 +170,8 @@ def test_smallest_passing_model_wins(tmp_path, registry):
 
 def test_local_model_beats_cloud_even_when_cloud_scores_higher(tmp_path, registry):
     results = tmp_path / "results"
-    write_run(results, "ollama:mid:14b", _four("general_consult", 0.85, "m"))
-    write_run(results, "cloud:big", _four("general_consult", 1.0, "c"))
+    write_run(results, "ollama:mid:14b", _enough("general_consult", 0.85, "m"))
+    write_run(results, "cloud:big", _enough("general_consult", 1.0, "c"))
 
     routing = recommend(
         build_matrix(results_dir=results, models_path=registry),
@@ -175,9 +185,9 @@ def test_local_model_beats_cloud_even_when_cloud_scores_higher(tmp_path, registr
 
 def test_cloud_fallback_is_flagged_when_no_local_passes(tmp_path, registry):
     results = tmp_path / "results"
-    write_run(results, "ollama:small:3b", _four("tick_execution", 0.4, "s"))
-    write_run(results, "ollama:mid:14b", _four("tick_execution", 0.5, "m"))
-    write_run(results, "cloud:big", _four("tick_execution", 0.95, "c"))
+    write_run(results, "ollama:small:3b", _enough("tick_execution", 0.4, "s"))
+    write_run(results, "ollama:mid:14b", _enough("tick_execution", 0.5, "m"))
+    write_run(results, "cloud:big", _enough("tick_execution", 0.95, "c"))
 
     routing = recommend(
         build_matrix(results_dir=results, models_path=registry),
@@ -197,10 +207,10 @@ def test_destructive_failure_blocks_a_recommendation(tmp_path, registry):
     write_run(
         results,
         "ollama:small:3b",
-        _four(DOMAIN_B, 0.95, "s")
+        _enough(DOMAIN_B, 0.95, "s")
         + [case("danger", DOMAIN_B, 0.4, risk_level="destructive")],
     )
-    write_run(results, "ollama:mid:14b", _four(DOMAIN_B, 0.9, "m")
+    write_run(results, "ollama:mid:14b", _enough(DOMAIN_B, 0.9, "m")
               + [case("danger", DOMAIN_B, 0.9, risk_level="destructive")])
 
     matrix = build_matrix(results_dir=results, models_path=registry)
@@ -235,12 +245,12 @@ def test_token_cost_never_rejects_a_passing_model(tmp_path, registry):
     write_run(
         results,
         "ollama:small:3b",
-        _four("general_consult", 0.9, "s", total_tokens=40_000),
+        _enough("general_consult", 0.9, "s", total_tokens=40_000),
     )
     write_run(
         results,
         "ollama:mid:14b",
-        _four("general_consult", 0.9, "m", total_tokens=10_000),
+        _enough("general_consult", 0.9, "m", total_tokens=10_000),
     )
 
     matrix = build_matrix(results_dir=results, models_path=registry)
@@ -296,21 +306,21 @@ def test_domain_by_domain_sweeps_accumulate(tmp_path, registry):
     write_run(
         results,
         "ollama:mid:14b",
-        _four("general_consult", 0.95, "gc"),
+        _enough("general_consult", 0.95, "gc"),
         timestamp="2026-07-01T00:00:00Z",
     )
     write_run(
         results,
         "ollama:mid:14b",
-        _four(DOMAIN_B, 0.9, "rb"),
+        _enough(DOMAIN_B, 0.9, "rb"),
         timestamp="2026-08-04T00:00:00Z",
     )
 
     matrix = build_matrix(results_dir=results, models_path=registry)
-    assert matrix["domains"]["general_consult"]["ollama:mid:14b"]["scored"] == 4, (
+    assert matrix["domains"]["general_consult"]["ollama:mid:14b"]["scored"] == ROUTABLE_N, (
         "the older general_consult run was dropped when a newer domain-only run landed"
     )
-    assert matrix["domains"][DOMAIN_B]["ollama:mid:14b"]["scored"] == 4
+    assert matrix["domains"][DOMAIN_B]["ollama:mid:14b"]["scored"] == ROUTABLE_N
 
     routing = recommend(matrix, models_path=registry)
     assert set(routing["recommendations"]) == {DOMAIN_A, DOMAIN_B}
@@ -426,12 +436,12 @@ def test_shared_config_key_conflict_is_surfaced(tmp_path, registry, monkeypatch)
     write_run(
         results,
         "ollama:small:3b",
-        _four(DOMAIN_A, 0.95, "a3") + _four(DOMAIN_B, 0.3, "b3"),
+        _enough(DOMAIN_A, 0.95, "a3") + _enough(DOMAIN_B, 0.3, "b3"),
     )
     write_run(
         results,
         "ollama:mid:14b",
-        _four(DOMAIN_A, 0.95, "a14") + _four(DOMAIN_B, 0.95, "b14"),
+        _enough(DOMAIN_A, 0.95, "a14") + _enough(DOMAIN_B, 0.95, "b14"),
     )
 
     routing = recommend(

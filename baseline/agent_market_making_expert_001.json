@@ -1,6 +1,7 @@
 {
   "case_id": "agent_market_making_expert_001",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 37.752,
-  "timestamp": "2026-08-12T13:39:09.728739+00:00"
+  "model": "claude-code:sonnet",
+  "latency_s": 128.837,
+  "timestamp": "2026-10-20T10:51:17.131154+00:00",
+  "fingerprint": "70a2bcf1e1fd"
 }

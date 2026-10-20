@@ -231,7 +231,7 @@ class ClaudeJudge:
             return text
 
     async def _ensure_acp(self) -> Any:
-        from condor_compat.acp.acp_client import ACPClient, resolve_acp
+        from condor_compat.acp.acp_client import ACPClient, acp_model_pin, resolve_acp
 
         key = acp_judge_model_key(self.model_name)
         if self._acp is not None and self._acp_key == key and self._acp.alive:
@@ -243,6 +243,9 @@ class ClaudeJudge:
             mcp_servers=[],
             extra_env=extra_env or None,
             working_dir=str(judge_acp_workdir()),
+            # Pinned over the protocol: a judge on the wrong model is a different
+            # grader, and the manifest's grader_version would not say so.
+            model=acp_model_pin(key),
         )
         try:
             await client.start()

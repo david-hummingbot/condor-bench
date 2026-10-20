@@ -1,0 +1,16 @@
+# `docker compose up` here, then point bench at it:
+#   BENCH_ENV_MODE=mock BENCH_MOCK_URL=http://127.0.0.1:18000 uv run python runner.py test ...
+# Without Docker, bench starts the same server in-process (or: runner.py mock-serve).
+services:
+  mock-hummingbot-api:
+    build: .
+    ports:
+      - "127.0.0.1:18000:18000"
+    environment:
+      BENCH_MOCK_FIXTURE: ${BENCH_MOCK_FIXTURE:-default}
+      BENCH_MOCK_USERNAME: ${BENCH_MOCK_USERNAME:-mock}
+      BENCH_MOCK_PASSWORD: ${BENCH_MOCK_PASSWORD:-mock}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18000/_mock/health')"]
+      interval: 5s
+      retries: 5

@@ -11,7 +11,16 @@ const COLOR_BY = [
   { id: 'avg_composite', label: 'Composite', fmt: v => (v == null ? '—' : Number(v).toFixed(2)), higherIsBetter: true },
   { id: 'avg_total_tokens', label: 'Avg tokens', fmt: fmtTokens, higherIsBetter: false },
   { id: 'avg_cost_usd', label: 'Avg cost', fmt: fmtCost, higherIsBetter: false },
+  { id: 'cost_per_success', label: 'Cost / success', fmt: fmtCost, higherIsBetter: false },
 ]
+
+const GATE_LABEL = {
+  passing: 'passing — the 95% interval clears the gate',
+  not_yet_passing: 'not yet passing — the 95% interval straddles the gate; more trials could settle it',
+  failing: 'failing — the whole 95% interval is below the gate',
+}
+
+const fmtCi = ci => (ci ? `${fmtPct(ci[0])}–${fmtPct(ci[1])}` : '—')
 
 const AXIS_OPTS = [
   { id: 'domains', label: 'Routing domains' },
@@ -182,6 +191,8 @@ function MatrixTable({ title, subtitle, rows, cells, models, modelInfo, metric, 
                       ? heatColor(value)
                       : inverseHeatColor(value, values)
                     const blocked = cell?.destructive_failures?.length > 0
+                    const unsafe = cell?.unsafe > 0
+                    const straddles = cell?.gate_status === 'not_yet_passing'
                     return (
                       <td
                         key={m}
@@ -192,9 +203,12 @@ function MatrixTable({ title, subtitle, rows, cells, models, modelInfo, metric, 
                       >
                         {cell && cell.scored > 0 ? (
                           <>
-                            <span className="matrix-value">{metric.fmt(value)}</span>
+                            <span className="matrix-value" title={cell.pass_rate_ci ? `95% CI ${fmtCi(cell.pass_rate_ci)} · ${GATE_LABEL[cell.gate_status] || ''}` : undefined}>
+                              {metric.fmt(value)}{straddles && metric.id === 'pass_rate' ? '?' : ''}
+                            </span>
                             <span className="matrix-n">{cell.scored}</span>
                             {blocked && <span className="matrix-flag" title="a destructive case scored below the floor — blocks a routing recommendation">!</span>}
+                            {unsafe && <span className="matrix-flag" title={`${cell.unsafe} unsafe action(s) — the router requires zero`}>⛔</span>}
                           </>
                         ) : cell?.excluded ? (
                           <span className="matrix-excluded" title={(cell.excluded_reasons || []).join('\n')}>
@@ -223,6 +237,12 @@ function CellDetail({ hover }) {
       <div className="card-title">{row} × {model}</div>
       <div className="score-chips">
         <Chip label="Pass rate" value={fmtPct(cell.pass_rate)} />
+        <Chip label="95% CI" value={fmtCi(cell.pass_rate_ci)} />
+        {cell.gate_status && <Chip label="Gate" value={cell.gate_status.replace(/_/g, ' ')} />}
+        <Chip label="Unsafe" value={String(cell.unsafe || 0)} />
+        <Chip label="Trials" value={String(cell.trials || 1)} />
+        {cell.consistency_std != null && <Chip label="Consistency σ" value={cell.consistency_std.toFixed(3)} />}
+        <Chip label="Cost / success" value={fmtCost(cell.cost_per_success)} />
         <Chip label="Composite" value={cell.avg_composite == null ? '—' : cell.avg_composite.toFixed(2)} />
         <Chip label="Scored" value={`${cell.scored}/${cell.cases}`} />
         <Chip label="Excluded" value={String(cell.excluded || 0)} />
@@ -230,6 +250,8 @@ function CellDetail({ hover }) {
         <Chip label="p95 tokens" value={fmtTokens(cell.p95_total_tokens)} />
         <Chip label="Avg cost" value={fmtCost(cell.avg_cost_usd)} />
         <Chip label="Avg latency" value={cell.avg_latency_s == null ? '—' : cell.avg_latency_s + 's'} />
+        <Chip label="Median latency" value={cell.median_latency_s == null ? '—' : cell.median_latency_s + 's'} />
+        <Chip label="p95 latency" value={cell.p95_latency_s == null ? '—' : cell.p95_latency_s + 's'} />
       </div>
       {cell.destructive_failures?.length > 0 && (
         <div className="error-text" style={{ marginTop: 12 }}>

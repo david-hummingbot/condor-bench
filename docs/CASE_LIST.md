@@ -1,8 +1,13 @@
 # Condor-bench case library
 
-The published library is **87 live MCP cases**: 12 consult, 10 tick, 43 tool, 22
-agent. That is the smallest set that still satisfies the routing floors in
-[`tests/test_dataset_floors.py`](../tests/test_dataset_floors.py).
+The published library is **104 live MCP cases**: 20 consult, 10 tick, 52 tool, 22
+agent — plus **7 holdout** tasks in `datasets/holdout.jsonl` that only `--release`
+runs. 87 of them are the smallest set that satisfies the routing floors in
+[`tests/test_dataset_floors.py`](../tests/test_dataset_floors.py); the other 17
+fill the task bank's category floor (ten per trading category — see the README's
+*Task bank* section and `datasets/manifest.json`), mostly order creation, executor
+lifecycle, bots/controllers and negative/safety tasks the routing floors never
+asked for.
 
 Do not add paraphrases to “cover” a tool that already has three hits. Do not
 restore the everyday consult lookups that Layer 2 / Layer 3 already measure

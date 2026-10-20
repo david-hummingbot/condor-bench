@@ -1,6 +1,7 @@
 {
   "case_id": "agent_condor_delegate_001",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 10.905,
-  "timestamp": "2026-08-12T13:17:31.529491+00:00"
+  "model": "claude-code:sonnet",
+  "latency_s": 49.528,
+  "timestamp": "2026-10-20T06:19:01.864071+00:00",
+  "fingerprint": "6d9aea7fc596"
 }

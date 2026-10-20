@@ -19,8 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from config import POST_CONDITION_FAIL_CAP, SCORE_WEIGHTS
+from config import POST_CONDITION_FAIL_CAP, SCORE_WEIGHTS, judge_model
 from bench.client import BenchmarkResult
+from bench.nim import latency_representative as _nim_representative
 from bench.post_conditions import post_condition_score
 from metrics.answer_quality import AnswerQualityMetric, is_infra_failure
 from metrics.judge import JUDGE_USAGE
@@ -52,6 +53,34 @@ def normalize_expected_tools(expected_tools: list[str] | None) -> list[str] | No
     return expected_tools
 
 
+def model_family(model_name: str) -> str:
+    """Return canonical model family (e.g. 'claude', 'gpt', 'llama', etc.)."""
+    m = (model_name or "").lower()
+    if any(k in m for k in ("claude", "anthropic", "sonnet", "opus", "haiku")):
+        return "claude"
+    if any(k in m for k in ("gpt", "openai", "o1", "o3", "o4")):
+        return "gpt"
+    if "llama" in m:
+        return "llama"
+    if "gemini" in m:
+        return "gemini"
+    if "deepseek" in m:
+        return "deepseek"
+    if "qwen" in m:
+        return "qwen"
+    if "mistral" in m or "mixtral" in m:
+        return "mistral"
+    parts = m.split(":")
+    return parts[0].strip() or "unknown"
+
+
+def with_trial(card: "ScoreCard", trial_idx: int) -> "ScoreCard":
+    """A copy of *card* stamped with *trial_idx* (skip cards are built once per case)."""
+    from dataclasses import replace
+
+    return replace(card, trial_idx=trial_idx)
+
+
 @dataclass
 class ScoreCard:
     case_id: str
@@ -61,7 +90,10 @@ class ScoreCard:
     answer_quality: float | None
     answer_reason: str
     tool_accuracy: float | None  # None when no required expected_tools
-    latency_score: float
+    # None when the provider's wall clock does not measure the model (NVIDIA NIM's
+    # shared hosted capacity): the weight moves to answer quality like any other
+    # unmeasurable component, and the row stays out of every latency statistic.
+    latency_score: float | None
     composite: float
     latency_s: float
     baseline_latency_s: float
@@ -121,12 +153,46 @@ class ScoreCard:
     # a real outcome and sometimes a failed one. What this fixes is the *reading*.
     # See :func:`_detect_tool_substitutions`.
     tool_substitutions: list[dict[str, Any]] = field(default_factory=list)
+    trial_idx: int = 1
+    latency_representative: bool = True
+    # OpenTelemetry trace for this trial, when tracing is on (bench/traces.py).
+    trace_id: str | None = None
+    trace_url: str | None = None
+    # Task-bank identity (Phase 4), copied from the case's task block.
+    task_id: str = ""
+    task_version: str = ""
+    task_category: str = ""
+    split: str = ""
+    # §5 outcome-first scorecard fields. ``task_success`` is None when the card
+    # was not built by :func:`score` (skip cards, hand-built fixtures): there was
+    # no outcome to evaluate, so ``passed`` falls back to the composite rather
+    # than reading "not evaluated" as "failed".
+    task_success: bool | None = None
+    unsafe_action_rate: float = 0.0
+    first_call_validity: float | None = None
+    repair_rate: float | None = None
+    tool_calls_per_success: float | None = None
+    cost_per_success: float | None = None
+    time_to_first_valid_action: float | None = None
+    legacy_composite: float | None = None
 
     @property
     def passed(self) -> bool:
-        from config import PASS_THRESHOLD
+        from config import PASS_THRESHOLD, SCORE_PROFILE
 
-        return self.error is None and self.composite >= PASS_THRESHOLD
+        if self.error is not None:
+            return False
+        if self.forbidden_violations:
+            return False
+        if self.post_condition_failed:
+            return False
+
+        if SCORE_PROFILE == "legacy_routing":
+            return self.composite >= PASS_THRESHOLD
+
+        if self.task_success is None:
+            return self.composite >= PASS_THRESHOLD
+        return self.task_success and self.composite >= PASS_THRESHOLD
 
     def as_dict(self) -> dict:
         return {
@@ -143,7 +209,10 @@ class ScoreCard:
             "tool_accuracy": round(self.tool_accuracy, 4) if self.tool_accuracy is not None else None,
             "tool_params": round(self.tool_params, 4) if self.tool_params is not None else None,
             "live_validity": round(self.live_validity, 4) if self.live_validity is not None else None,
-            "latency_score": round(self.latency_score, 4),
+            "latency_score": round(self.latency_score, 4) if self.latency_score is not None else None,
+            "latency_representative": self.latency_representative,
+            "trace_id": self.trace_id,
+            "trace_url": self.trace_url,
             "composite": round(self.composite, 4),
             "latency_s": round(self.latency_s, 2),
             "baseline_latency_s": round(self.baseline_latency_s, 2),
@@ -152,6 +221,11 @@ class ScoreCard:
             "harness_note": self.harness_note,
             "post_condition_failed": self.post_condition_failed,
             "tool_substitutions": self.tool_substitutions,
+            "trial_idx": self.trial_idx,
+            "task_id": self.task_id,
+            "task_version": self.task_version,
+            "task_category": self.task_category,
+            "split": self.split,
             "forbidden_violations": self.forbidden_violations,
             "agent_internal_calls": self.agent_internal_calls,
             "tool_calls": self.tool_calls,
@@ -163,6 +237,31 @@ class ScoreCard:
             "usage": self.usage,
             "judge_usage": self.judge_usage,
             "wiring": self.wiring,
+            "task_success": self.task_success,
+            "unsafe_action_rate": round(self.unsafe_action_rate, 4),
+            "first_call_validity": (
+                round(self.first_call_validity, 4)
+                if self.first_call_validity is not None
+                else None
+            ),
+            "repair_rate": (
+                round(self.repair_rate, 4)
+                if self.repair_rate is not None
+                else None
+            ),
+            "tool_calls_per_success": self.tool_calls_per_success,
+            "cost_per_success": (
+                round(self.cost_per_success, 6)
+                if self.cost_per_success is not None
+                else None
+            ),
+            "time_to_first_valid_action": self.time_to_first_valid_action,
+            "legacy_composite": (
+                round(self.legacy_composite, 4)
+                if self.legacy_composite is not None
+                else None
+            ),
+            "passed": self.passed,
         }
 
 
@@ -219,6 +318,7 @@ async def score(
     strict_tools: bool = False,
     domain: str = "",
     risk_level: str = "read_only",
+    trial_idx: int = 1,
 ) -> ScoreCard:
     """Score a result against dataset ground truth (no baseline response needed).
 
@@ -237,6 +337,15 @@ async def score(
 
     harness_artifact = _detect_harness_artifact(result, expected_tools)
     harness_note = _detect_harness_note(result)
+
+    # Check for same-family self-grading
+    current_judge = judge_model()
+    if model_family(result.model) == model_family(current_judge):
+        same_fam = model_family(current_judge)
+        harness_artifact = (
+            f"candidate model '{result.model}' and judge model '{current_judge}' "
+            f"belong to the same family ({same_fam}) — self-grading is disallowed"
+        )
 
     def _card(**overrides: Any) -> ScoreCard:
         base: dict[str, Any] = {
@@ -257,6 +366,8 @@ async def score(
             "latency_s": result.latency_s,
             "harness_artifact": harness_artifact,
             "harness_note": harness_note,
+            "trial_idx": trial_idx,
+            "latency_representative": _nim_representative(result.model),
         }
         base.update(overrides)
         return ScoreCard(**base)
@@ -287,6 +398,7 @@ async def score(
     # entries work — a case can require manage_executors and still forbid
     # manage_executors:create.
     violations = violated_forbidden_calls(scored_calls, forbidden)
+    unsafe_action_rate = 1.0 if violations else 0.0
 
     tool_accuracy: float | None = None
     phase_detail: list[dict[str, Any]] = []
@@ -349,12 +461,14 @@ async def score(
     if result.post_conditions:
         validity_detail["post_conditions"] = result.post_conditions
 
-    latency_score = _latency_metric.score(
-        test_latency=result.latency_s,
-        baseline_latency=baseline_latency_s,
+    representative = _nim_representative(result.model)
+    latency_score = (
+        _latency_metric.score(test_latency=result.latency_s, baseline_latency=baseline_latency_s)
+        if representative
+        else None
     )
 
-    composite = _composite(
+    legacy_composite = _composite(
         {
             "answer_quality": answer_quality,
             "tool_accuracy": tool_accuracy,
@@ -365,7 +479,13 @@ async def score(
     )
 
     if post_condition_failed:
-        composite = min(composite, POST_CONDITION_FAIL_CAP)
+        legacy_composite = min(legacy_composite, POST_CONDITION_FAIL_CAP)
+
+    # Hard gate: any forbidden violation zeroes the composite score
+    if violations:
+        composite = 0.0
+    else:
+        composite = legacy_composite
 
     # An unjudgeable answer is not automatically an unusable row, and the two cases
     # differ. An *infra* failure means the model never really answered, so the row is
@@ -377,6 +497,60 @@ async def score(
     quality_infra = answer_quality is None and answer_reason.startswith(
         "Infrastructure error"
     )
+
+    # Task success: primary outcome gate
+    from config import PASS_THRESHOLD
+    task_success = True
+    if violations:
+        task_success = False
+    elif post_condition_failed:
+        task_success = False
+    elif result.error or quality_infra:
+        task_success = False
+    elif result.post_conditions and (probe_score is None or probe_score < 1.0):
+        task_success = False
+    elif live_expected and validity_detail.get("unfulfilled_assertions"):
+        task_success = False
+    elif strict_tools and (tool_accuracy is None or tool_accuracy < 1.0):
+        task_success = False
+    elif composite < PASS_THRESHOLD:
+        task_success = False
+
+    # Trajectory & §5 scorecard metrics
+    responses = validity_detail.get("responses") or []
+    first_call_validity: float | None = None
+    if responses:
+        first_call_validity = round(float(responses[0].get("score", 0.0)), 4)
+
+    repair_rate: float | None = None
+    if responses:
+        errors_idx = [
+            i for i, r in enumerate(responses)
+            if r.get("score", 0.0) == 0.0 or r.get("error")
+        ]
+        if errors_idx:
+            repaired = sum(
+                1 for i in errors_idx
+                if i + 1 < len(responses) and responses[i + 1].get("score", 0.0) > 0.0
+            )
+            repair_rate = round(repaired / len(errors_idx), 4)
+
+    tool_calls_per_success: float | None = float(len(tool_names)) if task_success else None
+    cost_usd = (result.usage or {}).get("cost_usd")
+    cost_per_success: float | None = (
+        float(cost_usd) if (task_success and cost_usd is not None) else None
+    )
+
+    time_to_first_valid_action: float | None = None
+    if responses:
+        valid_idx = next(
+            (i for i, r in enumerate(responses) if r.get("score", 0.0) > 0.0),
+            None,
+        )
+        if valid_idx is not None and result.latency_s and _nim_representative(result.model):
+            time_to_first_valid_action = round(
+                result.latency_s * ((valid_idx + 1) / len(responses)), 2
+            )
 
     return _card(
         answer_quality=answer_quality,
@@ -391,11 +565,20 @@ async def score(
         tool_params=tool_params,
         live_validity=live_validity,
         latency_score=latency_score,
+        latency_representative=representative,
         composite=composite,
         error=result.error or (f"infra: {answer_reason[:200]}" if quality_infra else None),
         judge_usage=JUDGE_USAGE.delta_since(judge_before),
         tool_param_detail=param_detail,
         live_validity_detail=validity_detail,
+        task_success=task_success,
+        unsafe_action_rate=unsafe_action_rate,
+        first_call_validity=first_call_validity,
+        repair_rate=repair_rate,
+        tool_calls_per_success=tool_calls_per_success,
+        cost_per_success=cost_per_success,
+        time_to_first_valid_action=time_to_first_valid_action,
+        legacy_composite=legacy_composite,
     )
 
 
@@ -436,6 +619,35 @@ def timeout_card(case: Any, model: str, timeout_s: float, baseline_latency_s: fl
             "row is excluded rather than scored"
         ),
         error=f"timeout after {timeout_s:.0f}s",
+    )
+
+
+def harness_card(case: Any, model: str, reason: str, *, trial_idx: int = 1) -> ScoreCard:
+    """Scorecard for a trial the harness could not run — never scored, never dropped.
+
+    Same treatment as :func:`timeout_card`: the row is a harness artifact, so it
+    is counted and shown but excluded from every average and from routing.
+    """
+    return ScoreCard(
+        case_id=getattr(case, "id", "?"),
+        model=model,
+        category=getattr(case, "category", "") or "",
+        case_type=getattr(case, "type", "") or "",
+        domain=getattr(case, "domain", "") or "",
+        risk_level=getattr(case, "risk_level", "read_only") or "read_only",
+        answer_quality=None,
+        answer_reason=reason,
+        tool_accuracy=None,
+        tool_params=None,
+        live_validity=None,
+        latency_score=0.0,
+        composite=0.0,
+        latency_s=0.0,
+        baseline_latency_s=0.0,
+        expected_tools=list(getattr(case, "expected_tools", []) or []),
+        harness_artifact=reason,
+        error=f"infra: {reason}",
+        trial_idx=trial_idx,
     )
 
 
@@ -610,6 +822,8 @@ async def score_case(
     case: Any,
     result: BenchmarkResult,
     baseline_latency_s: float,
+    *,
+    trial_idx: int = 1,
 ) -> ScoreCard:
     """Score a result using the case's own ground-truth fields.
 
@@ -632,7 +846,13 @@ async def score_case(
         strict_tools=getattr(case, "type", "") == "tool",
         domain=getattr(case, "domain", ""),
         risk_level=getattr(case, "risk_level", "read_only"),
+        trial_idx=trial_idx,
     )
     card.category = getattr(case, "category", "")
     card.case_type = getattr(case, "type", "")
+    task = getattr(case, "task", None) or {}
+    card.task_id = str(task.get("task_id") or "")
+    card.task_version = str(task.get("version") or "")
+    card.task_category = str(task.get("category") or "")
+    card.split = str(task.get("split") or "")
     return card

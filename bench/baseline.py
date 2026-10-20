@@ -24,8 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from config import BASELINE_DIR, BASELINE_MODEL, case_timeout_s
-from bench.cleanup import teardown
+from config import BASELINE_DIR, BASELINE_MODEL, case_timeout_s, staging_config
+from bench.cleanup import created_resources, teardown
 from bench.client import run_case
 from bench.dataset import is_mutating
 from bench.market_resolver import resolve_cases
@@ -208,7 +208,10 @@ async def generate_baselines(
             return True
         return stale and baseline_status(case, store.load(case.id)) == BASELINE_STALE
 
-    to_run = [c for c in cases if _wanted(c)]
+    from bench.dataset import runs_on_lane
+
+    lane = str(staging_config().get("env_mode") or "live")
+    to_run = [c for c in cases if _wanted(c) and runs_on_lane(c, lane)]
     if only:
         unknown = only - {c.id for c in cases}
         if unknown:
@@ -286,6 +289,13 @@ async def generate_baselines(
             # a case with none falls to the CASE_TIMEOUT_MIN_S floor.
             prior = store.load(case.id)
             ceiling = case_timeout_s(prior.latency_s if prior else None)
+            if staging_config().get("env_mode") == "mock":
+                # Same seeding a scored mock trial gets, faults included: a
+                # mock-only case's reference must measure the scenario it scores.
+                from bench.lanes import arm_mock_faults, reset_mock
+
+                reset_mock()
+                arm_mock_faults(getattr(case, "mock_faults", None) or [])
             result = await asyncio.wait_for(
                 run_case(runnable, model), timeout=ceiling
             )
@@ -326,7 +336,7 @@ async def generate_baselines(
         # executors, routines, strategies and leverage changes — and the pre-flight's
         # orphaned-executor check is blocking, so one baseline run would lock out
         # every run after it.
-        if is_mutating(case):
+        if is_mutating(case) or created_resources(result):
             report = await teardown(
                 result,
                 model,

@@ -1,7 +1,7 @@
 {
   "case_id": "agent_meteora_launch_lp_003",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 40.916,
-  "timestamp": "2026-09-15T22:18:56.726152+00:00",
+  "model": "claude-code:sonnet",
+  "latency_s": 98.56,
+  "timestamp": "2026-10-20T11:02:01.881268+00:00",
   "fingerprint": "3d7843c9844a"
 }

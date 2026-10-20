@@ -1,27 +1,32 @@
 """Turn a benchmark matrix into model-routing recommendations for Condor.
 
-The question this answers: *what is the smallest model that can do each job?*
+The question this answers: *what is the cheapest model that reliably does each job?*
 
 Algorithm, per domain:
 
-1. Consider only models in ``datasets/models.json`` — a model with no recorded
-   parameter count cannot be ranked by size, so recommending it would be guessing.
-2. Sort ascending by ``params_b``; cloud models (no parameter count) sort last, so
-   a local model that passes always beats a cloud one that also passes.
-3. Take the first model that **passes the domain**:
-   - pass rate ≥ ``--min-pass-rate`` (default 0.80), and
-   - no ``destructive`` case scored below ``DESTRUCTIVE_FLOOR``, and
-   - at least ``min_cases`` cases actually scored — a 1-for-1 domain is not
-     evidence, it's a coin flip that happened to land.
-4. If nothing passes, recommend the best available model and mark the domain
-   ``unmet``, naming the gap. A silent omission would read as "no opinion" when the
-   real finding is "no model we tried is good enough here".
+1. Consider only models in ``datasets/models.json`` — an unregistered model has no
+   provider or parameter count, so ranking it would be guessing.
+2. A model **passes the domain** when:
+   - the **lower** Wilson 95% bound of its pass rate (over every scored trial) is
+     ≥ ``--min-pass-rate`` (default 0.80) — a point estimate that clears the bar
+     on a handful of cases is a coin flip, not evidence;
+   - it made **zero unsafe actions** (forbidden or unconfirmed writes) there;
+   - no ``destructive`` case scored below ``DESTRUCTIVE_FLOOR``; and
+   - at least ``min_cases`` rows actually scored.
+   A model whose interval straddles the gate is **not yet passing** — distinct
+   from failing: more trials could settle it either way.
+3. Among passing models take the **cheapest per success**. Local models report no
+   price and count as free; among them (and any other cost tie) the smaller
+   ``params_b`` wins. A cloud model with no measured cost sorts last — an unknown
+   price is not a cheap one.
+4. If nothing passes, name the best attempt and mark the domain ``unmet`` with a
+   status — ``not_yet_passing``, ``failing`` or ``insufficient_evidence`` — so a
+   gap reads as a measured finding rather than missing data.
 
-Token cost is **not a gate**. A 3B model that passes using three times the tokens
-of a 7B model is still the recommendation by default — the study is about the
-smallest model that works, and cost is a separate axis. ``prefer_lower_tokens``
-opts into using tokens as a tie-break among models that are *equally small*, and
-even then it can only reorder ties, never reject a passing model.
+Every domain also gets a **cost-per-success frontier**: each candidate's success
+rate (with interval) against its cost per successful task, flagging the models no
+other model beats on both. ``prefer_lower_tokens`` can still only reorder exact
+ties, never reject a passing model.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from bench import stats
 from config import (
     DESTRUCTIVE_FLOOR,
     DOMAIN_PASS_RATE,
@@ -86,6 +92,38 @@ class Candidate:
     # shown a tool did not fail at it.
     withheld: int = 0
     run_dir: str = ""
+    passed: int = 0
+    unsafe: int = 0
+    cost_per_success: float | None = None
+
+    def interval(self) -> tuple[float, float] | None:
+        """Wilson 95% interval of the pass rate, or None with nothing scored."""
+        if not self.scored:
+            return None
+        return stats.wilson_interval(self.passed, self.scored)
+
+    def gate_status(self, min_pass_rate: float) -> str | None:
+        ci = self.interval()
+        return None if ci is None else stats.evaluate_gate(ci, min_pass_rate)
+
+    def cost_rank(self) -> float:
+        """Cost per success for ranking: local and unpriced counts as free,
+        unpriced cloud as unknown (last)."""
+        if self.cost_per_success is not None:
+            return self.cost_per_success
+        return float("inf") if self.entry.provider == "cloud" else 0.0
+
+    @property
+    def route_key(self) -> tuple:
+        return (self.cost_rank(), self.entry.sort_key)
+
+    def status(self, *, min_pass_rate: float, min_cases: int) -> str:
+        """passing | not_yet_passing | failing | insufficient_evidence."""
+        if self.scored < min_cases or self.pass_rate is None:
+            return "insufficient_evidence"
+        if self.unsafe or self.destructive_failures:
+            return "failing"
+        return self.gate_status(min_pass_rate) or "insufficient_evidence"
 
     def blockers(self, *, min_pass_rate: float, min_cases: int) -> list[str]:
         """Why this model can't be recommended for the domain. Empty means it can."""
@@ -97,8 +135,21 @@ class Candidate:
             )
         if self.pass_rate is None:
             reasons.append("no pass rate (nothing scorable)")
-        elif self.pass_rate < min_pass_rate:
-            reasons.append(f"pass rate {self.pass_rate:.0%} < {min_pass_rate:.0%}")
+        else:
+            lo, hi = self.interval() or (0.0, 0.0)
+            gate = self.gate_status(min_pass_rate)
+            if gate == "not_yet_passing":
+                reasons.append(
+                    f"not yet passing: pass rate {self.pass_rate:.0%}, 95% CI "
+                    f"[{lo:.0%}, {hi:.0%}] straddles {min_pass_rate:.0%} — more trials needed"
+                )
+            elif gate == "failing":
+                reasons.append(
+                    f"pass rate {self.pass_rate:.0%} (95% CI [{lo:.0%}, {hi:.0%}]) "
+                    f"< {min_pass_rate:.0%}"
+                )
+        if self.unsafe:
+            reasons.append(f"{self.unsafe} unsafe action(s) — the router requires zero")
         if self.destructive_failures:
             reasons.append(
                 "destructive case(s) below the "
@@ -118,6 +169,10 @@ class Candidate:
             "avg_total_tokens": self.avg_total_tokens,
             "avg_cost_usd": self.avg_cost_usd,
             "avg_latency_s": self.avg_latency_s,
+            "passed": self.passed,
+            "pass_rate_ci": list(ci) if (ci := self.interval()) else None,
+            "unsafe": self.unsafe,
+            "cost_per_success": self.cost_per_success,
             "run_dir": self.run_dir,
         }
 
@@ -146,9 +201,12 @@ def _candidates(
                 destructive_failures=list(cell.get("destructive_failures") or []),
                 withheld=int(cell.get("withheld") or 0),
                 run_dir=str(cell.get("run_dir") or ""),
+                passed=int(cell.get("passed") or 0),
+                unsafe=int(cell.get("unsafe") or 0),
+                cost_per_success=cell.get("cost_per_success"),
             )
         )
-    return sorted(out, key=lambda c: c.entry.sort_key)
+    return sorted(out, key=lambda c: c.route_key)
 
 
 def _tie_break(passing: list[Candidate], prefer_lower_tokens: bool) -> tuple[Candidate, str | None]:
@@ -157,9 +215,12 @@ def _tie_break(passing: list[Candidate], prefer_lower_tokens: bool) -> tuple[Can
     if not prefer_lower_tokens:
         return smallest, None
 
-    # Only models of the *same* size are tied. Preferring a larger model because
-    # it used fewer tokens would abandon the whole premise of the study.
-    tied = [c for c in passing if c.entry.sort_key[:2] == smallest.entry.sort_key[:2]]
+    # Only models of the same cost *and* size are tied. Preferring a pricier or
+    # larger model because it used fewer tokens would abandon the routing rule.
+    def _tie(c: Candidate) -> tuple:
+        return (c.cost_rank(), c.entry.sort_key[:2])
+
+    tied = [c for c in passing if _tie(c) == _tie(smallest)]
     if len(tied) < 2:
         return smallest, None
 
@@ -173,7 +234,7 @@ def _tie_break(passing: list[Candidate], prefer_lower_tokens: bool) -> tuple[Can
     if winner.model == smallest.model:
         return smallest, None
     return winner, (
-        f"lower avg tokens among {len(measured)} models of the same size "
+        f"lower avg tokens among {len(measured)} models of the same cost and size "
         f"({winner.avg_total_tokens:.0f} vs {smallest.avg_total_tokens:.0f})"
     )
 
@@ -196,6 +257,7 @@ def recommend(
     recommendations: dict[str, Any] = {}
     unmet: dict[str, Any] = {}
     stale: dict[str, Any] = {}
+    frontiers: dict[str, Any] = {}
     live_domains = _dataset_domains()
 
     for domain, cells in (matrix.get("domains") or {}).items():
@@ -221,6 +283,10 @@ def recommend(
             continue
 
         candidates = _candidates(cells, registry)
+        if candidates:
+            frontiers[domain] = cost_frontier(
+                candidates, min_pass_rate=min_pass_rate, min_cases=min_cases
+            )
         if not candidates:
             unmet[domain] = {
                 "reason": "no benchmarked model in datasets/models.json covers this domain",
@@ -240,9 +306,9 @@ def recommend(
             recommendations[domain] = {
                 **winner.as_dict(),
                 "rationale": (
-                    "Smallest passing model"
+                    "Cheapest passing model (Wilson lower bound clears the gate, zero unsafe)"
                     if tie_breaker is None
-                    else "Smallest passing model, tie-broken on tokens"
+                    else "Cheapest passing model, tie-broken on tokens"
                 ),
                 "tie_breaker": tie_breaker,
                 "cloud_fallback": winner.entry.provider == "cloud",
@@ -267,7 +333,19 @@ def recommend(
             c.model: c.blockers(min_pass_rate=min_pass_rate, min_cases=min_cases)
             for c in candidates
         }
+        statuses = {
+            c.status(min_pass_rate=min_pass_rate, min_cases=min_cases) for c in candidates
+        }
+        if "not_yet_passing" in statuses:
+            # Unsafe or destructive-floor models are "failing" no matter their
+            # interval, so this is only reached by a model that may yet pass.
+            status = "not_yet_passing"
+        elif statuses == {"insufficient_evidence"}:
+            status = "insufficient_evidence"
+        else:
+            status = "failing"
         unmet[domain] = {
+            "status": status,
             # Distinguish "the models aren't good enough" from "this domain has too
             # few cases to say" — the second is a dataset gap, not a model finding,
             # and reporting a 100%-scoring model as a failure would be nonsense.
@@ -278,6 +356,9 @@ def recommend(
                     any("scored case" in b for b in reasons)
                     for reasons in blockers.values()
                 )
+                else "not yet passing — a model's pass-rate interval straddles the gate; "
+                "run more trials to settle it"
+                if status == "not_yet_passing"
                 else "no benchmarked model met the pass criteria"
             ),
             "insufficient_evidence": all(
@@ -293,7 +374,12 @@ def recommend(
     return {
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "matrix_generated_at": matrix.get("generated_at"),
+        # Routing is published from the live lane. A mock-lane routing file is a
+        # CI artefact and says so on its face.
+        "env_mode": matrix.get("env_mode") or "live",
         "criteria": {
+            "rule": "cheapest by cost per success whose Wilson 95% lower bound clears "
+            "min_pass_rate with zero unsafe actions; params_b breaks cost ties",
             "min_pass_rate": min_pass_rate,
             "min_cases": min_cases,
             "destructive_floor": DESTRUCTIVE_FLOOR,
@@ -308,6 +394,7 @@ def recommend(
         "recommendations": recommendations,
         "unmet_domains": unmet,
         "stale_domains": stale,
+        "frontiers": frontiers,
         "unranked_models": unranked,
         "unranked_note": (
             "These models were benchmarked but are absent from datasets/models.json, "
@@ -322,6 +409,47 @@ def recommend(
             matrix, registry, min_tool_pass_rate, min_tool_cases
         ),
     }
+
+
+def cost_frontier(
+    candidates: list[Candidate], *, min_pass_rate: float, min_cases: int
+) -> list[dict[str, Any]]:
+    """Success rate against cost per success, one row per candidate.
+
+    ``on_frontier`` marks the models no other model beats on both axes (at least
+    as successful and at most as costly, better on one). A cloud model with no
+    measured cost has no position on the cost axis, so it is never on it.
+    """
+    rows = []
+    for c in candidates:
+        if c.pass_rate is None:
+            continue
+        cost = c.cost_rank()
+        dominated = cost == float("inf") or any(
+            o is not c
+            and o.pass_rate is not None
+            and o.cost_rank() != float("inf")
+            and o.pass_rate >= c.pass_rate
+            and o.cost_rank() <= cost
+            and (o.pass_rate > c.pass_rate or o.cost_rank() < cost)
+            for o in candidates
+        )
+        rows.append(
+            {
+                "model": c.model,
+                "provider": c.entry.provider,
+                "params_b": c.entry.params_b,
+                "pass_rate": c.pass_rate,
+                "pass_rate_ci": list(ci) if (ci := c.interval()) else None,
+                "scored": c.scored,
+                "cost_per_success": c.cost_per_success,
+                "unpriced": c.cost_per_success is None,
+                "unsafe": c.unsafe,
+                "status": c.status(min_pass_rate=min_pass_rate, min_cases=min_cases),
+                "on_frontier": not dominated,
+            }
+        )
+    return sorted(rows, key=lambda r: (-(r["pass_rate"] or 0.0), r["model"]))
 
 
 def _dataset_domains() -> set[str]:
@@ -415,6 +543,7 @@ def _tool_gaps(
             if c.pass_rate is not None
             and c.pass_rate >= min_tool_pass_rate
             and not c.destructive_failures
+            and not c.unsafe
         ]
         if passing:
             winner = passing[0]
@@ -422,6 +551,7 @@ def _tool_gaps(
                 "model": winner.model,
                 "params_b": winner.entry.params_b,
                 "pass_rate": winner.pass_rate,
+                "pass_rate_ci": list(ci) if (ci := winner.interval()) else None,
                 "scored": winner.scored,
             }
         elif evidenced:
@@ -470,9 +600,10 @@ def generate(
     prefer_lower_tokens: bool = False,
     results_dir: Path | None = None,
     models_path: Path | None = None,
+    lane: str = "live",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build the matrix and the recommendations in one call. Returns (matrix, routing)."""
-    matrix = build_matrix(results_dir=results_dir, models_path=models_path)
+    matrix = build_matrix(results_dir=results_dir, models_path=models_path, lane=lane)
     routing = recommend(
         matrix,
         min_pass_rate=min_pass_rate,
@@ -485,18 +616,26 @@ def generate(
     return matrix, routing
 
 
+def routing_path(lane: str = "live") -> Path:
+    name = "routing_recommendations" + ("" if lane == "live" else f"_{lane}")
+    return RESULTS_DIR / f"{name}.json"
+
+
 def save_routing(routing: dict[str, Any], path: Path | None = None) -> Path:
-    path = path or RESULTS_DIR / "routing_recommendations.json"
+    path = path or routing_path(str(routing.get("env_mode") or "live"))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(routing, indent=2) + "\n")
     return path
 
 
-def load_routing(path: Path | None = None) -> dict[str, Any] | None:
-    path = path or RESULTS_DIR / "routing_recommendations.json"
+def load_routing(path: Path | None = None, *, lane: str = "live") -> dict[str, Any] | None:
+    path = path or routing_path(lane)
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except Exception:
         return None
+    if (data.get("env_mode") or "live") != lane:
+        return None
+    return data

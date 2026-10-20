@@ -1,7 +1,7 @@
 {
   "case_id": "tool_send_notification_002",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 20.83,
-  "timestamp": "2026-09-16T20:33:52.304555+00:00",
+  "model": "claude-code:sonnet",
+  "latency_s": 41.27,
+  "timestamp": "2026-10-20T06:57:24.167105+00:00",
   "fingerprint": "7bfaca56ca30"
 }

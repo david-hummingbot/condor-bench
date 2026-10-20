@@ -65,7 +65,10 @@ def ensure_bench_server(
     api_url = (api_url if api_url is not None else str(staging["api_url"] or "")).rstrip("/")
     username = username if username is not None else str(staging["username"] or "")
     password = password if password is not None else str(staging["password"] or "")
-    name = BENCH_SERVER_NAME
+    # The live lane always registers the fixed bench_staging entry — never a
+    # BENCH_SERVER_NAME override, which could name a real server and overwrite its
+    # URL and credentials. The mock lane registers its own bench_mock entry.
+    name = str(staging["server_name"]) if staging.get("env_mode") == "mock" else BENCH_SERVER_NAME
     # From staging_config(), not the module constants: BENCH_CHAT_ID / BENCH_USER_ID
     # are only the *defaults*, and .env overrides them. Reading the constants here
     # while every other caller reads the env-aware config split the run's identity in
@@ -90,6 +93,7 @@ def ensure_bench_server(
         return BenchServerSync(
             ok=False,
             detail="HUMMINGBOT_API_URL is not set — nothing to register",
+            server_name=name,
             actions=actions,
         )
 
@@ -169,6 +173,7 @@ def ensure_bench_server(
     resolved = cm.get_server(name) or {}
     return BenchServerSync(
         ok=True,
+        server_name=name,
         detail=(
             f"Registered '{name}' → {resolved.get('host', host)}:"
             f"{resolved.get('port', port)} (user {user_id}, chat {chat_id})"

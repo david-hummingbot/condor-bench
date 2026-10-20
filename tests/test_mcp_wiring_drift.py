@@ -88,7 +88,7 @@ def _seat_profile(agent_slug: str | None, tick: bool = False) -> str:
     than derived from the slug. That is exactly the distinction bench's tick path
     lost: it built configs from ``agent_slug`` alone, so every tick case mounted
     the attended ring and was offered ``manage_amm``/``manage_clmm`` and the
-    orchestration family (``manage_agents``/``manage_strategies``/
+    orchestration family (``manage_agents``/``manage_loops``/
     ``control_agent``/``get_available_models``) that production withholds from a
     loop nobody is watching.
     """
@@ -112,7 +112,7 @@ MUTED_ON_AGENT_SEAT = (
     "executor_defaults,explore_dex_pools,explore_geckoterminal,get_swap_status,"
     "list_orphaned_positions,list_positions_held,manage_amm,manage_clmm,"
     "manage_gateway_config,manage_servers,quote_swap,resolve_orphaned_position,"
-    "search_swaps,set_account_position_mode_and_leverage,stop_executor"
+    "resolve_swap,search_swaps,set_account_position_mode_and_leverage,stop_executor"
 )
 
 
@@ -148,7 +148,9 @@ def _expected_hummingbot_args(agent_slug: str | None = None, tick: bool = False)
         _seat_profile(agent_slug, tick),
     ]
     if agent_slug is not None:
-        args += ["--mute-tools", MUTED_ON_AGENT_SEAT]
+        # condor 8e4860fa: the hummingbot seat now carries the agent's slug too, so
+        # its own per-agent state binds to the same agent the condor seat does.
+        args += ["--agent-slug", agent_slug, "--mute-tools", MUTED_ON_AGENT_SEAT]
     return args
 
 
@@ -574,7 +576,8 @@ def test_the_tick_ring_withholds_the_tools_production_withholds(wiring):
         "manage_amm",
         "manage_clmm",
         "manage_agents",
-        "manage_strategies",
+        # manage_strategies until condor 8e4860fa renamed strategies to loops.
+        "manage_loops",
         "control_agent",
         "get_available_models",
     }, (

@@ -31,7 +31,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from config import DATASETS_DIR, DESTRUCTIVE_FLOOR, PASS_THRESHOLD, RESULTS_DIR
+from bench import stats
+from config import (
+    DATASETS_DIR,
+    DESTRUCTIVE_FLOOR,
+    DOMAIN_PASS_RATE,
+    PASS_THRESHOLD,
+    RESULTS_DIR,
+    TOOL_PASS_RATE,
+)
 from metrics.tool_accuracy import normalize_tool_name
 
 
@@ -111,6 +119,13 @@ class Cell:
     # is 42 of the 80 cases, and the positional cut means the same half of the
     # surface is invisible to every capped model.
     withheld: int = 0
+    # Scored rows with a forbidden or unconfirmed write. The router requires zero.
+    unsafe: int = 0
+    # Per-case pass/fail across trials, for the consistency figure.
+    outcomes: dict[str, list[float]] = field(default_factory=dict)
+    # Successes among the rows that reported a cost, so cost per success divides
+    # spend by the successes that spend actually bought.
+    priced_passes: int = 0
 
     def add(self, case: dict) -> None:
         self.cases += 1
@@ -125,8 +140,12 @@ class Cell:
         self.scored += 1
         composite = float(case.get("composite") or 0.0)
         self.composites.append(composite)
-        if composite >= PASS_THRESHOLD:
+        passed = _case_passed(case, composite)
+        if passed:
             self.passed += 1
+        if case.get("forbidden_violations") or float(case.get("unsafe_action_rate") or 0.0) > 0.0:
+            self.unsafe += 1
+        self.outcomes.setdefault(str(case.get("case_id")), []).append(1.0 if passed else 0.0)
         if case.get("risk_level") == "destructive" and composite < DESTRUCTIVE_FLOOR:
             self.destructive_failures.append(str(case.get("case_id")))
 
@@ -135,10 +154,15 @@ class Cell:
             self.total_tokens.append(float(usage["total_tokens"]))
         if usage.get("cost_usd") is not None:
             self.costs.append(float(usage["cost_usd"]))
-        if case.get("latency_s") is not None:
+            if passed:
+                self.priced_passes += 1
+        # A NIM row's wall clock measures the hosted endpoint, not the model.
+        if case.get("latency_s") is not None and case.get("latency_representative", True):
             self.latencies.append(float(case["latency_s"]))
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self, gate: float = DOMAIN_PASS_RATE) -> dict[str, Any]:
+        rate = stats.rate_summary(self.passed, self.scored, gate=gate)
+        latency = stats.distribution(self.latencies)
         return {
             "cases": self.cases,
             "scored": self.scored,
@@ -147,6 +171,26 @@ class Cell:
             "withheld": self.withheld,
             "passed": self.passed,
             "pass_rate": round(self.passed / self.scored, 4) if self.scored else None,
+            # Wilson 95% interval over every scored trial, and where it sits against
+            # this axis's gate: "not_yet_passing" means the interval straddles it —
+            # more trials could settle it either way, which is not the same as failing.
+            "pass_rate_ci": rate["ci"],
+            "gate": gate,
+            "gate_status": rate["gate_status"],
+            "unsafe": self.unsafe,
+            "unsafe_rate": round(self.unsafe / self.scored, 4) if self.scored else None,
+            "unsafe_rate_ci": stats.rate_summary(self.unsafe, self.scored)["ci"],
+            "trials": max((len(v) for v in self.outcomes.values()), default=0),
+            "consistency_std": stats.trial_consistency(self.outcomes),
+            "cost_per_success": (
+                round(sum(self.costs) / self.priced_passes, 6) if self.priced_passes else None
+            ),
+            "median_latency_s": latency["median"] if latency else None,
+            "p95_latency_s": latency["p95"] if latency else None,
+            "latency_s_ci": latency["ci"] if latency else None,
+            "total_tokens_ci": (
+                None if (d := stats.distribution(self.total_tokens, digits=1)) is None else d["ci"]
+            ),
             "avg_composite": _round_mean(self.composites, 4),
             # None, not 0: an unmeasured token count is not a free one, and the
             # routing tie-breaker must be able to tell the difference.
@@ -157,6 +201,16 @@ class Cell:
             "destructive_failures": self.destructive_failures,
             "run_dir": self.run_dir,
         }
+
+
+def _case_passed(case: dict, composite: float) -> bool:
+    """The case record's own verdict, which carries the hard gates.
+
+    Records saved before ``passed`` was persisted fall back to the threshold.
+    """
+    if "passed" in case and case["passed"] is not None:
+        return bool(case["passed"])
+    return composite >= PASS_THRESHOLD
 
 
 def _exclusion_reason(case: dict) -> str | None:
@@ -192,11 +246,27 @@ class Run:
     cases: list[dict]
 
 
-def load_runs(results_dir: Path | None = None) -> list[Run]:
-    """Every persisted run eligible for the matrix, newest first.
+def summary_lane(summary: dict) -> str | None:
+    """The lane a persisted run was measured on, or None when it cannot be told.
+
+    A summary with no manifest predates Phase 0 — and the mock lane — so it can
+    only have been live. A manifest without ``env_mode`` matches neither lane:
+    every manifest since the lane existed records it, so its absence means the
+    run's provenance is unknown, and mock and live rows must never share a frontier.
+    """
+    manifest = summary.get("manifest")
+    if not manifest:
+        return "live"
+    mode = manifest.get("env_mode")
+    return mode if mode in ("live", "mock") else None
+
+
+def load_runs(results_dir: Path | None = None, *, lane: str = "live") -> list[Run]:
+    """Every persisted run eligible for *lane*'s matrix, newest first.
 
     Suite and custom-prompt runs are excluded unless ``include_in_matrix`` is set
-    — see :func:`config.summary_counts_for_matrix`.
+    — see :func:`config.summary_counts_for_matrix` — and a run from the other lane
+    is never eligible (see :func:`summary_lane`).
     """
     from config import summary_counts_for_matrix
 
@@ -208,6 +278,8 @@ def load_runs(results_dir: Path | None = None) -> list[Run]:
         except Exception:
             continue
         if not summary_counts_for_matrix(summary):
+            continue
+        if summary_lane(summary) != lane:
             continue
         run_dir = summary_path.parent
         cases = []
@@ -247,10 +319,11 @@ def build_matrix(
     *,
     results_dir: Path | None = None,
     models_path: Path | None = None,
+    lane: str = "live",
 ) -> dict[str, Any]:
-    """Build the model × (domain, tool) matrix from persisted runs."""
+    """Build *lane*'s model × (domain, tool) matrix from persisted runs."""
     registry = model_index(load_models(models_path))
-    all_runs = [r for r in load_runs(results_dir) if r.model]
+    all_runs = [r for r in load_runs(results_dir, lane=lane) if r.model]
     latest = latest_run_per_model(all_runs)
 
     domains: dict[str, dict[str, Cell]] = {}
@@ -330,15 +403,18 @@ def build_matrix(
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "env_mode": lane,
         "pass_threshold": PASS_THRESHOLD,
         "models": models_out,
+        "domain_pass_rate": DOMAIN_PASS_RATE,
+        "tool_pass_rate": TOOL_PASS_RATE,
         "overall": {m: c.as_dict() for m, c in overall.get("all", {}).items()},
         "domains": {
             domain: {m: c.as_dict() for m, c in cells.items()}
             for domain, cells in sorted(domains.items())
         },
         "tools": {
-            tool: {m: c.as_dict() for m, c in cells.items()}
+            tool: {m: c.as_dict(TOOL_PASS_RATE) for m, c in cells.items()}
             for tool, cells in sorted(tools.items())
         },
     }
@@ -416,18 +492,27 @@ def _dataset_expected_tools() -> dict[str, list[str]]:
     return mapping
 
 
+def matrix_path(lane: str = "live") -> Path:
+    """Each lane keeps its own file, so a mock matrix can never stand in for live."""
+    return RESULTS_DIR / ("matrix.json" if lane == "live" else f"matrix_{lane}.json")
+
+
 def save_matrix(matrix: dict[str, Any], path: Path | None = None) -> Path:
-    path = path or RESULTS_DIR / "matrix.json"
+    path = path or matrix_path(str(matrix.get("env_mode") or "live"))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(matrix, indent=2) + "\n")
     return path
 
 
-def load_matrix(path: Path | None = None) -> dict[str, Any] | None:
-    path = path or RESULTS_DIR / "matrix.json"
+def load_matrix(path: Path | None = None, *, lane: str = "live") -> dict[str, Any] | None:
+    path = path or matrix_path(lane)
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except Exception:
         return None
+    # A file written before lanes existed is live by construction.
+    if (data.get("env_mode") or "live") != lane:
+        return None
+    return data

@@ -14,10 +14,8 @@ ROOT = Path(__file__).parent
 #
 # This has now caused three separate wrong answers: a maintenance script that would
 # have deleted from the wrong checkout, and two analyses that reported an agent as
-# having no tool grant because the fallback clone predates it. It also removes an
-# accidental dependency — under pytest the only reason .env was loaded at all is that
-# importing deepeval calls load_dotenv() as a side effect, so dropping an unrelated
-# test dependency would have silently changed which condor every drift check read.
+# having no tool grant because the fallback clone predates it. We load .env
+# explicitly here via python-dotenv.
 try:
     from dotenv import load_dotenv
 
@@ -233,12 +231,22 @@ def summary_counts_for_matrix(summary: dict) -> bool:
     """Whether a persisted run should feed the matrix / router.
 
     Suite runs and custom-prompt runs are excluded unless they explicitly opt in
-    via ``include_in_matrix: true``. Hand-edited suite cases must not silently
+    via ``include_in_matrix: true`` — and ad-hoc dashboard or suite runs are
+    excluded even then. Hand-edited suite cases must not silently
     reshape routing recommendations.
     """
+    run_type = summary.get("run_type")
+    # Ad-hoc dashboard and suite runs never feed the published frontier: only an
+    # A/B preset freezes enough to make them evidence. CLI test/sweep stay in — they
+    # are the documented way to build the matrix. Summaries from before the
+    # manifest existed carry no experiment_type and keep their old treatment.
+    exp_type = (summary.get("manifest") or {}).get("experiment_type")
+    if exp_type == "adhoc" and (
+        summary.get("source") == "dashboard" or run_type == "suite" or summary.get("suite_id")
+    ):
+        return False
     if summary.get("include_in_matrix") is True:
         return True
-    run_type = summary.get("run_type")
     if run_type in ("suite", "custom_prompt", "custom", "custom-prompt"):
         return False
     if summary.get("suite_id"):
@@ -296,8 +304,65 @@ def _int_or(value: str | None, default: int) -> int:
         return default
 
 
+# ── Environment lanes ──────────────────────────────────────────────────────────
+# Two lanes, never mixed. ``live`` drives the real hummingbot-api at
+# HUMMINGBOT_API_URL and is the only lane routing is published from. ``mock``
+# drives the deterministic stand-in in mock_mcp/ — for CI and for the safety
+# cases (insufficient funds, stale prices, 5xx) live staging cannot stage on
+# demand. The lane is BENCH_ENV_MODE, read fresh like the staging settings.
+VALID_ENV_MODES = ("live", "mock")
+
+BENCH_MOCK_SERVER_NAME = "bench_mock"
+
+
+def env_mode(default: str = "live") -> str:
+    """``live`` or ``mock``: BENCH_ENV_MODE if set, else *default*.
+
+    An unrecognised value raises rather than falling back — "mokc" silently
+    meaning live is how a CI job would end up placing orders on staging.
+    """
+    raw = (os.environ.get("BENCH_ENV_MODE") or "").strip().lower()
+    if not raw:
+        return default
+    if raw not in VALID_ENV_MODES:
+        raise ValueError(f"BENCH_ENV_MODE={raw!r} — expected one of {VALID_ENV_MODES}")
+    return raw
+
+
+def mock_config() -> dict[str, object]:
+    """Where the mock hummingbot-api listens, and the credentials it expects."""
+    host = os.environ.get("BENCH_MOCK_HOST", "127.0.0.1")
+    port = _int_or(os.environ.get("BENCH_MOCK_PORT"), 18000)
+    return {
+        "api_url": (os.environ.get("BENCH_MOCK_URL") or f"http://{host}:{port}").rstrip("/"),
+        "host": host,
+        "port": port,
+        "username": os.environ.get("BENCH_MOCK_USERNAME", "mock"),
+        "password": os.environ.get("BENCH_MOCK_PASSWORD", "mock"),
+        "server_name": BENCH_MOCK_SERVER_NAME,
+    }
+
+
 def staging_config() -> dict[str, object]:
-    """Staging identifiers for benchmark runs, read fresh from the environment."""
+    """The run's API target, read fresh from the environment.
+
+    In the mock lane every field points at the mock — including the server name,
+    so condor's own URL resolution sends both MCP servers there too — and
+    HUMMINGBOT_* is ignored entirely: a mock run must not be one typo away from
+    staging.
+    """
+    if env_mode() == "mock":
+        mock = mock_config()
+        return {
+            "api_url": mock["api_url"],
+            "expected_api_url": mock["api_url"],
+            "username": mock["username"],
+            "password": mock["password"],
+            "server_name": mock["server_name"],
+            "chat_id": _int_or(os.environ.get("BENCH_CHAT_ID"), BENCH_CHAT_ID),
+            "user_id": _int_or(os.environ.get("BENCH_USER_ID"), BENCH_USER_ID),
+            "env_mode": "mock",
+        }
     return {
         "api_url": (os.environ.get("HUMMINGBOT_API_URL") or "").rstrip("/"),
         # Alias used by the fail-closed check. Defaults to HUMMINGBOT_API_URL so a
@@ -313,19 +378,25 @@ def staging_config() -> dict[str, object]:
         "server_name": os.environ.get("BENCH_SERVER_NAME") or BENCH_SERVER_NAME,
         "chat_id": _int_or(os.environ.get("BENCH_CHAT_ID"), BENCH_CHAT_ID),
         "user_id": _int_or(os.environ.get("BENCH_USER_ID"), BENCH_USER_ID),
+        "env_mode": "live",
     }
 
 
-# ── Composite score weights ────────────────────────────────────────────────────
-# Real API responses make param correctness and response shape meaningful, so
-# tool-name F1 shares weight with them rather than carrying the tool signal alone.
-SCORE_WEIGHTS = {
+# ── Score Profile & Weights ──────────────────────────────────────────────────
+# SCORE_PROFILE can be 'default' (outcome-first scorecard) or 'legacy_routing'.
+# Deprecation notice: 'legacy_routing' profile is preserved for historical compatibility
+# and will be deleted in release v2.0.
+SCORE_PROFILE = os.environ.get("SCORE_PROFILE", "default").strip().lower()
+
+LEGACY_SCORE_WEIGHTS = {
     "answer_quality": 0.45,
     "tool_accuracy": 0.20,
     "tool_params": 0.15,
     "live_validity": 0.10,
     "latency_score": 0.10,
 }
+
+SCORE_WEIGHTS = dict(LEGACY_SCORE_WEIGHTS)
 
 # Latency floor: even the slowest model gets at least this score
 LATENCY_FLOOR = 0.1

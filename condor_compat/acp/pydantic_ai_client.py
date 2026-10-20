@@ -135,6 +135,8 @@ PYDANTIC_AI_PREFIXES = frozenset(
         "google",
         "lmstudio",
         "openrouter",
+        # Bench-only: NVIDIA NIM hosted catalog (build.nvidia.com). See bench/nim.py.
+        "nvidia",
         # A saved custom endpoint (``custom@venice:llama-3.3-70b``). Read through
         # ``model_prefix``, which strips the ``@nickname`` — the raw split leaves
         # ``custom@venice``, which matches nothing.
@@ -147,6 +149,9 @@ DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    # Bench-only. Listed here so resolve_base_url gives NIM a server semaphore:
+    # one request in flight per process, which is what its rate limits allow.
+    "nvidia": "https://integrate.api.nvidia.com/v1",
 }
 
 
@@ -415,12 +420,20 @@ class PydanticAIClient:
         priority_tools: (
             list[str] | None
         ) = None,  # bench-only: keep these first when the count cap cuts
+        model_settings: (
+            dict[str, Any] | None
+        ) = None,  # bench-only: pinned inference params (see bench.client.InferenceConfig)
+        env_keys_allowed: bool = True,
     ):
         self.model_name = model
         self.mcp_server_configs = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
         self.base_url = base_url
+        # False when ``base_url`` is a caller-chosen URL: the install's
+        # OPENROUTER_API_KEY must never ride along to it (condor SEC-630). Bench
+        # never passes one, so this stays True; ported to keep the branch identical.
+        self.env_keys_allowed = env_keys_allowed
         # When set, the agent only sees tools whose name is in this allowlist
         # (used by domain-expert consults to scope an agent to one domain).
         self.allowed_tools = set(allowed_tools) if allowed_tools else None
@@ -428,6 +441,12 @@ class PydanticAIClient:
         # an unavoidable count cut a tool lands on — see _prepare_tools. Never a
         # filter: nothing is added or removed by being named here.
         self.priority_tools = set(priority_tools) if priority_tools else None
+        # Bench-only: per-call HTTP evidence for providers that need it (NIM).
+        self.provider_log: Any = None
+        # Bench-only: the run's pinned inference parameters. Without them every
+        # request inherits the provider's defaults, and the manifest would record
+        # settings the model never received.
+        self.model_settings = dict(model_settings) if model_settings else None
         # Populated by _prepare_tools on the first model request: the tool names
         # actually offered, after the allowlist and the count cap. None until then,
         # which is distinct from "offered nothing".
@@ -512,7 +531,10 @@ class PydanticAIClient:
                     "OpenRouter requires an explicit model id, e.g. "
                     "'openrouter:openai/gpt-4o' or 'openrouter:anthropic/claude-sonnet-4-5'."
                 )
-            api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not self.env_keys_allowed:
+                api_key = "not-needed"
+            else:
+                api_key = os.environ.get("OPENROUTER_API_KEY")
             if not api_key:
                 raise RuntimeError(
                     "OPENROUTER_API_KEY is not set. Add it to your .env to use openrouter:* models."
@@ -521,6 +543,27 @@ class PydanticAIClient:
                 base_url=base_url or DEFAULT_BASE_URLS["openrouter"],
                 api_key=api_key,
                 timeout=_local_timeout,
+            )
+            return _make_openai_compat_model(
+                model_id, OpenAIProvider(openai_client=openai_client)
+            )
+
+        # Bench-only: NVIDIA NIM. OpenAI-compatible, keyed, rate-limited. Handled
+        # before the generic branch (which sends api_key="not-needed"), with SDK
+        # retries for 429s and an httpx recorder so every exchange — retries
+        # included — lands in the trial's evidence (bench/nim.py).
+        if prefix == "nvidia":
+            from bench import nim  # noqa: PLC0415 — bench-only provider
+
+            if not model_id:
+                raise RuntimeError("NIM requires a catalog id, e.g. 'nvidia:openai/gpt-oss-20b'.")
+            self.provider_log = nim.CallRecorder()
+            openai_client = AsyncOpenAI(
+                base_url=base_url or nim.base_url(),
+                api_key=nim.api_key(),
+                max_retries=nim.NIM_MAX_RETRIES,
+                timeout=_local_timeout,
+                http_client=self.provider_log.http_client(_local_timeout),
             )
             return _make_openai_compat_model(
                 model_id, OpenAIProvider(openai_client=openai_client)
@@ -697,7 +740,12 @@ class PydanticAIClient:
         # Always wire up _prepare_tools: it enforces both the allowed_tools
         # allowlist (production) and the _TOOL_LIMITS cap (bench safety net
         # so local models aren't overwhelmed by 20 full MCP tool schemas).
-        self._agent = Agent(model, toolsets=toolsets, prepare_tools=self._prepare_tools)
+        self._agent = Agent(
+            model,
+            toolsets=toolsets,
+            prepare_tools=self._prepare_tools,
+            model_settings=self.model_settings,
+        )
 
         # Resolve the global semaphore for this server's base URL so all client
         # instances targeting the same local inference server share one request
@@ -745,7 +793,11 @@ class PydanticAIClient:
         Cloud models get limit=999 (effectively unlimited).
         """
         if self.allowed_tools:
-            allowed = self.allowed_tools
+            # A stored old name of a renamed tool allows the tool it now means
+            # (manage_strategies → manage_loops). Ported from condor 8e4860fa.
+            from condor_compat.mcp_servers.condor_profiles import canonical_tool_name
+
+            allowed = {canonical_tool_name(n) for n in self.allowed_tools}
 
             def _ok(name: str) -> bool:
                 return name in allowed or name.rsplit("__", 1)[-1] in allowed
@@ -1226,6 +1278,16 @@ class PydanticAIClient:
                 "OpenRouter rate-limited the request (429). Free models share a "
                 "tighter quota — wait a moment and retry, or switch to a paid model."
             )
+        if self.model_name.startswith("nvidia:"):
+            if status == 401:
+                return "NVIDIA NIM rejected the API key (401). Check NVIDIA_API_KEY in .env."
+            if status == 404:
+                return (
+                    "NVIDIA NIM: this model is listed but not enabled for the account (404). "
+                    "Run `runner.py nim-smoke` to see which catalog models are callable."
+                )
+            if status == 429:
+                return "NVIDIA NIM rate-limited the request (429) after retries."
         if is_openrouter and status and 500 <= status < 600:
             return (
                 f"OpenRouter upstream error ({status}). The selected provider may "

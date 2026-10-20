@@ -1,11 +1,18 @@
 # Staging setup
 
-Every benchmark run goes against a real `hummingbot-api` through condor's own MCP
-servers. There is no offline mode, because canned payloads cannot answer the
-question the model sizing study is actually about: **can this model size call the
-right tool with the right arguments and do something useful with what comes
-back?** Mock payloads are correct by construction, so a model that fumbles every
-real response would still score well against them.
+Every live-lane benchmark run goes against a real `hummingbot-api` through
+condor's own MCP servers. **The routing lane has no offline mode; CI and safety
+cases run against the mock** (`BENCH_ENV_MODE=mock`, see the README). A static
+payload cannot answer the question the model sizing study is actually about:
+**can this model size call the right tool with the right arguments and do
+something useful with what comes back?** That is why routing is only ever
+published from the live lane, and why the mock lane's stand-in keeps state and
+scores the end state rather than handing back a fixed happy path.
+
+The mock lane registers its own `bench_mock` server entry in condor's
+`config.yml` (beside `bench_staging`) and points the bench chat's default server
+at it; the next live pre-flight points it back. Nothing in this document's guard
+rails is relaxed for live runs — capital-risk rules stay on the live lane.
 
 Running against a real API also introduces a way to lose money, so most of this
 document is about the guard rails.
