@@ -1,7 +1,7 @@
 {
   "case_id": "tool_manage_agents_002",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 10.916,
-  "timestamp": "2026-09-16T20:34:45.335167+00:00",
+  "model": "claude-code:sonnet",
+  "latency_s": 28.146,
+  "timestamp": "2026-10-20T06:58:53.177724+00:00",
   "fingerprint": "e777972268f5"
 }

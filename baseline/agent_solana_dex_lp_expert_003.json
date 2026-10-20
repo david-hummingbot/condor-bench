@@ -1,7 +1,7 @@
 {
   "case_id": "agent_solana_dex_lp_expert_003",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 91.52,
-  "timestamp": "2026-09-16T20:46:51.189155+00:00",
+  "model": "claude-code:sonnet",
+  "latency_s": 86.775,
+  "timestamp": "2026-10-20T10:56:54.406740+00:00",
   "fingerprint": "640c79bf4a28"
 }

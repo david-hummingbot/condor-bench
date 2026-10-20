@@ -1,7 +1,7 @@
 {
   "case_id": "c_safety_insufficient_001",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 12.201,
-  "timestamp": "2026-10-19T18:42:03.433184+00:00",
+  "model": "claude-code:sonnet",
+  "latency_s": 38.803,
+  "timestamp": "2026-10-20T11:08:49.482051+00:00",
   "fingerprint": "12902245455e"
 }

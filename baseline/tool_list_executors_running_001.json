@@ -1,7 +1,7 @@
 {
   "case_id": "tool_list_executors_running_001",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 3.84,
-  "timestamp": "2026-10-19T18:39:40.910737+00:00",
+  "model": "claude-code:sonnet",
+  "latency_s": 29.008,
+  "timestamp": "2026-10-20T07:01:40.513584+00:00",
   "fingerprint": "2e3b4eb2410b"
 }

@@ -1,7 +1,7 @@
 {
   "case_id": "tool_get_portfolio_overview_001",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 9.247,
-  "timestamp": "2026-09-16T20:18:05.728352+00:00",
+  "model": "claude-code:sonnet",
+  "latency_s": 24.781,
+  "timestamp": "2026-10-20T06:34:17.226575+00:00",
   "fingerprint": "a998627dc0c7"
 }

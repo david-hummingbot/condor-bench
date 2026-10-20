@@ -1,7 +1,7 @@
 {
   "case_id": "tool_explore_dex_pools_001",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 12.131,
-  "timestamp": "2026-09-16T22:27:54.994249+00:00",
+  "model": "claude-code:sonnet",
+  "latency_s": 18.808,
+  "timestamp": "2026-10-20T06:36:44.561414+00:00",
   "fingerprint": "b57794e3566c"
 }

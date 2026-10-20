@@ -1,7 +1,7 @@
 {
   "case_id": "c_order_limit_002",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 15.313,
-  "timestamp": "2026-10-19T18:38:19.510972+00:00",
+  "model": "claude-code:sonnet",
+  "latency_s": 27.429,
+  "timestamp": "2026-10-20T06:20:53.694426+00:00",
   "fingerprint": "2c175a6459b3"
 }

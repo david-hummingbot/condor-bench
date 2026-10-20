@@ -1,7 +1,7 @@
 {
   "case_id": "tool_manage_memory_001",
-  "model": "anthropic:claude-sonnet-5",
-  "latency_s": 5.303,
-  "timestamp": "2026-09-16T20:25:00.270503+00:00",
+  "model": "claude-code:sonnet",
+  "latency_s": 20.866,
+  "timestamp": "2026-10-20T06:40:49.965252+00:00",
   "fingerprint": "08b1f1ad6648"
 }
