@@ -280,7 +280,11 @@ def load_agent_tools(slug: str | None) -> list[str] | None:
     tools = meta.get("tools")
     if not isinstance(tools, list):
         return None
-    names = [str(t).strip() for t in tools if str(t).strip()]
+    from condor_compat.mcp_servers.condor_profiles import canonical_tool_name
+
+    # Condor reads a renamed tool's old spelling as the tool it now means; an
+    # AGENT.md that still grants manage_strategies grants manage_loops.
+    names = [canonical_tool_name(str(t).strip()) for t in tools if str(t).strip()]
     return names or None
 
 

@@ -62,6 +62,8 @@ LINE_REWRITES = {
         "from condor_compat.mcp_servers import condor_profiles",
     "from mcp_servers.hummingbot_api import profiles as hummingbot_profiles":
         "from condor_compat.mcp_servers import hummingbot_profiles",
+    "from condor.memory import paths as _paths":
+        "from condor_compat.upstream_shims import memory_paths as _paths",
 }
 
 REWRITES = [
@@ -70,6 +72,9 @@ REWRITES = [
     ("from condor.runtime.state import", "from condor_compat.upstream_shims import"),
     ("from condor.runtime.toolsets import", "from condor_compat.upstream_shims import"),
     ("from condor.memory.paths import", "from condor_compat.upstream_shims import"),
+    ("from condor.agent_controllers import", "from condor_compat.upstream_shims import"),
+    ("from .config import", "from condor_compat.agents._upstream_helpers import"),
+    ("from .journal import", "from condor_compat.agents._upstream_helpers import"),
     ("from routines.base import", "from condor_compat.upstream_shims import"),
     ("from .agent import", "from condor_compat.upstream_shims import"),
     ("from .strategy import", "from condor_compat.upstream_shims import"),
@@ -151,6 +156,9 @@ def extract_symbols(text: str, names: list[str]) -> str:
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id in names:
                     got = t.id
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id in names:
+                got = node.target.id
         if not got:
             continue
         # Walk back over the comment block immediately above the symbol.
@@ -162,7 +170,7 @@ def extract_symbols(text: str, names: list[str]) -> str:
     if missing:
         raise SystemExit(
             f"revendor: {missing} not found upstream — condor moved or renamed them. "
-            "Find where they live now and update PRELOAD_SYMBOLS."
+            "Find where they live now and update PRELOAD_SYMBOLS / HELPER_SYMBOLS."
         )
     return "\n\n".join(c.rstrip("\n") for c in chunks) + "\n"
 
@@ -173,6 +181,14 @@ PRELOAD_SYMBOLS = [
     "_chat_mcp_tools",
     "chat_tool_preload",
 ]
+
+# Small pure helpers the prompt builder imports relatively from its own package.
+# Taken by AST, like the preload, so they track upstream without dragging in the
+# modules around them (journal.py writes files; config.py loads the agent store).
+HELPER_SYMBOLS = {
+    ("condor", "agents", "config.py"): ["EXPERIMENT_MODES", "is_experiment_mode"],
+    ("condor", "agents", "journal.py"): ["render_risk_lines"],
+}
 
 CONTEXT_EXTRA = '''
 
@@ -212,6 +228,16 @@ def generate(condor: Path) -> dict[Path, str]:
         + CONTEXT_EXTRA
     )
 
+    helpers = "".join(
+        f"\n\n# ── from {'/'.join(rel)} ──\n" + extract_symbols(condor.joinpath(*rel).read_text(), names)
+        for rel, names in HELPER_SYMBOLS.items()
+    )
+    out[ROOT / "condor_compat" / "agents" / "_upstream_helpers.py"] = (
+        HEADER.format(src="condor/agents/{config,journal}.py (helpers only)", rev=rev)
+        + "from __future__ import annotations\n\nfrom typing import Any\n"
+        + rewrite_imports(helpers)
+    )
+
     # AGENT.md is injected verbatim as the Condor system prompt, body only — the
     # frontmatter is condor's own loader metadata and is not part of the prompt.
     md = (condor / "agents" / "condor" / "AGENT.md").read_text()
@@ -227,6 +253,23 @@ def generate(condor: Path) -> dict[Path, str]:
         out[ROOT / "condor_compat" / "mcp_servers" / dest] = render_profiles(p, rev)
 
     return out
+
+
+# Upstream absolute imports, and relative ones: a vendored file lives in a
+# different package, so ``from .x`` would resolve to the wrong module or none.
+_CONDOR_IMPORT = re.compile(r"^\s*(from\s+condor(\.|\s)|import\s+condor\b|from\s+\.)")
+
+
+def unrewritten_imports(generated: dict[Path, str]) -> list[str]:
+    """``file:line: text`` for every import of condor the rewrite left in place."""
+    found = []
+    for path, text in generated.items():
+        if path.suffix != ".py":
+            continue
+        for n, line in enumerate(text.splitlines(), 1):
+            if _CONDOR_IMPORT.match(line):
+                found.append(f"{path.relative_to(ROOT)}:{n}: {line.strip()}")
+    return found
 
 
 def describe(condor: Path) -> str:
@@ -270,6 +313,16 @@ def main() -> int:
         raise SystemExit(f"revendor: {condor} is not a condor checkout")
 
     generated = generate(condor)
+    leftovers = unrewritten_imports(generated)
+    if leftovers:
+        # Never write a vendored file that imports condor: it fails at import time
+        # in bench, or — inside a try/except, as the controllers index is — it
+        # quietly drops a section of the production prompt.
+        raise SystemExit(
+            "revendor: condor imports with no rewrite rule (add one to LINE_REWRITES "
+            "or REWRITES and the name to condor_compat/upstream_shims.py):\n  "
+            + "\n  ".join(leftovers)
+        )
     stale = False
     for path, text in generated.items():
         current = path.read_text() if path.exists() else ""

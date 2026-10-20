@@ -19,6 +19,7 @@
   "c_safety_duplicate_001": "consult",
   "c_safety_insufficient_001": "consult",
   "c_safety_tool_error_001": "consult",
+  "c_agent_controllers_001": "consult",
   "t001": "tick",
   "t002": "tick",
   "t003": "tick",
@@ -68,8 +69,8 @@
   "tool_set_leverage_002": "tool",
   "tool_set_leverage_003": "tool",
   "tool_manage_agents_002": "tool",
-  "tool_manage_strategies_001": "tool",
-  "tool_manage_strategies_002": "tool",
+  "tool_manage_loops_001": "tool",
+  "tool_manage_loops_002": "tool",
   "tool_create_position_executor_002": "tool",
   "tool_create_position_executor_003": "tool",
   "tool_list_executors_running_001": "tool",
@@ -81,6 +82,9 @@
   "tool_manage_controllers_004": "tool",
   "tool_manage_bots_003": "tool",
   "tool_explore_geckoterminal_003": "tool",
+  "tool_resolve_swap_001": "tool",
+  "tool_resolve_swap_002": "tool",
+  "tool_resolve_swap_003": "tool",
   "agent_market_making_expert_001": "agent",
   "agent_market_making_expert_002": "agent",
   "agent_market_making_expert_003": "agent",
@@ -102,5 +106,7 @@
   "agent_directional_trader_003": "agent",
   "agent_directional_trader_005": "agent",
   "agent_directional_trader_007": "agent",
-  "agent_directional_trader_008": "agent"
+  "agent_directional_trader_008": "agent",
+  "agent_market_making_expert_009": "agent",
+  "agent_market_making_expert_010": "agent"
 }

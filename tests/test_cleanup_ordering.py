@@ -63,7 +63,7 @@ def _builder_002_trace():
             },
         },
         {
-            "tool": "mcp__condor__manage_strategies",
+            "tool": "mcp__condor__manage_loops",
             "tool_call_id": "call_strategy",
             "args": {
                 "action": "create",
@@ -86,13 +86,13 @@ def _builder_002_trace():
             ),
         },
         {
-            "tool": "mcp__condor__manage_strategies",
+            "tool": "mcp__condor__manage_loops",
             "tool_call_id": "call_strategy",
             "output": json.dumps(
                 {
                     "created": True,
                     # Namespaced under the agent, which is what delete wants.
-                    "strategy_id": "bench_dca_agent.bench_dca_sol",
+                    "loop_id": "bench_dca_agent.bench_dca_sol",
                     "name": "bench_dca_sol",
                 }
             ),
@@ -108,11 +108,11 @@ def _condor_stub():
 
     async def call_tool(tool, args, *, agent_slug=None, model="", tick=False):
         action = args.get("action")
-        order.append((action, args.get("agent_slug") or args.get("strategy_id") or ""))
+        order.append((action, args.get("agent_slug") or args.get("loop_id") or ""))
         if action == "delete":
-            # manage_strategies delete vs manage_agents delete — told apart by args.
-            if args.get("strategy_id"):
-                sid = args.get("strategy_id")
+            # manage_loops delete vs manage_agents delete — told apart by args.
+            if args.get("loop_id"):
+                sid = args.get("loop_id")
                 if sid not in state["strategies"]:
                     return _Outcome({"deleted": False})
                 state["strategies"].discard(sid)
@@ -145,7 +145,7 @@ def test_identifiers_come_from_the_response_not_the_display_name():
     assert by_tool["manage_agents"].identifier == "bench_dca_agent", (
         "picked the display name — delete would have matched no agent"
     )
-    assert by_tool["manage_strategies"].identifier == "bench_dca_agent.bench_dca_sol"
+    assert by_tool["manage_loops"].identifier == "bench_dca_agent.bench_dca_sol"
 
 
 def test_undo_runs_child_before_parent(monkeypatch: pytest.MonkeyPatch):
@@ -265,3 +265,4 @@ def test_the_leverage_reset_avoids_condors_broken_enum():
     # Scoping args carry through, so the reset lands on the pair the case changed.
     assert args["trading_pair"] == "BTC-USDT"
     assert args["connector_name"] == "binance_perpetual"
+

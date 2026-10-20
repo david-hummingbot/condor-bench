@@ -93,6 +93,82 @@ def defaults_layers() -> tuple[Path, Path]:
     return root / "_defaults", root / "_defaults"
 
 
+# Mirrors condor/memory/paths.py's module-level set: the vendored prompt builder
+# re-binds it by name (``_paths._SHADOWED_RULEBOOKS_WARNED``).
+_SHADOWED_RULEBOOKS_WARNED: set[tuple[str, str]] = set()
+
+
+def read_layered_file(
+    filename: str,
+    agent_slug: str | None = None,
+    *,
+    within: tuple[str, ...] | list[str] = (),
+    skip_empty_body: bool = False,
+) -> tuple[dict, str] | None:
+    """Upstream's single-file policy resolver, on bench's layers.
+
+    Same levels as ``condor.memory.paths.read_layered_file`` — ``<home>/<*within>``,
+    then ``<home>``, then ``_defaults`` — over :func:`agent_home_layers`, which in a
+    checkout is one root seen twice. No shadow warning: with one root there is
+    nothing to shadow. An unreadable file is skipped, as upstream does.
+    """
+    local_home, _ = agent_home_layers(agent_slug)
+    dirs = []
+    if within:
+        dirs.append(local_home.joinpath(*within))
+    dirs += [local_home, defaults_layers()[0]]
+    for directory in dirs:
+        path = directory / filename
+        try:
+            if not path.is_file():
+                continue
+            meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+            body = body.strip()
+            if skip_empty_body and not body:
+                continue
+            return meta or {}, body
+        except Exception:  # noqa: BLE001 — a broken policy is never a crash
+            continue
+    return None
+
+
+class _MemoryPaths:
+    """``from condor.memory import paths as _paths`` — the names the builder reads."""
+
+    _SHADOWED_RULEBOOKS_WARNED = _SHADOWED_RULEBOOKS_WARNED
+    read_layered_file = staticmethod(read_layered_file)
+    agent_home_layers = staticmethod(agent_home_layers)
+    defaults_layers = staticmethod(defaults_layers)
+
+
+memory_paths = _MemoryPaths()
+
+
+# ── condor.agent_controllers ─────────────────────────────────────────────────
+def controllers_section(agent_slug: str | None) -> str:
+    """The CONTROLLERS index production puts in the tick prompt, from the checkout.
+
+    Not reimplemented: the index is derived from each controller's source,
+    CONTROLLER.md and sample configs, and a copy of that parser would drift the
+    first time condor changed it. So this loads condor's own
+    ``condor.agent_controllers`` from the configured checkout (the same
+    load-production-code-by-path rule ``bench/mcp_provider.py`` follows) and asks
+    it. Its imports are condor-internal and stdlib only — no Telegram stack.
+    """
+    import importlib
+    import sys
+
+    from config import condor_path
+
+    repo = condor_path()
+    if repo is None:
+        return ""
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    module = importlib.import_module("condor.agent_controllers")
+    return module.controllers_section(agent_slug)
+
+
 # ── condor.runtime.toolsets ──────────────────────────────────────────────────
 def _every_tool_name() -> set[str]:
     """Every tool name any ring of either vendored profile can mount."""

@@ -146,7 +146,7 @@ def build_mcp_configs(
     condor's ``seat_profile(agent_slug, tick)`` mounts three different tool rings:
     ``full`` for the chat coordinator, ``agent`` for an attended specialist, and
     ``tick`` for the unattended loop — which drops the orchestration family
-    (``manage_agents``/``manage_strategies``/``control_agent``/
+    (``manage_agents``/``manage_loops``/``control_agent``/
     ``get_available_models``) and the direct liquidity moves
     (``manage_amm``/``manage_clmm``) precisely because nothing is watching. The
     axis is attendance, not identity: ``agent_slug`` alone cannot tell a

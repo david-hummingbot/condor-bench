@@ -1,6 +1,6 @@
 {
   "_generated_by": "scripts/build_task_manifest.py \u2014 do not edit by hand",
-  "task_set_version": "cc6e3fd44707f2721e8e8c594d4893a54ad22d75304f6a60d652f38fa94ab94e",
+  "task_set_version": "40e90d36eb81a305d3cbdf7fc53425ce7086135855e4adb2dc2f4b39d565282d",
   "category_floor": 10,
   "categories_under_floor": [],
   "categories": {
@@ -23,14 +23,14 @@
       "holdout": 1
     },
     "bots_controllers": {
-      "total": 11,
+      "total": 14,
       "dev": 0,
-      "regression": 10,
+      "regression": 13,
       "holdout": 1
     },
     "dex_gateway": {
-      "total": 11,
-      "dev": 1,
+      "total": 14,
+      "dev": 4,
       "regression": 9,
       "holdout": 1
     },
@@ -50,6 +50,9 @@
   "splits": {
     "dev": [
       "T-dex-001",
+      "T-dex-011",
+      "T-dex-012",
+      "T-dex-013",
       "T-exec-002",
       "T-exec-004",
       "T-exec-005",
@@ -89,6 +92,9 @@
       "T-bots-008",
       "T-bots-009",
       "T-bots-010",
+      "T-bots-011",
+      "T-bots-012",
+      "T-bots-013",
       "T-dex-002",
       "T-dex-003",
       "T-dex-004",
@@ -177,6 +183,9 @@
     "T-bots-008": "agent_market_making_expert_002",
     "T-bots-009": "agent_market_making_expert_003",
     "T-bots-010": "agent_directional_trader_005",
+    "T-bots-011": "agent_market_making_expert_009",
+    "T-bots-012": "agent_market_making_expert_010",
+    "T-bots-013": "c_agent_controllers_001",
     "T-bots-901": "h_bots_001",
     "T-dex-001": "tool_explore_dex_pools_001",
     "T-dex-002": "tool_explore_geckoterminal_001",
@@ -188,6 +197,9 @@
     "T-dex-008": "agent_meteora_launch_lp_003",
     "T-dex-009": "agent_meteora_launch_lp_004",
     "T-dex-010": "agent_meteora_launch_lp_007",
+    "T-dex-011": "tool_resolve_swap_001",
+    "T-dex-012": "tool_resolve_swap_002",
+    "T-dex-013": "tool_resolve_swap_003",
     "T-dex-901": "h_dex_001",
     "T-exec-001": "t001",
     "T-exec-002": "t002",
@@ -245,8 +257,8 @@
     "T-platform-032": "tool_get_user_context_002",
     "T-platform-033": "tool_send_notification_002",
     "T-platform-034": "tool_manage_agents_002",
-    "T-platform-035": "tool_manage_strategies_001",
-    "T-platform-036": "tool_manage_strategies_002",
+    "T-platform-035": "tool_manage_loops_001",
+    "T-platform-036": "tool_manage_loops_002",
     "T-platform-037": "agent_directional_trader_002",
     "T-platform-038": "agent_market_making_expert_008",
     "T-platform-039": "agent_solana_dex_lp_expert_008",

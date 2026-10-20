@@ -377,15 +377,15 @@ def test_a_created_strategy_is_still_deleted_as_a_strategy():
     from bench.cleanup import _undo_args, created_resources
 
     result = _Result([{
-            "tool": "mcp__condor__manage_strategies",
+            "tool": "mcp__condor__manage_loops",
             "tool_call_id": "t1",
             "args": {"action": "create", "agent_slug": "bench_dca_sol",
                  "name": "bench_dca_sol"},
-    }], [{"tool_call_id": "t1", "output": '{"strategy_id": "bench_dca_sol.bench_dca_sol"}'}])
+    }], [{"tool_call_id": "t1", "output": '{"loop_id": "bench_dca_sol.bench_dca_sol"}'}])
     (resource,) = created_resources(result)
     assert _undo_args(resource, "delete") == {
         "action": "delete",
-        "strategy_id": "bench_dca_sol.bench_dca_sol",
+        "loop_id": "bench_dca_sol.bench_dca_sol",
     }
 
 
@@ -708,3 +708,4 @@ def test_a_setter_whose_response_is_a_refusal_is_also_skipped():
         [{"tool_call_id": "t1", "output": '{"error": "Failed to set leverage: 500"}'}],
     )
     assert created_resources(result) == []
+

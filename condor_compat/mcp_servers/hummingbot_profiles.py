@@ -1,7 +1,7 @@
 """GENERATED — do not edit. Vendored from condor by scripts/revendor.py.
 
 Source: /home/madcatz/development/condor/mcp_servers/hummingbot_api/profiles.py
-condor:  d89e74f2-dirty (main)
+condor:  8e4860fa-dirty (main)
 
 Imports are rewritten to condor_compat/upstream_shims.py; the prompt text itself
 is byte-for-byte condor's. Bench's additions are appended below the marker at the
@@ -41,6 +41,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "quote_swap": "Price a DEX swap — free, signs nothing",
     "execute_swap": "Sign and submit a DEX swap — spends funds",
     "get_swap_status": "Resolve a submitted swap by transaction hash",
+    "resolve_swap": "Exit a swap stuck SUBMITTED and unverifiable",
     "search_swaps": "Query swap history with filters",
     "explore_geckoterminal": "Explore GeckoTerminal DEX market data",
     "manage_amm": "Direct AMM pool operations and pool creation",
@@ -93,6 +94,7 @@ TRADING_TOOLS: tuple[str, ...] = (
     "quote_swap",
     "execute_swap",
     "get_swap_status",
+    "resolve_swap",
     "search_swaps",
     "explore_geckoterminal",
 )
@@ -120,6 +122,15 @@ ADMIN_TOOLS: tuple[str, ...] = (
     "configure_server",
     "manage_gateway_config",
 )
+
+#: The profiles an *agent* seat runs on: a tick, and an attended or background
+#: specialist (see ``condor.runtime.toolsets.seat_profile``). ``full`` is the
+#: operator and the chat coordinator. On these two, ``manage_controllers``
+#: refuses to upsert controller *code* (SEC-713): agents own controller source
+#: through Condor's ``manage_agent_controllers``, which checks the server copy
+#: for drift and backs it up, and a delegated or consulted run has no permission
+#: gate of its own to stop the raw call. Saved configs are unaffected.
+AGENT_SEAT_PROFILES: frozenset[str] = frozenset({"tick", "agent"})
 
 #: profile name → the tools it registers. ``full`` is the default because this
 #: server is also run standalone (uvx, external hosts, `.mcp.json`).
