@@ -266,3 +266,16 @@ def test_the_leverage_reset_avoids_condors_broken_enum():
     assert args["trading_pair"] == "BTC-USDT"
     assert args["connector_name"] == "binance_perpetual"
 
+
+def test_an_executor_id_is_read_through_the_acp_result_envelope():
+    """Claude Code wraps a tool's text as {"result": "..."}; the id is inside it."""
+    import json
+
+    from bench.cleanup import _identifier
+
+    wrapped = json.dumps({"result": (
+        "Executor RUNNING; nothing filled yet.\n\nExecutor ID: 7s4zDavRMwg97LmRTNJHknEV37MeDa2RCfpffC717op4\n"
+        "Type: order_executor\nAccount: master_account\n")})
+    assert _identifier("create_order_executor", {}, wrapped) == "7s4zDavRMwg97LmRTNJHknEV37MeDa2RCfpffC717op4"
+    # The pydantic-ai path's plain string still parses.
+    assert _identifier("create_order_executor", {}, "Executor ID: abc123\nType: x") == "abc123"

@@ -423,12 +423,17 @@ class PydanticAIClient:
         model_settings: (
             dict[str, Any] | None
         ) = None,  # bench-only: pinned inference params (see bench.client.InferenceConfig)
+        env_keys_allowed: bool = True,
     ):
         self.model_name = model
         self.mcp_server_configs = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
         self.base_url = base_url
+        # False when ``base_url`` is a caller-chosen URL: the install's
+        # OPENROUTER_API_KEY must never ride along to it (condor SEC-630). Bench
+        # never passes one, so this stays True; ported to keep the branch identical.
+        self.env_keys_allowed = env_keys_allowed
         # When set, the agent only sees tools whose name is in this allowlist
         # (used by domain-expert consults to scope an agent to one domain).
         self.allowed_tools = set(allowed_tools) if allowed_tools else None
@@ -526,7 +531,10 @@ class PydanticAIClient:
                     "OpenRouter requires an explicit model id, e.g. "
                     "'openrouter:openai/gpt-4o' or 'openrouter:anthropic/claude-sonnet-4-5'."
                 )
-            api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not self.env_keys_allowed:
+                api_key = "not-needed"
+            else:
+                api_key = os.environ.get("OPENROUTER_API_KEY")
             if not api_key:
                 raise RuntimeError(
                     "OPENROUTER_API_KEY is not set. Add it to your .env to use openrouter:* models."
@@ -785,7 +793,11 @@ class PydanticAIClient:
         Cloud models get limit=999 (effectively unlimited).
         """
         if self.allowed_tools:
-            allowed = self.allowed_tools
+            # A stored old name of a renamed tool allows the tool it now means
+            # (manage_strategies → manage_loops). Ported from condor 8e4860fa.
+            from condor_compat.mcp_servers.condor_profiles import canonical_tool_name
+
+            allowed = {canonical_tool_name(n) for n in self.allowed_tools}
 
             def _ok(name: str) -> bool:
                 return name in allowed or name.rsplit("__", 1)[-1] in allowed

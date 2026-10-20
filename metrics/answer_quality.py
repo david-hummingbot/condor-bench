@@ -60,6 +60,17 @@ _INFRA_PATTERNS = (
     # the empty transcript would score a configuration problem as a model failure
     # ("No response produced", composite 0.0) and average it into the matrix.
     re.compile(r"^ACP prompt failed", re.I | re.M),
+    # The agent's own account failing — Claude Code answers these as its turn's
+    # *text*, with no error on the turn. "Failed to authenticate: OAuth session
+    # expired" was recorded as a 0.1s baseline and would have been judged as the
+    # model's answer, for every case, until someone read a transcript.
+    re.compile(r"^Failed to authenticate\b", re.I | re.M),
+    re.compile(r"^Invalid API key\b", re.I | re.M),
+    re.compile(r"^Credit balance is too low", re.I | re.M),
+    # A subscription's usage cap, answered the same way. 24 specialist baselines
+    # were recorded at 0.5–1s in one minute while the cap was in force.
+    re.compile(r"^(Claude AI )?usage limit reached", re.I | re.M),
+    re.compile(r"^You['’]ve (hit|reached) your (usage )?limit", re.I | re.M),
 )
 
 # Words a *provider outage* puts in a response — and that a model narrating its own
@@ -69,6 +80,10 @@ _INFRA_HINTS = (
     re.compile(r"request_limit", re.I),
     re.compile(r"token limit", re.I),
     re.compile(r"rate[- ]?limit", re.I),
+    re.compile(r"OAuth (session|token) (has )?expired", re.I),
+    re.compile(r"run /login", re.I),
+    re.compile(r"usage limit", re.I),
+    re.compile(r"limit (will )?resets? (at|in)\b", re.I),
 )
 
 # Above this many characters a response is an answer that happens to mention a

@@ -732,6 +732,8 @@ def _make_client(
     """
     if is_acp_model(model):
         command, extra_env = resolve_acp(model)
+        from condor_compat.acp.acp_client import acp_model_pin
+
         # ACP agents auto-discover stdio MCP servers from .mcp.json in their cwd.
         # That cwd must be the condor repo (that is where the real servers resolve
         # from), which also means condor's playwright entry is visible to the
@@ -745,6 +747,7 @@ def _make_client(
                 mcp_servers=mcp_configs,
                 extra_env=extra_env or None,
                 working_dir=working_dir,
+                model=acp_model_pin(model),
             ),
             True,
         )

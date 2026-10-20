@@ -16,6 +16,8 @@ hopeless. So the shape is pinned rather than trusted.
 
 from __future__ import annotations
 
+import pytest
+
 from condor_compat.acp.acp_client import (
     ACPClient,
     acp_tool_input,
@@ -723,10 +725,83 @@ def test_the_default_selector_is_not_forwarded_as_a_model_id():
     assert resolve_acp("claude-acp:default")[1] == {}
 
 
-def test_a_real_model_id_is_still_forwarded():
-    from condor_compat.acp.acp_client import resolve_acp
+def test_a_real_model_id_is_pinned_over_the_protocol_not_the_env():
+    """Ported from condor CORR-746: the env channel cannot tell a model from a typo."""
+    from condor_compat.acp.acp_client import acp_model_pin, resolve_acp
 
-    assert resolve_acp("claude-code:haiku")[1] == {"ANTHROPIC_MODEL": "haiku"}
+    assert resolve_acp("claude-code:haiku")[1] == {}
+    assert acp_model_pin("claude-code:haiku") == "haiku"
+    assert acp_model_pin("claude-code:default") == ""
+    assert acp_model_pin("gemini:pro") == ""
+
+
+def test_a_pin_must_name_an_advertised_family_not_merely_contain_one():
+    from condor_compat.acp.acp_client import resolve_model_id
+
+    available = [{"modelId": "default"}, {"modelId": "sonnet"}, {"modelId": "opus[1m]"},
+                 {"modelId": "claude-haiku-4-5", "name": "Haiku"}]
+    assert resolve_model_id("sonnet", available) == "sonnet"
+    assert resolve_model_id("haiku", available) == "claude-haiku-4-5"
+    assert resolve_model_id("claude-opus-4-6", available) == "opus[1m]"
+    assert resolve_model_id("sonnet-typo-xyz", available) is None
+    assert resolve_model_id("gpt-4o", available) is None
+
+
+def _pinning_client(model, session, *, refuse=False):
+    from types import SimpleNamespace
+
+    from condor_compat.acp.acp_client import ACPClient
+
+    client = ACPClient("claude-agent-acp", model=model)
+    client._session_id = "s1"
+    client._process = SimpleNamespace(stdin=None, returncode=0)
+    sent = []
+
+    async def send_request(method, params, stdin):
+        if refuse:
+            raise RuntimeError("nope")
+        sent.append((method, params))
+        return {}
+
+    async def stop():
+        sent.append(("stopped", None))
+
+    client._peer.send_request = send_request
+    client.stop = stop
+    return client, sent
+
+
+def test_a_pin_is_switched_with_the_request_the_bridge_speaks():
+    import asyncio
+
+    config_session = {"configOptions": [{"id": "model", "category": "model", "currentValue": "default",
+                                         "options": [{"value": "default"}, {"value": "sonnet"}]}]}
+    client, sent = _pinning_client("sonnet", config_session)
+    asyncio.run(client._select_model(config_session))
+    assert sent == [("session/set_config_option", {"sessionId": "s1", "configId": "model", "value": "sonnet"})]
+    assert client.active_model_id == "sonnet"
+
+    legacy = {"models": {"availableModels": [{"modelId": "haiku"}], "currentModelId": "sonnet"}}
+    client, sent = _pinning_client("haiku", legacy)
+    asyncio.run(client._select_model(legacy))
+    assert sent == [("session/set_model", {"sessionId": "s1", "modelId": "haiku"})]
+
+
+def test_an_unappliable_pin_stops_the_session_instead_of_running_the_default():
+    import asyncio
+
+    from condor_compat.acp.acp_client import ModelPinError
+
+    session = {"models": {"availableModels": [{"modelId": "sonnet"}], "currentModelId": "sonnet"}}
+    client, sent = _pinning_client("haiku", session)
+    with pytest.raises(ModelPinError, match="does not offer the pinned model 'haiku'"):
+        asyncio.run(client._select_model(session))
+    assert sent == [("stopped", None)]
+
+    session = {"models": {"availableModels": [{"modelId": "haiku"}], "currentModelId": "sonnet"}}
+    client, sent = _pinning_client("haiku", session, refuse=True)
+    with pytest.raises(ModelPinError, match="refused session/set_model"):
+        asyncio.run(client._select_model(session))
 
 
 def test_a_provider_error_does_not_arrive_as_the_models_answer():

@@ -709,3 +709,17 @@ def test_a_setter_whose_response_is_a_refusal_is_also_skipped():
     )
     assert created_resources(result) == []
 
+
+def test_an_expired_agent_login_is_infra_not_an_answer():
+    """Claude Code reports a dead login as its turn's text, with no error flag."""
+    from metrics.answer_quality import is_infra_failure
+
+    assert is_infra_failure("Failed to authenticate: OAuth session expired and could not be refreshed")
+    assert is_infra_failure("Invalid API key · Please run /login")
+    assert is_infra_failure("Credit balance is too low")
+    assert is_infra_failure("Your OAuth token has expired. Please run /login.")
+    assert is_infra_failure("Claude AI usage limit reached|1792468800")
+    assert is_infra_failure("You've hit your limit · resets 8am (Europe/London)")
+    # A real answer that mentions logging in is still an answer.
+    long_answer = "To deploy the bot, first run /login in the CLI, then " + "configure it. " * 60
+    assert not is_infra_failure(long_answer)

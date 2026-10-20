@@ -332,9 +332,15 @@ def _identifier(tool: str, args: dict, response: Any, action: str = "") -> str |
             if value:
                 return str(value)
     # Typed create tools return a formatted string, not JSON, with
-    # "Executor ID: <id>" on its own line.
-    if isinstance(response, str):
-        match = re.search(r"Executor ID:\s*(\S+)", response)
+    # "Executor ID: <id>" on its own line. Over ACP that string arrives wrapped as
+    # {"result": "..."} — unwrap it first, or the match runs over the escaped text
+    # and captures "<id>\\nType:", and teardown stops an executor that does not
+    # exist while the real one keeps running (six were left on staging this way).
+    text = response
+    if isinstance(parsed, dict) and isinstance(parsed.get("result"), str):
+        text = parsed["result"]
+    if isinstance(text, str):
+        match = re.search(r"Executor ID:\s*([^\s\\]+)", text)
         if match and match.group(1) not in ("N/A",):
             return match.group(1)
     return None
