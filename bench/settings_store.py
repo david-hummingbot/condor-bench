@@ -40,6 +40,13 @@ SETTINGS_FIELDS: list[dict[str, Any]] = [
         "hint": "For openai:… and some custom OpenAI-compat endpoints.",
     },
     {
+        "key": "NVIDIA_API_KEY",
+        "label": "NVIDIA NIM API key",
+        "group": "API keys",
+        "secret": True,
+        "hint": "For nvidia:… models (build.nvidia.com). Functional-only: latency is not scored.",
+    },
+    {
         "key": "GROQ_API_KEY",
         "label": "Groq API key",
         "group": "API keys",

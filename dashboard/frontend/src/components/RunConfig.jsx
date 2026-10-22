@@ -21,6 +21,10 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   const [category, setCategory] = useState('')
   const [riskLevels, setRiskLevels] = useState([])  // empty = all risk levels
   const [coreOnly, setCoreOnly] = useState(false)
+  const [splits, setSplits] = useState([])              // empty = dev + regression
+  const [taskCategories, setTaskCategories] = useState([])  // empty = all
+  const [trials, setTrials] = useState(1)
+  const [envMode, setEnvMode] = useState('live')
   const [datasets, setDatasets] = useState(null)
   const [staging, setStaging] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -31,7 +35,7 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
 
   useSavedForm(
     'benchmark',
-    { layers, domain, category, riskLevels, coreOnly },
+    { layers, domain, category, riskLevels, coreOnly, splits, taskCategories, trials, envMode },
     providers,
     cfg,
     hydrated,
@@ -74,6 +78,10 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
         setCategory(bench.category || '')
         setRiskLevels(bench.riskLevels || [])
         setCoreOnly(!!bench.coreOnly)
+        setSplits(bench.splits || [])
+        setTaskCategories(bench.taskCategories || [])
+        setTrials(bench.trials || 1)
+        setEnvMode(bench.envMode || 'live')
         if (!saved) setLoadError('Saved fields could not be loaded.')
         else if (saved.warning) setLoadError(saved.warning)
         setHydrated(!!saved)
@@ -220,6 +228,10 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
         category: category.trim() || null,
         risk_levels: riskLevels.length ? riskLevels : null,
         tags: coreOnly ? ['core'] : null,
+        splits: splits.length ? splits : null,
+        task_categories: taskCategories.length ? taskCategories : null,
+        trials,
+        env_mode: envMode,
       }
       const data = await createRun(body)
       onRunStarted(data.run_id)
@@ -231,8 +243,10 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
   }
 
   const modelCount = enabledModels().length
+  // The staging card describes the live target; a mock run is pre-flighted
+  // against the mock when it starts, so live staging trouble must not block it.
   const stagingBlocked =
-    (staging?.checks || []).some(c => c.blocking && !c.ok)
+    envMode === 'live' && (staging?.checks || []).some(c => c.blocking && !c.ok)
 
   /**
    * The three filters AND together, and the axes barely overlap — a Tool case's
@@ -252,7 +266,13 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
     const wantCategory = opts.category ?? category.trim()
     const wantRisk = opts.riskLevels ?? riskLevels
     const wantCore = opts.coreOnly ?? coreOnly
+    const wantSplits = opts.splits ?? splits
+    const wantTaskCats = opts.taskCategories ?? taskCategories
     return combos.filter(c =>
+      // Mock-only cases (faults live staging cannot stage) never run on live.
+      (envMode === 'mock' || !(c.lanes || []).length || (c.lanes || []).includes('live')) &&
+      (!wantSplits.length || wantSplits.includes(c.split)) &&
+      (!wantTaskCats.length || wantTaskCats.includes(c.task_category)) &&
       (!wantLayers.length || wantLayers.includes(c.layer)) &&
       (!wantDomain || c.domain === wantDomain) &&
       (!wantCategory || c.category === wantCategory) &&
@@ -391,6 +411,8 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
                           </div>
                         )}
 
+                        {p.note && <div className="run-meta" style={{ marginBottom: 8 }}>{p.note}</div>}
+
                         {p.needs_api_key && (
                           <div className="field">
                             <label>API Key</label>
@@ -525,6 +547,85 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
         </div>
 
         <div className="field" style={{ marginBottom: 14 }}>
+          <label>
+            Lane
+            <span className="run-meta">
+              {' '}— live is staging and the only routing source; mock is bench's stateful stand-in (CI, safety faults)
+            </span>
+          </label>
+          <div className="radio-row">
+            {['live', 'mock'].map(m => (
+              <button
+                key={m}
+                type="button"
+                className={`radio-btn ${envMode === m ? 'active' : ''}`}
+                onClick={() => setEnvMode(m)}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="field" style={{ marginBottom: 14 }}>
+          <label>
+            Trials per case
+            <span className="run-meta">
+              {' '}— each is its own row; 3 gives pass rates an interval worth reading
+            </span>
+          </label>
+          <input
+            className="input"
+            type="number"
+            min={1}
+            max={10}
+            value={trials}
+            onChange={e => setTrials(Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)))}
+            style={{ maxWidth: 90 }}
+          />
+        </div>
+
+        <div className="field" style={{ marginBottom: 14 }}>
+          <label>
+            Split {splits.length === 0 && <span className="run-meta">(dev + regression)</span>}
+            <span className="run-meta"> — holdout runs only from the CLI with --release</span>
+          </label>
+          <div className="radio-row">
+            {['regression', 'dev'].map(sp => (
+              <button
+                key={sp}
+                type="button"
+                className={`radio-btn ${splits.includes(sp) ? 'active' : ''}`}
+                onClick={() => setSplits(splits.includes(sp) ? splits.filter(x => x !== sp) : [...splits, sp])}
+                title={sp === 'regression' ? 'The release gate: state-changing cases verify their end state' : 'Everything else that still discriminates'}
+              >
+                {sp}
+                {datasets?.splits?.[sp] != null && <span className="radio-count">{datasets.splits[sp]}</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="field" style={{ marginBottom: 14 }}>
+          <label>Task category {taskCategories.length === 0 && <span className="run-meta">(all)</span>}</label>
+          <div className="radio-row">
+            {Object.entries(datasets?.task_categories || {}).map(([tc, n]) => (
+              <button
+                key={tc}
+                type="button"
+                className={`radio-btn ${taskCategories.includes(tc) ? 'active' : ''}`}
+                onClick={() => setTaskCategories(
+                  taskCategories.includes(tc) ? taskCategories.filter(x => x !== tc) : [...taskCategories, tc]
+                )}
+              >
+                {tc.replace(/_/g, ' ')}
+                <span className="radio-count">{n}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="field" style={{ marginBottom: 14 }}>
           <label>Dataset layers {layers.length === 0 && <span className="run-meta">(all)</span>}</label>
           <div className="radio-group">
             {LAYER_OPTS.map(o => (
@@ -618,6 +719,8 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
               <>
                 <strong>{modelCount}</strong> model{modelCount !== 1 ? 's' : ''}
                 {selectedCases != null && <> × <strong>{selectedCases}</strong> case{selectedCases !== 1 ? 's' : ''}</>}
+                {trials > 1 && <> × <strong>{trials}</strong> trials</>}
+                {envMode === 'mock' && <span className="run-meta"> · mock lane</span>}
               </>
             )}
           {/* Caught here rather than after Start: the backend's only answer to an

@@ -398,13 +398,10 @@ def _resolve_splits(split: str | None, release: bool) -> list[str] | None:
 
 def _cases_for_lane(cases: list) -> list:
     """Drop cases that cannot run on this lane, and say how many."""
-    from bench.dataset import runs_on_lane
-    from config import staging_config
+    from bench.trials import cases_for_lane
 
-    lane = str(staging_config().get("env_mode") or "live")
-    kept = [c for c in cases if runs_on_lane(c, lane)]
-    if len(kept) < len(cases):
-        skipped = sorted(c.id for c in cases if not runs_on_lane(c, lane))
+    kept, skipped = cases_for_lane(cases)
+    if skipped:
         console.print(
             f"[dim]{len(skipped)} case(s) need another lane and are not part of this "
             f"run: {', '.join(skipped)}[/dim]"
@@ -476,174 +473,81 @@ def _reset_acp_memory(model: str, run_id: str):
     return reset
 
 
-async def _run_cases(cases, model: str, store, trials: int = 1):
-    """Run and score every case *trials* times, returning (scorecards, responses).
+def _console_events():
+    """CLI reporting for :mod:`bench.trials` — one line per trial, then details."""
+    from bench.trials import TrialEvents
+    from config import PASS_THRESHOLD
 
-    A case's trials run back to back on the same market binding (bound once,
-    before this is called), so trial groups pair across runs. Responses are keyed
-    by :func:`bench.reporter.trial_key`. Warmup is checked once per case: a
-    failure costs every trial, and each trial gets its own skip card so the
-    run's row count stays cases × trials.
-    """
-    from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
-    from bench.probe_journal import ensure_probe_journal
-    from bench.scorer import with_trial
+    async def trial_started(case, trial, trials):
+        label = f" [dim]t{trial}/{trials}[/dim]" if trials > 1 else ""
+        console.print(f"  [dim]{case.id}[/dim] ({case.type}){label}", end=" ")
 
-    scorecards, responses = [], {}
-    for case in cases:
-        try:
-            journal_note = ensure_probe_journal(case)
-            warmup = await ensure_markets_for_case(case)
-        except Exception as exc:
-            console.print(f"  [dim]{case.id}[/dim] [red]ERROR: {exc}[/red]")
-            continue
-        if not warmup.ok:
-            card = warmup_failure_card(case, model, warmup)
-            scorecards.extend(with_trial(card, t) for t in range(1, trials + 1))
-            console.print(f"  [dim]{case.id}[/dim] ({case.type}) → [yellow]harness skip[/yellow]")
-            console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
-            continue
-        for note in ([journal_note] if journal_note else []) + warmup.notes:
-            console.print(f"      [dim]{note}[/dim]")
-        for trial in range(1, trials + 1):
-            label = f" [dim]t{trial}/{trials}[/dim]" if trials > 1 else ""
-            console.print(f"  [dim]{case.id}[/dim] ({case.type}){label}", end=" ")
-            await _run_trial(case, model, store, trial, scorecards, responses)
-    from bench.traces import flush
-
-    flush()
-    return scorecards, responses
-
-
-async def _run_trial(case, model: str, store, trial: int, scorecards: list, responses: dict) -> None:
-    """One trial of one case: run, score, record, and tear down what it created."""
-    from bench.cleanup import created_resources, teardown
-    from bench.client import run_case
-    from bench.dataset import is_mutating
-    from bench.reporter import trial_key
-    from bench.scorer import harness_card, score_case, timeout_card, with_trial
-    from bench.traces import case_span
-    from config import PASS_THRESHOLD, case_timeout_s, staging_config
-
-    if staging_config().get("env_mode") == "mock":
-        # Every trial starts from the fixture: the mock is stateful, and a trial
-        # must not inherit the executor the previous one created. A trial that
-        # cannot be seeded is retried once, then recorded as infra — never scored
-        # against a state it did not start from, and never silently dropped.
-        reason = _seed_mock_with_retry(getattr(case, "mock_faults", None) or [])
-        if reason:
-            scorecards.append(harness_card(case, model, reason, trial_idx=trial))
-            console.print(f"[yellow]harness: {reason}[/yellow]")
+    async def trial_done(case, trial, card, response, error):
+        if error and card.harness_artifact and not response:
+            colour = "red" if "timed out" in error or "harness error" in error else "yellow"
+            console.print(f"→ [{colour}]{error}[/{colour}]")
             return
-    try:
-        # Baseline first: the ceiling is sized from it, so a slow case gets room
-        # proportional to how slow it has always been.
-        baseline = store.load(case.id)
-        timeout_s = case_timeout_s(baseline.latency_s if baseline else None)
-        lane = str(staging_config().get("env_mode") or "live")
-        with case_span(case.id, trial=trial, model=model, lane=lane) as trace_link:
-            result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
-        baseline_latency = baseline.latency_s if baseline else result.latency_s
-        card = await score_case(case, result, baseline_latency, trial_idx=trial)
-        card.trace_id, card.trace_url = trace_link["trace_id"], trace_link["trace_url"]
-        if staging_config().get("env_mode") == "mock":
-            _flag_mock_gaps(card)
-        scorecards.append(card)
-        responses[trial_key(case.id, trial)] = result.response
-
         status = (
             f"[green]{card.composite:.2f}[/green]"
             if card.composite >= PASS_THRESHOLD
             else f"[red]{card.composite:.2f}[/red]"
         )
-        extra = ""
-        if card.usage.get("total_tokens"):
-            extra = f", {card.usage['total_tokens']:,} tok"
-        console.print(f"→ {status} ({result.latency_s:.1f}s{extra})")
+        extra = f", {card.usage['total_tokens']:,} tok" if card.usage.get("total_tokens") else ""
+        console.print(f"→ {status} ({card.latency_s:.1f}s{extra})")
         if card.harness_artifact:
             console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
 
-        # Undo what the trial created, whatever its score — an aborted half-created
-        # resource still needs removing. Keyed on the trace as well as the case's
-        # risk level: a read-only case is exactly where a model that falls for a
-        # prompt injection creates something nobody planned to clean up.
-        if is_mutating(case) or created_resources(result):
-            report = await teardown(
-                result,
-                model,
-                agent_slug=getattr(case, "agent_slug", None),
-                tick=getattr(case, "type", "") == "tick",
+    async def cleanup(case, trial, report):
+        if report.removed:
+            console.print(f"      [dim]cleaned up {len(report.removed)} resource(s)[/dim]")
+        for row in report.kept_positions:
+            console.print(
+                f"      [yellow]position kept: {row.get('tool')} "
+                f"{row.get('identifier')} — {row.get('note')}[/yellow]"
             )
-            if report.removed:
-                console.print(f"      [dim]cleaned up {len(report.removed)} resource(s)[/dim]")
-            for row in report.kept_positions:
-                console.print(
-                    f"      [yellow]position kept: {row.get('tool')} "
-                    f"{row.get('identifier')} — {row.get('note')}[/yellow]"
-                )
-            for row in report.failed + report.manual:
-                console.print(
-                    f"      [yellow]left behind: {row.get('tool')} "
-                    f"{row.get('identifier')} — {row.get('error') or row.get('reason', 'manual')}[/yellow]"
-                )
-    except asyncio.TimeoutError:
-        # Record it. Appending nothing made the case vanish from the run entirely,
-        # so a thinned domain looked like a domain nobody had asked about.
-        baseline = store.load(case.id)
-        base_s = baseline.latency_s if baseline else 0.0
-        scorecards.append(
-            with_trial(timeout_card(case, model, case_timeout_s(base_s or None), base_s), trial)
-        )
-        console.print(
-            f"[red]TIMEOUT after {case_timeout_s(base_s or None):.0f}s — "
-            "recorded as a harness artifact[/red]"
-        )
-    except Exception as exc:
-        # Recorded, not dropped: a vanished trial makes thin evidence look complete.
-        scorecards.append(
-            harness_card(case, model, f"harness error: {type(exc).__name__}: {exc}", trial_idx=trial)
-        )
-        console.print(f"[red]ERROR: {exc} — recorded as a harness artifact[/red]")
+        for row in report.failed + report.manual:
+            console.print(
+                f"      [yellow]left behind: {row.get('tool')} "
+                f"{row.get('identifier')} — {row.get('error') or row.get('reason', 'manual')}[/yellow]"
+            )
+
+    async def note(case, text, level):
+        style = {"warn": "yellow", "error": "red"}.get(level, "dim")
+        console.print(f"      [{style}]{text}[/{style}]")
+
+    async def before_trial(case, trial, trials):
+        return None
+
+    return TrialEvents(
+        before_trial=before_trial, trial_started=trial_started,
+        trial_done=trial_done, cleanup=cleanup, note=note,
+    )
+
+
+async def _run_cases(cases, model: str, store, trials: int = 1):
+    """Run and score every case *trials* times — see :func:`bench.trials.run_cases`."""
+    from bench.trials import run_cases
+
+    return await run_cases(cases, model, store, trials, events=_console_events())
+
+
+async def _run_trial(case, model: str, store, trial: int, scorecards: list, responses: dict) -> None:
+    """One trial of one case — see :func:`bench.trials.run_trial`."""
+    from bench.trials import run_trial
+
+    await run_trial(case, model, store, trial, scorecards, responses, _console_events())
 
 
 def _seed_mock_with_retry(faults: list | None = None, attempts: int = 2) -> str | None:
-    """Reset the mock to its fixture and arm the case's faults.
+    from bench.trials import seed_mock
 
-    Returns why seeding failed, or None on success.
-    """
-    from bench.lanes import arm_mock_faults, reset_mock
-
-    last = ""
-    for _ in range(attempts):
-        try:
-            reset_mock()
-            arm_mock_faults(faults or [])
-            return None
-        except Exception as exc:  # noqa: BLE001 — any failure means "not seeded"
-            last = f"{type(exc).__name__}: {exc}"
-    return f"mock could not be reset to its fixture after {attempts} attempts ({last})"
+    return seed_mock(faults, attempts)
 
 
 def _flag_mock_gaps(card) -> None:
-    """A trial that hit an endpoint the mock does not implement measured the mock.
+    from bench.trials import flag_mock_gaps
 
-    The model got a 501 for a call that would have worked on a real API, so the row
-    is a harness artifact — excluded and named — not a model failure.
-    """
-    from bench.lanes import mock_state
-
-    try:
-        gaps = mock_state().get("unhandled") or []
-    except Exception:  # noqa: BLE001 — a dead mock is caught by the next reset
-        return
-    # A forbidden call is the model's whatever else the mock lacked: excluding it
-    # as a harness artifact would launder an unsafe action out of the unsafe rate.
-    if gaps and not card.harness_artifact and not card.forbidden_violations:
-        card.harness_artifact = (
-            f"mock lane does not implement {', '.join(gaps[:4])}"
-            + (f" (+{len(gaps) - 4} more)" if len(gaps) > 4 else "")
-            + " — run this case on the live lane"
-        )
+    flag_mock_gaps(card)
 
 
 def _order_cases(cases: list, order: str, store) -> list:

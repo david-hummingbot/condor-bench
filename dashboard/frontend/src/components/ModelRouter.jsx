@@ -31,6 +31,7 @@ export default function ModelRouter() {
 
   const recs = routing?.recommendations || {}
   const unmet = routing?.unmet_domains || {}
+  const frontiers = routing?.frontiers || {}
   const snippet = routing?.condor_config_snippet || {}
   const snippetText = Object.entries(snippet).map(([k, v]) => `${k} = ${v}`).join('\n')
 
@@ -75,10 +76,13 @@ export default function ModelRouter() {
           </button>
         </div>
         <div className="matrix-note">
-          Each domain gets the <strong>smallest model that passes it</strong> — not the
-          best-scoring one. Cloud models sort last, so a local model that passes always
-          wins. Token cost never rejects a passing model; “prefer lower tokens” only
-          reorders models of the same size.
+          Each domain gets the <strong>cheapest model per success</strong> whose pass rate
+          clears the bar <strong>at the low end of its 95% interval</strong>, with
+          <strong> zero unsafe actions</strong> — not the best-scoring one. A clean 4/4 has a
+          lower bound near 51%, so a domain needs roughly 16 clean scored rows (e.g. 3
+          trials) before it can pass at 80%. Local models count as free and the smaller
+          one wins a cost tie; an unpriced cloud model sorts last. “Prefer lower tokens”
+          only reorders exact ties.
         </div>
       </div>
 
@@ -98,9 +102,10 @@ export default function ModelRouter() {
                     <th>Model</th>
                     <th>Size</th>
                     <th>Pass</th>
-                    <th>Cases</th>
+                    <th title="Wilson 95% interval over every scored trial">95% CI</th>
+                    <th>Rows</th>
                     <th>Avg tokens</th>
-                    <th>Avg cost</th>
+                    <th title="Total spend over successes — failures count against it">Cost / success</th>
                     <th>Why</th>
                   </tr>
                 </thead>
@@ -113,9 +118,10 @@ export default function ModelRouter() {
                       </td>
                       <td>{fmtSize(rec.params_b)}</td>
                       <td style={{ color: 'var(--green)' }}>{fmtPct(rec.pass_rate)}</td>
+                      <td className="muted">{fmtCi(rec.pass_rate_ci)}</td>
                       <td>{rec.scored}{rec.excluded ? ` (+${rec.excluded} excl)` : ''}</td>
                       <td>{fmtTokens(rec.avg_total_tokens)}</td>
-                      <td>{fmtCost(rec.avg_cost_usd)}</td>
+                      <td>{rec.cost_per_success != null ? fmtCost(rec.cost_per_success) : <span className="muted">free / unpriced</span>}</td>
                       <td style={{ textAlign: 'left', fontSize: 12, color: 'var(--muted)' }}>
                         {rec.rationale}
                         {rec.no_local_passed && (
@@ -136,22 +142,24 @@ export default function ModelRouter() {
             <div className="card">
               <div className="card-title">Unmet domains</div>
               <div className="matrix-note" style={{ marginTop: -8, marginBottom: 14 }}>
-                A gap that was measured, not a missing run. “Insufficient evidence” means the
-                dataset is too thin here to decide — a different finding from “the models
-                aren't good enough”.
+                A gap that was measured, not a missing run. <strong>Not yet passing</strong>: a
+                model's interval straddles the bar — more trials could settle it either way.
+                <strong> Failing</strong>: the interval sits below the bar, or a model made an
+                unsafe call. <strong>Insufficient evidence</strong>: too few scored rows to decide.
               </div>
               {Object.entries(unmet).map(([domain, gap]) => (
                 <div key={domain} className="unmet-row">
                   <div className="unmet-head">
                     <span className="model-cell">{domain}</span>
-                    <span className={`unmet-tag ${gap.insufficient_evidence ? 'thin' : 'fail'}`}>
-                      {gap.insufficient_evidence ? 'insufficient evidence' : 'no model passed'}
+                    <span className={`unmet-tag ${gapClass(gap)}`}>
+                      {gapLabel(gap)}
                     </span>
                   </div>
                   <div className="run-meta">{gap.reason}</div>
                   {gap.best_attempt?.model && (
                     <div className="run-meta">
                       best attempt: {gap.best_attempt.model} at {fmtPct(gap.best_attempt.pass_rate)}
+                      {gap.best_attempt.pass_rate_ci && ` (95% CI ${fmtCi(gap.best_attempt.pass_rate_ci)})`}
                       {' '}({gap.best_attempt.scored} case{gap.best_attempt.scored !== 1 ? 's' : ''})
                     </div>
                   )}
@@ -164,6 +172,51 @@ export default function ModelRouter() {
                       ))}
                     </div>
                   )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {Object.keys(frontiers).length > 0 && (
+            <div className="card">
+              <div className="card-title">Cost-per-success frontier</div>
+              <div className="matrix-note" style={{ marginTop: -8, marginBottom: 14 }}>
+                Every ranked model per domain: success rate against what each success costs.
+                <strong> On frontier</strong> means no other model is both at least as successful
+                and no more expensive. Local models count as free; an unpriced cloud model has no
+                position on the cost axis.
+              </div>
+              {Object.entries(frontiers).map(([domain, rows]) => (
+                <div key={domain} style={{ marginBottom: 14 }}>
+                  <div className="model-cell" style={{ marginBottom: 4 }}>{domain}</div>
+                  <table className="lb-table">
+                    <thead>
+                      <tr>
+                        <th>Model</th>
+                        <th>Pass</th>
+                        <th>95% CI</th>
+                        <th>Rows</th>
+                        <th>Cost / success</th>
+                        <th>Unsafe</th>
+                        <th>Status</th>
+                        <th>Frontier</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map(r => (
+                        <tr key={r.model}>
+                          <td style={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>{r.model}</td>
+                          <td>{fmtPct(r.pass_rate)}</td>
+                          <td className="muted">{fmtCi(r.pass_rate_ci)}</td>
+                          <td>{r.scored}</td>
+                          <td>{r.unpriced ? <span className="muted">{r.provider === 'cloud' ? 'unpriced' : 'free'}</span> : fmtCost(r.cost_per_success)}</td>
+                          <td style={{ color: r.unsafe ? 'var(--red)' : undefined }}>{r.unsafe || 0}</td>
+                          <td><span className={`unmet-tag ${statusClass(r.status)}`}>{(r.status || '').replace(/_/g, ' ')}</span></td>
+                          <td>{r.on_frontier ? '✓' : ''}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               ))}
             </div>
@@ -250,6 +303,7 @@ export default function ModelRouter() {
                 until the mock execution path was removed; with nothing left to read it
                 printed a hardcoded "any" on every run. */}
             <div className="score-chips">
+              <Chip label="Rule" value="Wilson lower bound ≥ bar, 0 unsafe, cheapest per success" />
               <Chip label="Min pass rate" value={fmtPct(routing.criteria?.min_pass_rate)} />
               <Chip label="Min cases" value={String(routing.criteria?.min_cases)} />
               <Chip label="Case pass bar" value={String(routing.criteria?.pass_threshold)} />
@@ -342,4 +396,28 @@ function Chip({ label, value }) {
       <span className="chip-val">{value}</span>
     </span>
   )
+}
+
+
+const fmtCi = ci => (ci ? `${fmtPct(ci[0])}–${fmtPct(ci[1])}` : '—')
+
+// Older routing files carry only `insufficient_evidence`; newer ones name the status.
+function gapStatus(gap) {
+  return gap.status || (gap.insufficient_evidence ? 'insufficient_evidence' : 'failing')
+}
+
+function gapLabel(gap) {
+  return {
+    not_yet_passing: 'not yet passing',
+    failing: 'failing',
+    insufficient_evidence: 'insufficient evidence',
+  }[gapStatus(gap)] || gapStatus(gap)
+}
+
+function gapClass(gap) {
+  return statusClass(gapStatus(gap))
+}
+
+function statusClass(status) {
+  return { passing: 'pass', not_yet_passing: 'pending', insufficient_evidence: 'thin' }[status] || 'fail'
 }
