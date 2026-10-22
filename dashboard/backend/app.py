@@ -945,8 +945,40 @@ async def get_providers():
         if p.get("registry_models"):
             prefix = f"{p['id']}:"
             p = {**p, "models": [k[len(prefix):] for k in registry if k.startswith(prefix)]}
+        p = {**p, "settings_key": _settings_key_display(p)}
         out.append(p)
     return {"providers": out}
+
+
+def _settings_key_display(provider: dict) -> str | None:
+    """The masked key Settings already holds for a cloud provider, or None.
+
+    Masked, never the value: Settings does not send secrets to the browser, and
+    the run form does not need one — a run with no key typed uses the server's
+    env (which a Settings save updates), so showing that it is there is enough.
+    """
+    from bench.settings_store import _mask
+
+    if provider.get("kind") != "cloud":
+        return None
+    var = _PROVIDER_ENV.get(provider["id"])
+    value = os.environ.get(var or "") if var else ""
+    return _mask(value) if value else None
+
+
+def _settings_key_for(base_url: str, provider: str) -> str:
+    """The Settings key for *provider*, but only for that provider's own endpoint.
+
+    A caller-chosen URL never gets the install's key (the SEC-630 rule): the form
+    sends the base URL, so it is checked against the catalogue's fixed api_base.
+    """
+    spec = next((p for p in PROVIDERS if p["id"] == provider), None)
+    var = _PROVIDER_ENV.get(provider)
+    if not spec or not var or spec.get("kind") != "cloud" or not spec.get("api_base"):
+        return ""
+    if base_url.rstrip("/") != str(spec["api_base"]).rstrip("/"):
+        return ""
+    return os.environ.get(var, "")
 
 
 @app.get("/api/acp-models")
@@ -1034,6 +1066,9 @@ def _fallback_model_urls(base_url: str, provider: str = "") -> list[str]:
 @app.get("/api/provider-models")
 async def get_provider_models(base_url: str, api_key: str = "", provider: str = ""):
     headers: dict[str, str] = {}
+    # No key typed in the form: use the one saved in Settings, for that provider's
+    # own endpoint only.
+    api_key = api_key or _settings_key_for(base_url, provider)
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     urls = [_openai_compat_models_url(base_url), *_fallback_model_urls(base_url, provider)]

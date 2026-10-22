@@ -210,3 +210,47 @@ def test_the_form_remembers_lane_trials_split_and_category():
                 {"taskCategories": ["nope"]}):
         with pytest.raises(FormStateError):
             _clean_benchmark(bad)
+
+
+# ── Settings keys in the run form ──────────────────────────────────────────────
+def test_the_run_form_sees_a_settings_key_masked_never_raw(client, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secretvalue1234")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    providers = {p["id"]: p for p in client.get("/api/providers").json()["providers"]}
+    assert providers["openrouter"]["settings_key"] == "••••1234"
+    assert providers["groq"]["settings_key"] is None
+    assert providers["ollama"]["settings_key"] is None, "local providers take no key"
+    assert "secretvalue" not in client.get("/api/providers").text
+
+
+def test_a_settings_key_only_goes_to_that_providers_own_endpoint(monkeypatch):
+    from dashboard.backend.app import _settings_key_for
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secretvalue1234")
+    assert _settings_key_for("https://openrouter.ai/api/v1", "openrouter") == "sk-or-v1-secretvalue1234"
+    assert _settings_key_for("https://openrouter.ai/api/v1/", "openrouter") == "sk-or-v1-secretvalue1234"
+    # A caller-chosen URL never gets the install's key.
+    assert _settings_key_for("https://evil.example/v1", "openrouter") == ""
+    assert _settings_key_for("https://openrouter.ai/api/v1", "custom") == ""
+
+
+def test_model_listing_falls_back_to_the_settings_key(client, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secretvalue1234")
+    seen = {}
+
+    async def fake_get(self, url, headers=None, **kw):
+        seen["auth"] = (headers or {}).get("Authorization")
+        return httpx.Response(200, json={"data": [{"id": "openai/gpt-4o-mini"}]},
+                              request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    r = client.get("/api/provider-models", params={"base_url": "https://openrouter.ai/api/v1",
+                                                   "provider": "openrouter"})
+    assert r.status_code == 200 and "openai/gpt-4o-mini" in r.json()["models"]
+    assert seen["auth"] == "Bearer sk-or-v1-secretvalue1234"
+
+    r = client.get("/api/provider-models", params={"base_url": "https://evil.example/v1",
+                                                   "provider": "openrouter"})
+    assert seen["auth"] is None, "an unknown URL got the saved key"

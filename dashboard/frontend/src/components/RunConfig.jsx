@@ -416,13 +416,28 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
                         {p.needs_api_key && (
                           <div className="field">
                             <label>API Key</label>
+                            {/* A key saved in Settings is used whenever nothing is typed
+                                here; it is shown masked because Settings never sends a
+                                secret to the browser. Typing overrides it for this form
+                                (and is remembered); clearing the field falls back. */}
                             <input
                               type="password"
                               className="input"
-                              placeholder={p.key_hint || 'API key...'}
+                              placeholder={
+                                p.settings_key
+                                  ? `${p.settings_key} — saved in Settings`
+                                  : (p.key_hint || 'API key...')
+                              }
                               value={state.apiKey}
                               onChange={e => update(p.id, { apiKey: e.target.value })}
                             />
+                            {p.settings_key && (
+                              <span className="run-meta">
+                                {state.apiKey
+                                  ? 'Using the key typed here instead of the one in Settings. Clear the field to go back to Settings.'
+                                  : `Using the key saved in Settings (${p.settings_key}). Type a key here to override it for this form.`}
+                              </span>
+                            )}
                           </div>
                         )}
 
