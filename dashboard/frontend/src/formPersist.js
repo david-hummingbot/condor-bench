@@ -30,7 +30,10 @@ function writeMemory(serialized) {
 
 export const EMPTY_FORM = {
   providers: {},
-  benchmark: { layers: [], domain: '', category: '', riskLevels: [], coreOnly: false },
+  benchmark: {
+    layers: [], domain: '', category: '', riskLevels: [], coreOnly: false,
+    splits: [], taskCategories: [], trials: 1, envMode: 'live',
+  },
   prompt: { question: '', turns: [], expectedTools: '', agentSlug: '' },
 }
 

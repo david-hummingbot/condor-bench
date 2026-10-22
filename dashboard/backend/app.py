@@ -29,7 +29,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -37,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
@@ -86,6 +86,15 @@ PROVIDERS = [
                 "meta-llama/llama-3.3-70b-instruct", "qwen/qwen-2.5-72b-instruct",
                 "mistralai/mistral-small-3.1-24b-instruct"],
      "key_hint": "sk-or-..."},
+    # NVIDIA NIM: functional-only (latency is excluded — see bench/nim.py). Not
+    # `fetch_models`: the catalogue lists models an account cannot call (404), so the
+    # picker offers the registry's nvidia:* entries, which passed `runner.py nim-smoke`.
+    {"id": "nvidia", "label": "NVIDIA NIM", "kind": "cloud",
+     "needs_api_key": True, "supports_url": False,
+     "api_base": "https://integrate.api.nvidia.com/v1",
+     "models": [], "registry_models": True,
+     "key_hint": "nvapi-... (blank uses NVIDIA_API_KEY from .env)",
+     "note": "Functional-only: latency is not scored. Add a model with `runner.py nim-smoke` first."},
     {"id": "groq", "label": "Groq", "kind": "cloud",
      "needs_api_key": True, "supports_url": False, "fetch_models": True,
      "api_base": "https://api.groq.com/openai/v1",
@@ -108,6 +117,7 @@ _PROVIDER_ENV: dict[str, str] = {
     "openrouter": "OPENROUTER_API_KEY",
     "groq": "GROQ_API_KEY",
     "custom": "OPENAI_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",
 }
 
 
@@ -215,25 +225,44 @@ async def _await_resume(run_id: str, state: dict) -> None:
 
 
 async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
+    """A dashboard run, through the same trial runner as the CLI (bench.trials).
+
+    The dashboard used to carry its own case loop, and missed every fix that
+    landed in the CLI's: trials, the mock lane's per-trial seeding and faults,
+    mock-gap flagging, recording a crashed case instead of dropping it, trace
+    spans. Only reporting differs now — events stream as SSE instead of printing.
+    """
     from bench.baseline import BaselineStore
-    from bench.cleanup import created_resources, teardown
-    from bench.client import case_input_text, run_case
-    from bench.dataset import case_prompt_map, filter_cases, is_mutating, load_all_cases
+    from bench.client import case_input_text
+    from bench.dataset import case_prompt_map, filter_cases, load_all_cases
     from bench.market_resolver import bindings_summary, prepare_cases
-    from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.mcp_provider import target_banner
-    from bench.probe_journal import ensure_probe_journal
     from bench.reporter import save_run
     from bench.manifest import build_manifest
-    from bench.scorer import score_case, timeout_card
-    from config import case_timeout_s
+    from bench.trials import TrialEvents, cases_for_lane, run_cases
 
     state = _active_runs[run_id]
     state["status"] = "running"
+    lane_backup = os.environ.get("BENCH_ENV_MODE")
 
     try:
+        # The lane is the process env for the run's duration — staging_config,
+        # the manifest and every MCP subprocess read it from there. One run at a
+        # time (create_run refuses a second), so setting it here is safe.
+        lane = req.env_mode or "live"
+        os.environ["BENCH_ENV_MODE"] = lane
+        if lane == "mock":
+            from bench.lanes import ensure_mock_running
+
+            handle = await asyncio.to_thread(ensure_mock_running)
+            await _emit(run_id, {
+                "type": "note", "level": "info",
+                "text": f"mock lane — hummingbot-api mock at {handle.api_url}"
+                + (" (started in-process)" if handle.started else ""),
+            })
+
         # Fail closed before the first case, not per case: a run that would trade
-        # on the wrong API must not start at all.
+        # on the wrong API must not start at all. On the mock lane this checks the mock.
         from bench.staging_health import a_assert_ready
 
         await a_assert_ready()
@@ -247,6 +276,10 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
         elif req.tick_only:
             layers = ["tick"]
 
+        if req.splits and "holdout" in req.splits:
+            # Holdout runs only from the CLI with --release; a task the dashboard
+            # iteration loop has seen is no longer held out.
+            raise ValueError("The holdout split is not available from the dashboard.")
         cases = filter_cases(
             all_cases,
             domain=req.domain,
@@ -254,7 +287,16 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             layers=layers,
             risk_levels=req.risk_levels,
             tags=req.tags,
+            splits=req.splits,
+            task_categories=req.task_categories,
         )
+        cases, skipped = cases_for_lane(cases, lane)
+        if skipped:
+            await _emit(run_id, {
+                "type": "note", "level": "info",
+                "text": f"{len(skipped)} case(s) need another lane and are not part of "
+                f"this run: {', '.join(skipped)}",
+            })
         if not cases:
             raise ValueError("No cases matched the selected filters.")
 
@@ -288,13 +330,16 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                 baselines[case.id] = record.latency_s
         cases = order_cases(cases, "easiest-first", baselines=baselines)
 
-        total = len(req.models) * len(cases)
+        trials = max(1, int(req.trials or 1))
+        total = len(req.models) * len(cases) * trials
         state["total"] = total
         await _emit(run_id, {
             "type": "run_started",
             "total": total,
             "models": len(req.models),
             "cases_per_model": len(cases),
+            "trials": trials,
+            "env_mode": lane,
             "target_banner": target_banner(),
         })
 
@@ -307,7 +352,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
             await _emit(run_id, {"type": "model_started", "model": model_key})
 
             env_backup: dict[str, str | None] = {}
-            scorecards = []
+            scorecards: list = []
             responses: dict[str, str] = {}
 
             def _persist(*, partial: bool):
@@ -320,16 +365,17 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                 """
                 if not scorecards:
                     return None
+                scored_ids = list(dict.fromkeys(sc.case_id for sc in scorecards))
                 pin = build_manifest(
                     run_type="adhoc",
                     # The cases actually scored, not the ones planned: a pin that
                     # claimed all 93 on a run cancelled at 12 would misdescribe
                     # its own coverage.
-                    case_ids=[sc.case_id for sc in scorecards]
-                    if partial
-                    else [c.id for c in cases],
+                    case_ids=scored_ids if partial else [c.id for c in cases],
                     models=[norm_key],
                     shared_loaded=True,
+                    trials=trials,
+                    cases=[c for c in cases if c.id in set(scored_ids)] if partial else cases,
                 )
                 # No A/B preset behind a dashboard run: kept out of Matrix/Router
                 # (see config.summary_counts_for_matrix).
@@ -339,7 +385,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                 if partial:
                     pin["partial"] = True
                     pin["cases_planned"] = len(cases)
-                    pin["cases_scored"] = len(scorecards)
+                    pin["cases_scored"] = len(scored_ids)
                 return save_run(
                     norm_key,
                     scorecards,
@@ -349,110 +395,77 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     extra_summary=pin,
                 )
 
+            async def before_trial(case, trial, n):
+                # Gate before the trial starts, so a pause requested mid-trial takes
+                # effect once that trial has finished and been cleaned up.
+                state["next_case"] = case.id
+                await _await_resume(run_id, state)
+
+            async def trial_started(case, trial, n):
+                state["current_case"] = case.id
+                await _emit(run_id, {
+                    "type": "case_started",
+                    "model": model_key,
+                    "case_id": case.id,
+                    "trial": trial,
+                    "trials": n,
+                    "case_type": case.type,
+                    "domain": case.domain,
+                    "risk_level": case.risk_level,
+                    "case_number": done_count + 1,
+                    "total": total,
+                    "question": case_input_text(case),
+                })
+
+            async def trial_done(case, trial, card, response, error):
+                nonlocal done_count
+                done_count += 1
+                question = case_input_text(case)
+                sc_dict = card.as_dict()
+                sc_dict["question"] = question
+                await _emit(run_id, {
+                    "type": "case_done",
+                    "model": model_key,
+                    "case_id": case.id,
+                    "trial": trial,
+                    "scorecard": sc_dict,
+                    "response": response[:1000] if response else "",
+                    "question": question,
+                    "error": error,
+                    "completed": done_count,
+                    "total": total,
+                })
+
+            async def cleanup(case, trial, report):
+                # kept_positions leaves `clean` true on purpose — teardown did what
+                # it was asked — but a position still held on staging is exactly
+                # what somebody watching this run needs to see.
+                if not report.clean or report.kept_positions:
+                    await _emit(run_id, {
+                        "type": "cleanup",
+                        "case_id": case.id,
+                        "trial": trial,
+                        "model": model_key,
+                        "report": report.as_dict(),
+                    })
+
+            async def note(case, text, level):
+                await _emit(run_id, {"type": "note", "level": level, "case_id": case.id, "text": text})
+
+            events = TrialEvents(
+                before_trial=before_trial, trial_started=trial_started,
+                trial_done=trial_done, cleanup=cleanup, note=note,
+            )
+
             try:
                 for k, v in env_vars.items():
                     env_backup[k] = os.environ.get(k)
                     os.environ[k] = v
 
-                for case in cases:
-                    # Gate before the case starts, so a pause requested mid-case
-                    # takes effect once that case has finished and been cleaned up.
-                    state["next_case"] = case.id
-                    await _await_resume(run_id, state)
-
-                    state["current_case"] = case.id
-                    question = case_input_text(case)
-                    await _emit(run_id, {
-                        "type": "case_started",
-                        "model": model_key,
-                        "case_id": case.id,
-                        "case_type": case.type,
-                        "domain": case.domain,
-                        "risk_level": case.risk_level,
-                        "case_number": done_count + 1,
-                        "total": total,
-                        "question": question,
-                    })
-
-                    error: str | None = None
-                    sc_dict: dict = {}
-                    response = ""
-                    try:
-                        ensure_probe_journal(case)
-                        warmup = await ensure_markets_for_case(case)
-                        if not warmup.ok:
-                            sc = warmup_failure_card(case, norm_key, warmup)
-                            sc_dict = sc.as_dict()
-                            sc_dict["question"] = question
-                            scorecards.append(sc)
-                        else:
-                            # Baseline first: it sizes the ceiling, so a case gets room
-                            # proportional to how slow it has always been.
-                            baseline = store.load(case.id)
-                            timeout_s = case_timeout_s(
-                                baseline.latency_s if baseline else None
-                            )
-                            result = await asyncio.wait_for(
-                                run_case(case, norm_key), timeout=timeout_s
-                            )
-                            baseline_latency = (
-                                baseline.latency_s if baseline else result.latency_s
-                            )
-                            sc = await score_case(case, result, baseline_latency)
-                            sc_dict = sc.as_dict()
-                            sc_dict["question"] = question
-                            response = result.response
-                            scorecards.append(sc)
-                            responses[case.id] = response
-
-                            # Trace as well as risk level: see runner._run_trial.
-                            if is_mutating(case) or created_resources(result):
-                                report = await teardown(
-                                    result,
-                                    norm_key,
-                                    agent_slug=getattr(case, "agent_slug", None),
-                                    tick=getattr(case, "type", "") == "tick",
-                                )
-                                # kept_positions leaves `clean` true on purpose —
-                                # teardown did what it was asked — but a position
-                                # still held on staging is exactly what somebody
-                                # watching this run needs to see.
-                                if not report.clean or report.kept_positions:
-                                    await _emit(run_id, {
-                                        "type": "cleanup",
-                                        "case_id": case.id,
-                                        "model": model_key,
-                                        "report": report.as_dict(),
-                                    })
-                    except asyncio.CancelledError:
-                        raise
-                    except asyncio.TimeoutError:
-                        # Record a card, not just an event: the dashboard already showed
-                        # the error, but the saved run had no row for the case at all, so
-                        # a thinned domain left no trace in the matrix.
-                        base = store.load(case.id)
-                        base_s = base.latency_s if base else 0.0
-                        limit = case_timeout_s(base_s or None)
-                        sc = timeout_card(case, norm_key, limit, base_s)
-                        sc_dict = sc.as_dict()
-                        sc_dict["question"] = question
-                        scorecards.append(sc)
-                        error = f"timed out after {limit:.0f}s"
-                    except Exception as exc:
-                        error = str(exc)
-
-                    done_count += 1
-                    await _emit(run_id, {
-                        "type": "case_done",
-                        "model": model_key,
-                        "case_id": case.id,
-                        "scorecard": sc_dict,
-                        "response": response[:1000] if response else "",
-                        "question": question,
-                        "error": error,
-                        "completed": done_count,
-                        "total": total,
-                    })
+                await run_cases(
+                    cases, norm_key, store, trials,
+                    scorecards=scorecards, responses=responses, events=events,
+                )
 
                 run_dir = _persist(partial=False)
                 if run_dir is not None:
@@ -492,6 +505,10 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
         state["status"] = "failed"
         await _emit(run_id, {"type": "run_done", "status": "failed", "error": str(exc)})
     finally:
+        if lane_backup is None:
+            os.environ.pop("BENCH_ENV_MODE", None)
+        else:
+            os.environ["BENCH_ENV_MODE"] = lane_backup
         for q in list(state.get("listeners", [])):
             await q.put(None)
 
@@ -748,13 +765,20 @@ async def get_datasets():
     # other axis (a `tool:leverage` case is destructive, a `tool:servers` one is
     # read-only), so a separate count would let the form offer "Tools + read_only"
     # and then report a total that ignored the risk selection.
-    combos: dict[tuple[str, str, str, str], dict[str, int]] = {}
+    # Split, task category and lane join the key for the same reason: each is a
+    # filter that cuts across the others, and the count must honour all of them.
+    from bench.dataset import case_split, case_task_category
+
+    combos: dict[tuple[str, ...], dict[str, int]] = {}
     for case in cases:
         key = (
             str(case.type),
             str(case.domain),
             str(case.category or ""),
             str(case.risk_level),
+            case_split(case),
+            case_task_category(case),
+            ",".join(getattr(case, "lanes", None) or []),
         )
         slot = combos.setdefault(key, {"count": 0, "core_count": 0})
         slot["count"] += 1
@@ -773,11 +797,19 @@ async def get_datasets():
                 "domain": domain,
                 "category": category,
                 "risk_level": risk,
+                "split": split,
+                "task_category": task_category,
+                # Empty means both lanes; "mock" marks the cases a live run skips.
+                "lanes": lanes.split(",") if lanes else [],
                 "count": slot["count"],
                 "core_count": slot["core_count"],
             }
-            for (layer, domain, category, risk), slot in sorted(combos.items())
+            for (layer, domain, category, risk, split, task_category, lanes), slot in sorted(
+                combos.items()
+            )
         ],
+        "splits": _tally(case_split),
+        "task_categories": _tally(case_task_category),
         "routing_domains": sorted(
             {c.domain for c in cases if is_routing_domain(c.domain)}
         ),
@@ -904,7 +936,17 @@ async def api_put_form_state(request: Request):
 
 @app.get("/api/providers")
 async def get_providers():
-    return {"providers": PROVIDERS}
+    # Providers marked `registry_models` list the registry's models for their prefix.
+    from bench.matrix import load_models
+
+    registry = [m.key for m in load_models()]
+    out = []
+    for p in PROVIDERS:
+        if p.get("registry_models"):
+            prefix = f"{p['id']}:"
+            p = {**p, "models": [k[len(prefix):] for k in registry if k.startswith(prefix)]}
+        out.append(p)
+    return {"providers": out}
 
 
 @app.get("/api/acp-models")
@@ -1039,6 +1081,13 @@ class RunRequest(BaseModel):
     tags: list[str] | None = None
     consult_only: bool = False
     tick_only: bool = False
+    # Task-bank filters. Holdout is refused: it runs only from the CLI (--release).
+    splits: list[str] | None = None
+    task_categories: list[str] | None = None
+    # Trials per case; each is its own row, and pass rates carry intervals over them.
+    trials: int = Field(1, ge=1, le=10)
+    # live (staging) | mock (bench's stateful stand-in, started in-process if needed).
+    env_mode: Literal["live", "mock"] = "live"
 
 
 class CustomPromptRequest(BaseModel):
@@ -1390,6 +1439,22 @@ async def api_validate_environment(env_id: str):
         raise HTTPException(404, str(exc)) from exc
 
 
+@app.get("/api/presets")
+async def api_presets():
+    """Experiment presets (experiments/*.yaml) a suite run can apply."""
+    from bench.presets import PresetError, list_presets, load_preset
+
+    out = []
+    for name in list_presets():
+        try:
+            p = load_preset(name)
+            out.append({"name": name, "experiment_type": p["experiment_type"], "vary": p["vary"],
+                        "freeze": p["freeze"], "trials": p["trials"]})
+        except PresetError as exc:
+            out.append({"name": name, "error": str(exc)})
+    return {"presets": out}
+
+
 @app.get("/api/suites")
 async def api_list_suites():
     from bench.suites import list_suites
@@ -1541,6 +1606,11 @@ class SuiteRunRequest(BaseModel):
     case_ids: list[str] | None = None
     environment_ids: list[str] | None = None
     models: list[ModelConfig] | None = None
+    # None keeps the suite's own setting (its `trials`, its saved `preset`).
+    trials: int | None = Field(None, ge=1, le=10)
+    preset: str | None = None
+    experiment_type: Literal["A", "B", "adhoc"] | None = None
+    adhoc: bool = False
 
 
 @app.post("/api/suites/{suite_id}/run")
@@ -1554,9 +1624,19 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
             )
 
     try:
-        get_suite(suite_id)
+        suite = get_suite(suite_id)
     except SuiteStoreError as exc:
         raise HTTPException(404, str(exc)) from exc
+    # A bad preset, or a preset contradicted by the request, is refused here and
+    # not as a failed background run the user has to go looking for.
+    preset_name = req.preset or suite.get("preset")
+    if preset_name:
+        from bench.presets import PresetError, apply_preset
+
+        try:
+            apply_preset(suite, preset_name, experiment_type=req.experiment_type, adhoc=req.adhoc)
+        except PresetError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     run_id = uuid.uuid4().hex[:8]
     cancel_event = asyncio.Event()
@@ -1601,6 +1681,10 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
                 models=model_dicts,
                 cancel_event=cancel_event,
                 wait_if_paused=lambda: _await_resume(run_id, _active_runs[run_id]),
+                experiment_type=req.experiment_type,
+                adhoc=req.adhoc,
+                trials=req.trials,
+                preset=req.preset,
             )
             state["status"] = "completed"
         except asyncio.CancelledError:

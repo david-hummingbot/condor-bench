@@ -37,6 +37,10 @@ def empty_form_state() -> dict[str, Any]:
             "category": "",
             "riskLevels": [],
             "coreOnly": False,
+            "splits": [],
+            "taskCategories": [],
+            "trials": 1,
+            "envMode": "live",
         },
         "prompt": {
             "question": "",
@@ -137,7 +141,10 @@ def _clean_providers(value: Any) -> dict[str, dict[str, Any]]:
 def _clean_benchmark(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise FormStateError("benchmark must be an object.")
-    extra = set(value) - {"layers", "domain", "category", "riskLevels", "coreOnly"}
+    extra = set(value) - {
+        "layers", "domain", "category", "riskLevels", "coreOnly",
+        "splits", "taskCategories", "trials", "envMode",
+    }
     if extra:
         raise FormStateError(f"Unknown benchmark field: {sorted(extra)[0]}.")
     layers = _choice_list(value.get("layers", []), "layers", _LAYERS)
@@ -148,7 +155,32 @@ def _clean_benchmark(value: Any) -> dict[str, Any]:
         "category": _text(value.get("category", ""), "category", 256),
         "riskLevels": risks,
         "coreOnly": _bool(value.get("coreOnly", False), "coreOnly"),
+        # Holdout is not offered: it runs only from the CLI with --release.
+        "splits": _choice_list(value.get("splits", []), "splits", ("dev", "regression")),
+        "taskCategories": _choice_list(
+            value.get("taskCategories", []), "taskCategories", tuple(_task_categories())
+        ),
+        "trials": _trials(value.get("trials", 1)),
+        "envMode": _env_mode(value.get("envMode", "live")),
     }
+
+
+def _task_categories() -> list[str]:
+    from bench.dataset import TASK_CATEGORIES
+
+    return list(TASK_CATEGORIES)
+
+
+def _trials(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 10:
+        raise FormStateError("trials must be a whole number from 1 to 10.")
+    return value
+
+
+def _env_mode(value: Any) -> str:
+    if value not in ("live", "mock"):
+        raise FormStateError("envMode must be 'live' or 'mock'.")
+    return value
 
 
 def _clean_prompt(value: Any) -> dict[str, Any]:

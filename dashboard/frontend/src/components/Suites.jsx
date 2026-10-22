@@ -14,6 +14,7 @@ import {
   getSuite,
   importSuiteCases,
   listEnvironments,
+  listPresets,
   listSuiteRuns,
   listSuites,
   patchSuite,
@@ -69,6 +70,9 @@ export default function Suites({ onRunStarted }) {
   const [busy, setBusy] = useState(false)
   const [runs, setRuns] = useState([])
   const [compare, setCompare] = useState(null)
+  const [presets, setPresets] = useState([])
+  // Run-all options. Empty preset/experiment keep the suite's own settings.
+  const [runOpts, setRunOpts] = useState({ trials: '', preset: '', experiment_type: '', adhoc: false })
   const [newCaseQ, setNewCaseQ] = useState('')
   // Empty, not a sample id list: this used to default to 'c001,c002', so clicking
   // Import without editing silently imported two cases nobody asked for — and once
@@ -96,6 +100,7 @@ export default function Suites({ onRunStarted }) {
 
   useEffect(() => {
     refresh().catch((err) => setError(String(err.message || err)))
+    listPresets().then((d) => setPresets(d.presets || [])).catch(() => {})
     Promise.all([getModelRegistry(), getProviders()])
       .then(([reg, prov]) => {
         const opts = buildModelOptions(reg.models, prov.providers)
@@ -181,7 +186,11 @@ export default function Suites({ onRunStarted }) {
     setBusy(true)
     setError(null)
     try {
-      const { run_id } = await runSuite(detail.id, {})
+      const body = { adhoc: runOpts.adhoc }
+      if (runOpts.trials) body.trials = Number(runOpts.trials)
+      if (runOpts.preset) body.preset = runOpts.preset
+      if (runOpts.experiment_type) body.experiment_type = runOpts.experiment_type
+      const { run_id } = await runSuite(detail.id, body)
       onRunStarted?.(run_id)
     } catch (err) {
       setError(String(err.message || err))
@@ -412,6 +421,51 @@ export default function Suites({ onRunStarted }) {
                   </div>
                 </div>
                 <div className="suite-actions">
+                  <label className="muted" style={{ fontSize: 12 }} title="Trials per case (default: the suite's own, else 1)">
+                    trials{' '}
+                    <input
+                      className="input"
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={runOpts.trials}
+                      placeholder="1"
+                      onChange={(e) => setRunOpts({ ...runOpts, trials: e.target.value })}
+                      style={{ width: 60 }}
+                    />
+                  </label>
+                  <select
+                    className="select"
+                    value={runOpts.preset}
+                    onChange={(e) => setRunOpts({ ...runOpts, preset: e.target.value })}
+                    title="Experiment preset: sets the experiment type and freeze rules; the run refuses to start on a violation"
+                  >
+                    <option value="">{detail.preset ? `preset: ${detail.preset} (saved)` : 'no preset'}</option>
+                    {presets.filter((p) => !p.error).map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name} — experiment {p.experiment_type}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    className="select"
+                    value={runOpts.experiment_type}
+                    onChange={(e) => setRunOpts({ ...runOpts, experiment_type: e.target.value })}
+                    title="A: freeze the model, vary Condor. B: freeze Condor, vary the model."
+                  >
+                    <option value="">experiment: suite default</option>
+                    <option value="A">A — did Condor improve?</option>
+                    <option value="B">B — which model is best?</option>
+                    <option value="adhoc">ad-hoc</option>
+                  </select>
+                  <label className="muted" style={{ fontSize: 12 }} title="Bypass A/B freeze rules; the run is labelled ad-hoc and stays out of the Matrix/Router">
+                    <input
+                      type="checkbox"
+                      checked={runOpts.adhoc}
+                      onChange={(e) => setRunOpts({ ...runOpts, adhoc: e.target.checked })}
+                    />{' '}
+                    ad-hoc
+                  </label>
                   <button className="btn primary" onClick={handleRunAll} disabled={busy}>
                     ▶ Run all
                   </button>
@@ -518,22 +572,7 @@ export default function Suites({ onRunStarted }) {
                 <div className="card">
                   <div className="card-title">Compare</div>
                   {!compare && <p className="muted">Run Compare runs after a multi-environment Run all.</p>}
-                  {compare && (
-                    <>
-                      <p>
-                        comparable:{' '}
-                        <strong style={{ color: compare.comparable ? 'var(--green)' : 'var(--orange)' }}>
-                          {String(compare.comparable)}
-                        </strong>
-                        {compare.differences?.length > 0 && (
-                          <span className="muted"> — {compare.differences.join(', ')}</span>
-                        )}
-                      </p>
-                      <pre className="code-block">{JSON.stringify(compare.deltas, null, 2)}</pre>
-                      <div className="card-section-title">Members</div>
-                      <pre className="code-block">{JSON.stringify(compare.members, null, 2)}</pre>
-                    </>
-                  )}
+                  {compare && <CompareView compare={compare} />}
                 </div>
               )}
 
@@ -633,5 +672,110 @@ export default function Suites({ onRunStarted }) {
         </main>
       </div>
     </div>
+  )
+}
+
+
+const pct = (v) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`)
+const signed = (v, digits = 3) => (v == null ? '—' : `${v > 0 ? '+' : ''}${Number(v).toFixed(digits)}`)
+const signedPp = (v) => (v == null ? '—' : `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)} pp`)
+const ci = (c, f = (x) => x.toFixed(3)) => (c ? `[${f(c[0])}, ${f(c[1])}]` : '')
+
+/**
+ * Compare reads one variable under test. More than one differing — model and
+ * checkout, say — is refused, and every difference is listed so it can be fixed.
+ * Paired deltas difference the same case and trial on both sides, which is what
+ * lets a few dozen tasks resolve a real change.
+ */
+function CompareView({ compare }) {
+  const pairs = compare.deltas?.pairs || []
+  return (
+    <>
+      <p>
+        <strong style={{ color: compare.comparable ? 'var(--green)' : 'var(--orange)' }}>
+          {compare.comparable ? 'Comparable' : 'Not comparable'}
+        </strong>
+        {compare.comparable && (
+          <span className="muted">
+            {' '}— variable under test: <code>{compare.variable_under_test || 'none (identical setups)'}</code>
+          </span>
+        )}
+      </p>
+      {!compare.comparable && compare.differences?.length > 0 && (
+        <div className="error-text" style={{ marginBottom: 12 }}>
+          Refused: {compare.differences.map((d) => d.replace('manifest:', '')).join(', ')}.{' '}
+          <span className="muted">
+            A comparison may vary one thing; trial count and lane must always match.
+          </span>
+        </div>
+      )}
+      {pairs.length > 0 && (
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Member vs baseline</th>
+              <th title="Point difference in pass rate">Pass Δ</th>
+              <th title="Mean per-(case, trial) difference in pass, with a bootstrap 95% CI">Paired pass Δ</th>
+              <th>Composite Δ</th>
+              <th title="Mean per-(case, trial) difference in composite">Paired composite Δ</th>
+              <th>Latency Δ</th>
+              <th>Tokens Δ</th>
+              <th title="Rows scored on only one side">Unpaired</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pairs.map((p) => (
+              <tr key={p.run_dir}>
+                <td className="mono">{p.environment_id || p.run_dir}</td>
+                <td>{signedPp(p.pass_rate_delta)}</td>
+                <td>
+                  {signedPp(p.paired?.passed?.mean_delta)}{' '}
+                  <span className="muted">{ci(p.paired?.passed?.ci, (x) => (x * 100).toFixed(0))}</span>
+                </td>
+                <td>{signed(p.composite_avg_delta)}</td>
+                <td>
+                  {signed(p.paired?.composite?.mean_delta)}{' '}
+                  <span className="muted">{ci(p.paired?.composite?.ci)}</span>
+                </td>
+                <td>{signed(p.latency_s_avg_delta, 1)}s</td>
+                <td>{p.avg_total_tokens_delta == null ? '—' : signed(p.avg_total_tokens_delta, 0)}</td>
+                <td>{p.paired?.unpaired ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="card-section-title" style={{ marginTop: 16 }}>Members</div>
+      <table className="data-table">
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Environment</th>
+            <th>Model</th>
+            <th>Condor</th>
+            <th>Lane</th>
+            <th>Trials</th>
+            <th>Pass</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(compare.members || []).map((m) => (
+            <tr key={m.run_dir}>
+              <td className="mono">{m.run_dir}</td>
+              <td>{m.environment_id || '—'}</td>
+              <td className="mono">{m.model}</td>
+              <td className="mono">{m.condor?.commit || '—'}</td>
+              <td>{m.manifest?.env_mode || '—'}</td>
+              <td>{m.manifest?.trials ?? '—'}</td>
+              <td>{pct(m.pass_rate)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <details style={{ marginTop: 12 }}>
+        <summary className="muted">Raw comparison</summary>
+        <pre className="code-block">{JSON.stringify(compare, null, 2)}</pre>
+      </details>
+    </>
   )
 }

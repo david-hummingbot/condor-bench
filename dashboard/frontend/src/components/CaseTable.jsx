@@ -171,6 +171,8 @@ export default function CaseTable({ cases }) {
                             partial-credit situation.
                           </div>
                         )}
+                        <TaskDetail c={c} />
+
                         <div className="case-detail-grid">
                           <div>
                             <div className="case-detail-label">Response</div>
@@ -197,7 +199,7 @@ export default function CaseTable({ cases }) {
                             ['Tools', c.tool_accuracy],
                             ['Params', c.tool_params],
                             ['Live validity', c.live_validity],
-                            ['Latency score', c.latency_score],
+                            ['Latency score', c.latency_representative === false ? null : c.latency_score],
                           ].map(([label, val]) => (
                             <span key={label} className="score-chip">
                               <span className="chip-label">{label}</span>
@@ -226,6 +228,7 @@ export default function CaseTable({ cases }) {
                         <ParamDetail detail={c.tool_param_detail} />
                         <ValidityDetail detail={c.live_validity_detail} />
                         <WiringDetail wiring={c.wiring} />
+                        <ProviderLog log={c.wiring?.provider_log} />
                       </div>
                     </td>
                   </tr>
@@ -384,6 +387,62 @@ function ValidityDetail({ detail }) {
       {detail.unfulfilled_assertions?.length > 0 && (
         <div className="run-meta" style={{ color: 'var(--yellow)' }}>
           assertions with no matching call: {detail.unfulfilled_assertions.join(', ')}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Task-bank identity and the outcome verdicts. task_success is the primary pass
+ * criterion; an unsafe call is a hard fail regardless of the composite.
+ */
+function TaskDetail({ c }) {
+  if (!c.task_id && c.task_success == null && !c.trace_url) return null
+  const unsafe = c.forbidden_violations?.length > 0 || c.unsafe_action_rate > 0
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div className="score-chips">
+        {c.task_id && <Chip label="Task" value={`${c.task_id}${c.task_version ? ` v${c.task_version}` : ''}`} />}
+        {c.task_category && <Chip label="Category" value={c.task_category.replace(/_/g, ' ')} />}
+        {c.split && <Chip label="Split" value={c.split} />}
+        {(c.trial_idx || 1) > 1 && <Chip label="Trial" value={String(c.trial_idx)} />}
+        {c.task_success != null && <Chip label="Task success" value={c.task_success ? 'yes' : 'no'} />}
+        {unsafe && <Chip label="Unsafe" value={(c.forbidden_violations || []).join(', ') || 'yes'} />}
+        {c.first_call_validity != null && <Chip label="First call valid" value={c.first_call_validity.toFixed(2)} />}
+        {c.repair_rate != null && <Chip label="Repair rate" value={c.repair_rate.toFixed(2)} />}
+        {c.latency_representative === false && (
+          <Chip label="Latency" value="not representative (hosted endpoint)" />
+        )}
+      </div>
+      {c.trace_url && (
+        <div className="run-meta" style={{ marginTop: 6 }}>
+          Trace: <a href={c.trace_url} target="_blank" rel="noreferrer">{c.trace_id}</a>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Per-call HTTP evidence from providers that record it (NVIDIA NIM): status,
+ * request id, rate-limit retries and client latency — enough to tell a model
+ * failure from a quota or an outage.
+ */
+function ProviderLog({ log }) {
+  if (!log) return null
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div className="case-detail-label">Provider calls ({log.provider})</div>
+      <div className="score-chips" style={{ marginTop: 6 }}>
+        <Chip label="Requests" value={String(log.requests)} />
+        <Chip label="Statuses" value={Object.entries(log.statuses || {}).map(([k, v]) => `${k}×${v}`).join(' ') || '—'} />
+        <Chip label="Rate-limited" value={String(log.rate_limit_events || 0)} />
+        <Chip label="Client latency" value={`${log.client_latency_s}s`} />
+      </div>
+      {log.request_ids?.length > 0 && (
+        <div className="run-meta" style={{ marginTop: 6 }}>
+          Request ids: <code>{log.request_ids.join(', ')}</code>
         </div>
       )}
     </div>

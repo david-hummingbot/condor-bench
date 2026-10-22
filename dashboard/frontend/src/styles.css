@@ -627,6 +627,8 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .unmet-tag { padding: 1px 8px; border-radius: 10px; font-size: 10px; font-weight: 650; }
 .unmet-tag.thin { background: rgba(240, 180, 41, 0.14); color: var(--yellow); }
 .unmet-tag.fail { background: rgba(232, 64, 64, 0.14); color: var(--red); }
+.unmet-tag.pass { background: rgba(46, 160, 67, 0.14); color: var(--green); }
+.unmet-tag.pending { background: var(--accent-soft); color: var(--accent); }
 .config-snippet {
   background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 12px 14px; font-family: var(--mono); font-size: 12px;

@@ -213,11 +213,31 @@ def test_cancelling_a_run_saves_the_cases_it_scored(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(bench.dataset, "is_mutating", lambda case: False)
     monkeypatch.setattr(bench.client, "run_case", fake_run_case)
     monkeypatch.setattr(bench.client, "case_input_text", lambda case: "q")
-    monkeypatch.setattr(bench.scorer, "score_case", lambda c, r, b: _done(FakeCard(c.id)))
+    monkeypatch.setattr(
+        bench.scorer, "score_case", lambda c, r, b, trial_idx=1: _done(FakeCard(c.id))
+    )
     monkeypatch.setattr(bench.reporter, "save_run", fake_save_run)
     monkeypatch.setattr(bench.mcp_provider, "target_banner", lambda: "test")
     monkeypatch.setattr(bench.baseline, "BaselineStore", lambda *a, **k: _NoBaselines())
     monkeypatch.setattr(bench.cleanup, "teardown", lambda *a, **k: _done(None))
+    monkeypatch.setattr(bench.cleanup, "created_resources", lambda result: [])
+    # Market binding and warmup talk to the target; stub them so the test is
+    # hermetic (it used to reach the live staging API and take 20s).
+    import bench.market_resolver
+    import bench.market_warmup
+    import bench.probe_journal
+    from types import SimpleNamespace
+
+    async def fake_prepare(cs):
+        return list(cs), {}
+
+    async def fake_warmup(case):
+        return SimpleNamespace(ok=True, notes=[])
+
+    monkeypatch.setattr(bench.market_resolver, "prepare_cases", fake_prepare)
+    monkeypatch.setattr(bench.market_resolver, "bindings_summary", lambda r: {})
+    monkeypatch.setattr(bench.market_warmup, "ensure_markets_for_case", fake_warmup)
+    monkeypatch.setattr(bench.probe_journal, "ensure_probe_journal", lambda case: None)
 
     run_id = "testrun"
     A._active_runs[run_id] = {

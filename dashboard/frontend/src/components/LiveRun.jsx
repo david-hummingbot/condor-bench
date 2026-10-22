@@ -16,6 +16,8 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
   const [currentCase, setCurrentCase] = useState(null)
   const [currentModel, setCurrentModel] = useState(null)
   const [cases, setCases] = useState([]) // live result rows
+  const [notes, setNotes] = useState([])   // lane / skip / warmup notes from the runner
+  const [runInfo, setRunInfo] = useState(null) // trials and lane, from run_started
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState(null)
   // Requested-but-not-yet-settled: the button flips immediately, while the run
@@ -45,6 +47,7 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
         setStatus('running')
         // Suite Run-all reports total_members; ad-hoc reports total cases.
         setTotal(evt.total_members || evt.total || 0)
+        if (evt.trials || evt.env_mode) setRunInfo({ trials: evt.trials || 1, envMode: evt.env_mode || 'live' })
         if (evt.total_members) {
           setMemberInfo({ index: 0, total: evt.total_members, label: 'suite' })
         }
@@ -83,8 +86,11 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
         setCompleted((c) => c + 1)
       } else if (t === 'model_started') {
         setCurrentModel(evt.model)
+      } else if (t === 'note') {
+        // Runner notes: the lane in use, cases another lane needs, warmup detail.
+        setNotes(prev => [...prev.slice(-19), evt])
       } else if (t === 'case_started') {
-        setCurrentCase({ id: evt.case_id, type: evt.case_type })
+        setCurrentCase({ id: evt.case_id, type: evt.case_type, trial: evt.trial, trials: evt.trials })
         setTotal(evt.total || 0)
       } else if (t === 'case_done') {
         setCompleted(evt.completed || 0)
@@ -226,11 +232,35 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
             {status === 'paused'
               ? 'Paused — no case running'
               : currentCase
-                ? <>{currentCase.type === 'tick' ? '🔁' : '💬'} {currentCase.id}</>
+                ? <>
+                    {currentCase.type === 'tick' ? '🔁' : '💬'} {currentCase.id}
+                    {currentCase.trials > 1 && <span className="muted"> · trial {currentCase.trial}/{currentCase.trials}</span>}
+                  </>
                 : status === 'completed' ? 'All done' : ''}
           </span>
           <span>{completed} / {total || '?'}</span>
         </div>
+
+        {runInfo && (runInfo.trials > 1 || runInfo.envMode === 'mock') && (
+          <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+            {runInfo.trials > 1 && <>{runInfo.trials} trials per case</>}
+            {runInfo.trials > 1 && runInfo.envMode === 'mock' && ' · '}
+            {runInfo.envMode === 'mock' && <>mock lane — results never feed the live Matrix or Router</>}
+          </div>
+        )}
+        {notes.length > 0 && (
+          <div style={{ marginTop: 8 }}>
+            {notes.map((n, i) => (
+              <div
+                key={i}
+                className="muted"
+                style={{ fontSize: 12, color: n.level === 'error' ? 'var(--red)' : n.level === 'warn' ? 'var(--yellow)' : undefined }}
+              >
+                {n.case_id ? <code>{n.case_id}</code> : null} {n.text}
+              </div>
+            ))}
+          </div>
+        )}
 
         {error && (
           <div className="error-text" style={{ marginTop: 8 }}>{error}</div>
@@ -264,6 +294,7 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
                     <td>
                       <span style={{ marginRight: 6 }}>{expanded === i ? '▾' : '▸'}</span>
                       {c.case_id}
+                      {(c.trial_idx || 1) > 1 && <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>t{c.trial_idx}</span>}
                       {c.harness_artifact && (
                         <span className="router-flag" title={`Excluded from the routing matrix: ${c.harness_artifact}`}>
                           harness
@@ -304,7 +335,8 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
                     <td style={{ textAlign: 'right' }}>
                       {c.error
                         ? <span style={{ color: 'var(--red)' }}>✗ err</span>
-                        : (c.composite >= PASS_THRESHOLD
+                        // `passed` carries the hard gates; older events fall back to the threshold.
+                        : ((c.passed ?? c.composite >= PASS_THRESHOLD)
                           ? <span style={{ color: 'var(--green)' }}>✓</span>
                           : <span style={{ color: 'var(--red)' }}>✗</span>)}
                     </td>

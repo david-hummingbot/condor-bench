@@ -114,6 +114,7 @@ export const importSuiteCases = (suiteId, body) =>
 
 export const listSuiteRuns = (suiteId) =>
   fetch(`/api/suites/${suiteId}/runs`).then(handle)
+export const listPresets = () => fetch('/api/presets').then(handle)
 export const runSuite = (suiteId, body = {}) =>
   fetch(`/api/suites/${suiteId}/run`, {
     method: 'POST',
