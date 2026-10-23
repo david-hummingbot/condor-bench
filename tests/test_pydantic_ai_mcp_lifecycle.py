@@ -6,19 +6,20 @@ one fired *before* the ready event, so a post-startup failure was discarded with
 nothing logged and ``self._agent`` stayed set.
 
 The half that fix exists for is quieter still. A SIGKILLed stdio server never
-raises out of ``run_mcp_servers()`` at all — it only closes the MCP session's
-streams — so the lifecycle task stayed parked on its shutdown event forever and
-nothing ever failed. Every later tool call in the case died with
-``ClosedResourceError`` on the same reused client, and bench scored those as the
-model's doing.
+raises out of the agent's context at all, so the lifecycle task stayed parked on
+its shutdown event forever and nothing ever failed. Every later tool call in the
+case died with ``ClosedResourceError`` on the same reused client, and bench scored
+those as the model's doing. On pydantic-ai 2.x the probe is a ``ping``: a dead
+transport fails it locally with ``CONNECTION_CLOSED``; any answer from the server
+— even a refusal — is proof of life.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 
 import pytest
+from mcp.types import CONNECTION_CLOSED
 
 from condor_compat.acp.pydantic_ai_client import (
     MCP_TRANSPORT_POLL_SECONDS,
@@ -27,34 +28,52 @@ from condor_compat.acp.pydantic_ai_client import (
 )
 
 
-class _Stream:
-    def __init__(self, closed: bool = False):
-        self._closed = closed
+class _RpcError(Exception):
+    def __init__(self, code: int):
+        super().__init__(f"rpc error {code}")
+        self.code = code
+
+
+class _Transport:
+    def __init__(self, command: str):
+        self.command = command
+
+
+class _Client:
+    def __init__(self, command: str, closed: bool, answers_with_error: bool):
+        self.transport = _Transport(command)
+        self.closed = closed
+        self.answers_with_error = answers_with_error
+
+    async def ping(self):
+        if self.closed:
+            raise _RpcError(CONNECTION_CLOSED)  # failed locally: nobody answered
+        if self.answers_with_error:
+            raise _RpcError(-32601)  # the server's own "method not found"
+        return {}
 
 
 class _Server:
-    """An MCP server the way the lifecycle probe reads one."""
+    """An MCP toolset the way the lifecycle probe reads one."""
 
-    def __init__(self, command: str = "uv", closed: bool = False):
-        self.command = command
-        self._read_stream = _Stream(closed)
-        self._write_stream = _Stream(closed)
+    def __init__(self, command: str = "uv", closed: bool = False, answers_with_error: bool = False):
+        self.client = _Client(command, closed, answers_with_error)
 
 
 class _FakeAgent:
+    """The agent's own async context is what holds the MCP servers open."""
+
     def __init__(self, fail: BaseException | None = None):
         self._fail = fail
         self.entered = False
 
-    def run_mcp_servers(self):
-        @contextlib.asynccontextmanager
-        async def _ctx():
-            self.entered = True
-            yield
-            if self._fail is not None:
-                raise self._fail
+    async def __aenter__(self):
+        self.entered = True
+        return self
 
-        return _ctx()
+    async def __aexit__(self, *exc_info):
+        if self._fail is not None:
+            raise self._fail
 
 
 def _client(agent: _FakeAgent, servers: list[_Server] | None = None) -> PydanticAIClient:
@@ -69,19 +88,24 @@ def _client(agent: _FakeAgent, servers: list[_Server] | None = None) -> Pydantic
 # ── the probe ─────────────────────────────────────────────────────────────────
 
 def test_a_live_server_reads_as_healthy():
-    assert _dead_transport([_Server()]) is None
+    assert asyncio.run(_dead_transport([_Server()])) is None
 
 
-def test_a_server_that_never_opened_its_streams_is_not_called_dead():
+def test_a_server_that_refuses_the_ping_is_alive():
+    """An MCP SDK 2.x server has no `ping` method and says so — that is an answer."""
+    assert asyncio.run(_dead_transport([_Server(answers_with_error=True)])) is None
+
+
+def test_a_server_that_never_opened_its_client_is_not_called_dead():
     """Absent is not closed — otherwise startup would look like a collapse."""
     server = _Server()
-    del server._read_stream
-    del server._write_stream
-    assert _dead_transport([server]) is None
+    del server.client
+    assert asyncio.run(_dead_transport([server])) is None
 
 
-def test_a_closed_stream_names_the_server():
-    assert _dead_transport([_Server(), _Server(command="uvx", closed=True)]) == "uvx"
+def test_a_closed_transport_names_the_server():
+    servers = [_Server(), _Server(command="uvx", closed=True)]
+    assert asyncio.run(_dead_transport(servers)) == "uvx"
 
 
 # ── the lifecycle task ────────────────────────────────────────────────────────
@@ -96,7 +120,7 @@ def test_a_killed_subprocess_tears_the_client_down():
         await client._ready_event.wait()
         assert client.alive
 
-        server._read_stream._closed = True  # SIGKILL, as the transport sees it
+        server.client.closed = True  # SIGKILL, as the transport sees it
         await asyncio.wait_for(task, timeout=MCP_TRANSPORT_POLL_SECONDS * 4)
 
         assert not client.alive, "a toolless client must not report healthy"
@@ -165,7 +189,7 @@ def test_a_turn_that_meets_a_dead_transport_marks_the_client_dead_at_once():
     """The prompt usually hits it before the poll does; `alive` must not lag."""
     client = _client(_FakeAgent(), [_Server(closed=True)])
     exc = RuntimeError("ClosedResourceError")
-    client._mark_dead_if_transport_closed(exc)
+    asyncio.run(client._mark_dead_if_transport_closed(exc))
     assert client._lifecycle_error is exc
     assert not client.alive
 
@@ -173,6 +197,6 @@ def test_a_turn_that_meets_a_dead_transport_marks_the_client_dead_at_once():
 def test_a_turn_that_fails_for_other_reasons_leaves_the_client_alive():
     """A model erroring is not an infra collapse — the client stays reusable."""
     client = _client(_FakeAgent(), [_Server()])
-    client._mark_dead_if_transport_closed(RuntimeError("model said no"))
+    asyncio.run(client._mark_dead_if_transport_closed(RuntimeError("model said no")))
     assert client._lifecycle_error is None
     assert client.alive

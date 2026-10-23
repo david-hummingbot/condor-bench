@@ -252,3 +252,44 @@ def test_suite_progress_streams_per_trial_across_members(monkeypatch):
     done = [(e["environment_id"], e["completed"], e["total"]) for e in events if e["type"] == "case_done"]
     assert done == [("a", 1, 4), ("a", 2, 4), ("b", 3, 4), ("b", 4, 4)]
     assert [m["status"] for m in out["members"]] == ["done", "done"]
+
+
+def test_stopping_a_worker_stops_what_it_started(monkeypatch):
+    """`uv run` cannot forward SIGKILL: killing only it left the Python worker
+    running, still placing orders after the run was marked cancelled."""
+    import asyncio
+    import os
+    import sys
+
+    import bench.suite_runner as sr
+
+    monkeypatch.setattr(sr, "_WORKER_STOP_GRACE_S", 2.0)
+    # A parent that ignores SIGTERM (as uv would not forward SIGKILL), with a child.
+    script = (
+        "import signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+
+    async def go():
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", script, stdout=asyncio.subprocess.PIPE, start_new_session=True
+        )
+        child = int((await proc.stdout.readline()).decode())
+        await sr._stop_worker(proc)
+        await asyncio.sleep(0.2)
+        return proc.returncode, child
+
+    code, child = asyncio.run(go())
+    assert code is not None
+    try:
+        os.kill(child, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    if alive:  # reap a zombie re-parented to init before declaring it alive
+        with open(f"/proc/{child}/stat") as f:
+            alive = f.read().split()[2] != "Z"
+    assert not alive, "the worker's own child must not survive"

@@ -131,6 +131,22 @@ async def run_trial(
     response = ""
     error: str | None = None
     partial = None
+    # The teardown of the trial's full result, once started. A cancel or a late
+    # exception after this point must not undo the same resources a second time.
+    undo: asyncio.Future | None = None
+
+    def start_undo(trace: Any) -> asyncio.Future:
+        return asyncio.ensure_future(
+            teardown(
+                trace,
+                model,
+                agent_slug=getattr(case, "agent_slug", None),
+                tick=getattr(case, "type", "") == "tick",
+            )
+        )
+
+    def needs_undo(trace: Any) -> bool:
+        return trace is not None and (is_mutating(case) or bool(created_resources(trace)))
 
     if lane == "mock":
         # Every trial starts from the fixture: the mock is stateful, and a trial
@@ -165,16 +181,22 @@ async def run_trial(
         # resource still needs removing. Keyed on the trace as well as the case's
         # risk level: a read-only case is exactly where a model that falls for a
         # prompt injection creates something nobody planned to clean up.
-        if is_mutating(case) or created_resources(result):
-            report = await teardown(
-                result,
-                model,
-                agent_slug=getattr(case, "agent_slug", None),
-                tick=getattr(case, "type", "") == "tick",
-            )
+        if needs_undo(result):
+            undo = start_undo(result)
+            # Shielded: a cancel landing mid-teardown is handled below by letting
+            # this finish, rather than abandoning a half-undone trial.
+            report = await asyncio.shield(undo)
             await events._fire("cleanup", case, trial, report)
         return card
     except asyncio.CancelledError:
+        # A cancelled run (the dashboard's Cancel, a server shutdown, a suite
+        # worker stopped by its runner) still owes staging the undo: an order
+        # placed before the cancel otherwise stays open and blocks the next
+        # pre-flight. Finish a teardown already under way, or undo from the trace.
+        if undo is not None:
+            await asyncio.shield(undo)
+        elif needs_undo(partial):
+            await asyncio.shield(start_undo(partial))
         raise
     except asyncio.TimeoutError:
         # Record it. Appending nothing made the case vanish from the run entirely,
@@ -195,13 +217,8 @@ async def run_trial(
     # A trial cut off mid-way may already have created something — a timed-out
     # `budgeted_buy` left its market order's executor running, and the next run's
     # pre-flight refused to start. Undo what its trace got as far as recording.
-    if partial is not None and (is_mutating(case) or created_resources(partial)):
-        report = await teardown(
-            partial,
-            model,
-            agent_slug=getattr(case, "agent_slug", None),
-            tick=getattr(case, "type", "") == "tick",
-        )
+    if undo is None and needs_undo(partial):
+        report = await start_undo(partial)
         await events._fire("cleanup", case, trial, report)
     return card
 

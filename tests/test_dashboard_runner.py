@@ -294,3 +294,79 @@ def test_the_model_catalog_is_live_where_it_can_be_and_says_why_not(client, monk
     client.get("/api/model-catalog", params={"refresh": 1})
     assert len(calls) > n
     A._CATALOG_CACHE.update(at=0.0, data=None)
+
+
+def test_the_dashboard_refuses_cross_origin_and_rebound_requests():
+    """Any web page could read saved API keys with one fetch while CORS allowed
+    every origin; a rebound DNS name reaches it without an Origin at all."""
+    from fastapi.testclient import TestClient
+
+    from dashboard.backend.app import app
+
+    client = TestClient(app)
+    assert client.get("/api/form-state").status_code == 200
+    assert client.get("/api/form-state", headers={"origin": "http://localhost:5173"}).status_code == 200
+    evil = client.get("/api/form-state", headers={"origin": "https://evil.example"})
+    assert evil.status_code == 403 and "access-control-allow-origin" not in evil.headers
+    assert client.get("/api/form-state", headers={"host": "evil.example"}).status_code == 403
+    assert client.post("/api/compare-condor/prepare", json={"folder": "/tmp/x"},
+                       headers={"origin": "https://evil.example"}).status_code == 403
+
+
+def test_a_custom_prompt_is_bounded_and_undoes_what_it_created(monkeypatch):
+    """An ad-hoc "buy 0.01 BTC" ran with no ceiling and no teardown, leaving its
+    executor to block the next run's pre-flight."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import bench.client
+    import bench.cleanup
+    import bench.staging_health
+    import config
+    from dashboard.backend import app as appmod
+
+    async def ready():
+        return None
+
+    async def placed_an_order_then_hung(*a, **k):
+        call = {"tool": "create_order_executor", "tool_call_id": "t1", "args": {}}
+        bench.client._PARTIAL_TRACE.get().turns.append(
+            ([call], [{"tool_call_id": "t1", "output": '{"executor_id": "ex1"}'}]))
+        await asyncio.sleep(10)
+
+    torn: list = []
+
+    async def fake_teardown(result, model, **kw):
+        torn.append([c["tool"] for c in result.tool_calls])
+        return SimpleNamespace(resources=[])
+
+    monkeypatch.setattr(bench.staging_health, "a_assert_ready", ready)
+    monkeypatch.setattr(bench.client, "run_consult", placed_an_order_then_hung)
+    monkeypatch.setattr(bench.cleanup, "teardown", fake_teardown)
+    monkeypatch.setattr(config, "case_timeout_s", lambda _b=None: 0.05)
+
+    run_id = "cptest01"
+    appmod._custom_runs[run_id] = {"run_id": run_id, "status": "starting", "events": [], "listeners": []}
+    try:
+        req = appmod.CustomPromptRequest(question="buy 0.01 BTC",
+                                         models=[appmod.ModelConfig(model_key="openrouter:x/y")])
+        asyncio.run(appmod._run_custom_prompt(run_id, req))
+        done = [e for e in appmod._custom_runs[run_id]["events"] if e["type"] == "model_done"]
+        assert "timed out" in done[0]["error"]
+        assert torn == [["create_order_executor"]]
+    finally:
+        appmod._custom_runs.pop(run_id, None)
+
+
+def test_runs_of_any_kind_do_not_overlap():
+    from fastapi import HTTPException
+
+    from dashboard.backend import app as appmod
+
+    appmod._custom_runs["busy0001"] = {"status": "running"}
+    try:
+        with pytest.raises(HTTPException) as exc:
+            appmod._refuse_if_busy()
+        assert exc.value.status_code == 409
+    finally:
+        appmod._custom_runs.pop("busy0001", None)
