@@ -385,7 +385,13 @@ def tool_error(outcome: Any, tool: str = "") -> str | None:
     """
     if outcome is None:
         return None
-    if getattr(outcome, "isError", False):
+    # `is_error` on the mcp 2.x client; `isError` on 1.x and on the wire. Reading
+    # only the old spelling made every refused undo count as a removal after the
+    # SDK upgrade — getattr's default hid the rename.
+    is_error = getattr(outcome, "is_error", None)
+    if is_error is None:  # only fall back: 2.x warns on every read of `isError`
+        is_error = getattr(outcome, "isError", False)
+    if is_error:
         return _outcome_text(outcome) or "tool reported an error"
     text = _outcome_text(outcome)
     # FastMCP servers also answer with a plain string for an unknown action.

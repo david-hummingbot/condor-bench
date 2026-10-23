@@ -321,3 +321,15 @@ def test_an_undo_targets_the_store_the_create_wrote_to():
         "action": "delete_routine", "agent": "bench_agent", "shared": False, "name": "bench_r"}
     assert _undo_args(skill, "delete") == {"action": "delete", "agent": "bench_agent", "name": "bench_s"}
 
+
+def test_a_refused_undo_on_the_real_mcp_result_type_is_an_error():
+    """mcp 2.x renamed `isError` to `is_error`; reading only the old name made every
+    refused undo a "removal". Built from the SDK's own type, not a fake."""
+    from mcp import types
+
+    refused = types.CallToolResult(
+        content=[types.TextContent(type="text", text="Executor not found")], is_error=True
+    )
+    assert tool_error(refused) == "Executor not found"
+    ok = types.CallToolResult(content=[types.TextContent(type="text", text="stopped")], is_error=False)
+    assert tool_error(ok) is None
