@@ -46,6 +46,8 @@ export const streamUrl = (id) => `/api/runs/${id}/stream`
 export const getStaging = () => fetch('/api/staging').then(handle)
 export const getDatasets = () => fetch('/api/datasets').then(handle)
 export const getModelRegistry = () => fetch('/api/models').then(handle)
+export const getModelCatalog = (refresh = false) =>
+  fetch(`/api/model-catalog${refresh ? '?refresh=1' : ''}`).then(handle)
 
 export function getMatrix() {
   return fetch('/api/matrix').then(handle)
@@ -146,3 +148,20 @@ export const updateSettings = (updates) =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ updates }),
   }).then(handle)
+
+// ── Compare Condor ──────────────────────────────────────────────────────────
+export const getCompareCondor = () => fetch('/api/compare-condor').then(handle)
+export const prepareCandidate = (body) =>
+  fetch('/api/compare-condor/prepare', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(handle)
+export const startCompare = (body) =>
+  fetch('/api/compare-condor/run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(handle)
+export const removeWorktree = (slug) =>
+  fetch(`/api/compare-condor/worktrees/${encodeURIComponent(slug)}`, { method: 'DELETE' }).then(handle)

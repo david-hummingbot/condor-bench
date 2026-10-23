@@ -409,6 +409,28 @@ def delete_suite_case(
     _save_case_rows(suite_id, new_rows, version=expected_version)
 
 
+def replace_suite_cases(
+    suite_id: str, rows: list[dict[str, Any]], *, expected_version: int
+) -> list[dict[str, Any]]:
+    """Replace every case in the suite with *rows* (ids namespaced to the suite)."""
+    get_suite(suite_id)
+    out = []
+    for data in rows:
+        row = dict(data)
+        raw = str(row.get("id") or row.get("question") or "case")
+        row["id"] = raw if raw.startswith(f"{suite_id}__") else f"{suite_id}__{_slugify(raw)}"
+        row["type"] = str(row.get("type") or "consult")
+        row["risk_level"] = _normalize_risk(row.get("risk_level"))
+        row.setdefault("source_case_id", data.get("id"))
+        row.setdefault("source_dataset", "suite_templates")
+        out.append(row)
+    ids = [r["id"] for r in out]
+    if len(ids) != len(set(ids)):
+        raise SuiteStoreError("duplicate case ids in the replacement set")
+    _save_case_rows(suite_id, out, version=expected_version)
+    return out
+
+
 def import_library_cases(
     suite_id: str,
     *,
@@ -472,97 +494,50 @@ def load_suite_cases_as_objects(
     *,
     case_ids: list[str] | None = None,
 ) -> list[Case]:
-    """Parse suite rows into the same Case objects the runner expects."""
-    from bench.dataset import AgentCase, ConsultCase, TickCase, ToolCase
+    """Parse suite rows into the same Case objects the runner expects.
+
+    Through the library's own loaders, so a suite case carries everything a
+    library case does — ``markets`` placeholders, post-conditions, steps, lanes,
+    the task block. A hand-rolled copy here used to drop ``markets`` everywhere
+    and post-conditions on tool and agent rows, so a suite's "place an order on
+    {venue.pair}" reached the model with the placeholder still in it.
+    """
+    from bench.dataset import (
+        load_agent_cases,
+        load_consult_cases,
+        load_tick_cases,
+        load_tool_cases,
+    )
 
     rows = _load_case_rows(suite_id)
     if case_ids is not None:
         wanted = set(case_ids)
         rows = [r for r in rows if r.get("id") in wanted]
 
-    cases: list[Case] = []
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    order = {r["id"]: i for i, r in enumerate(rows)}
     for data in rows:
-        ctype = data.get("type", "consult")
-        if ctype == "tick":
-            cases.append(
-                TickCase(
-                    id=data["id"],
-                    scenario_name=data.get("scenario_name", data.get("question", "")),
-                    agent_instructions=data.get("agent_instructions", ""),
-                    strategy_instructions=data.get("strategy_instructions", ""),
-                    config=data.get("config", {}),
-                    risk_state=data.get("risk_state", {}),
-                    core_data=data.get("core_data", {}),
-                    learnings=data.get("learnings", ""),
-                    summary=data.get("summary", ""),
-                    recent_decisions=data.get("recent_decisions", ""),
-                    tick_number=data.get("tick_number", 1),
-                    expected_tool_calls=data.get("expected_tool_calls")
-                    or data.get("expected_tools", []),
-                    expected_no_calls=data.get("expected_no_calls", []),
-                    category=data.get("category", ""),
-                    tags=data.get("tags", []),
-                    expected_tool_params=data.get("expected_tool_params", {}),
-                    live_expected=data.get("live_expected", {}),
-                    risk_level=_normalize_risk(data.get("risk_level")),
-                    agent_slug=data.get("agent_slug") or f"bench_{data['id']}",
-                )
-            )
-        elif ctype == "tool":
-            tool = data.get("tool") or (data.get("expected_tools") or ["unknown"])[0]
-            cases.append(
-                ToolCase(
-                    id=data["id"],
-                    tool=tool,
-                    question=data.get("question", ""),
-                    domain_name=data.get("domain") or data.get("domain_name", ""),
-                    expected_tools=data.get("expected_tools") or [tool],
-                    expected_tool_params=data.get("expected_tool_params", {}),
-                    expected_no_calls=data.get("expected_no_calls", []),
-                    live_expected=data.get("live_expected", {}),
-                    risk_level=_normalize_risk(data.get("risk_level")),
-                    agent_slug=data.get("agent_slug"),
-                    tags=data.get("tags", []),
-                )
-            )
-        elif ctype == "agent":
-            cases.append(
-                AgentCase(
-                    id=data["id"],
-                    agent_slug=data.get("agent_slug"),
-                    question=data.get("question", ""),
-                    assistant=data.get("assistant", ""),
-                    expected_tools=data.get("expected_tools", []),
-                    expected_tool_params=data.get("expected_tool_params", {}),
-                    expected_no_calls=data.get("expected_no_calls", []),
-                    turns=data.get("turns", []),
-                    live_expected=data.get("live_expected", {}),
-                    risk_level=_normalize_risk(data.get("risk_level")),
-                    tags=data.get("tags", []),
-                )
-            )
-        else:
-            cases.append(
-                ConsultCase(
-                    id=data["id"],
-                    question=data.get("question", ""),
-                    context=data.get("context", ""),
-                    category=data.get("category", ""),
-                    expected_tools=data.get("expected_tools", []),
-                    turns=data.get("turns", []),
-                    tags=data.get("tags", []),
-                    type="consult",
-                    expected_tool_params=data.get("expected_tool_params", {}),
-                    live_expected=data.get("live_expected", {}),
-                    expected_no_calls=data.get("expected_no_calls", []),
-                    steps=data.get("steps", []),
-                    post_conditions=data.get("post_conditions", {}),
-                    risk_level=_normalize_risk(data.get("risk_level")),
-                    agent_slug=data.get("agent_slug"),
-                )
-            )
+        row = dict(data)
+        kind = row.get("type") or "consult"
+        if kind == "tool" and not row.get("tool"):
+            row["tool"] = (row.get("expected_tools") or ["unknown"])[0]
+        if kind == "tool" and row.get("domain_name") and not row.get("domain"):
+            row["domain"] = row["domain_name"]
+        if kind == "tick":
+            row.setdefault("scenario_name", row.get("question", ""))
+            row.setdefault("agent_instructions", "")
+            row.setdefault("strategy_instructions", "")
+            if not row.get("expected_tool_calls"):
+                row["expected_tool_calls"] = row.get("expected_tools", [])
+        by_type.setdefault(kind if kind in ("consult", "tick", "tool", "agent") else "consult", []).append(row)
 
-    return cases
-
-
-
+    loaders = {
+        "consult": load_consult_cases,
+        "tick": load_tick_cases,
+        "tool": load_tool_cases,
+        "agent": load_agent_cases,
+    }
+    cases: list[Case] = []
+    for kind, records in by_type.items():
+        cases += loaders[kind](records=records)
+    return sorted(cases, key=lambda c: order.get(c.id, 0))

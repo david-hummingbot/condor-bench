@@ -297,3 +297,39 @@ def test_candles_are_flat_at_the_fixture_price(mock):
     assert len(rows) == 5
     assert {r["close"] for r in rows} == {65000.0}
     assert rows[1]["timestamp"] - rows[0]["timestamp"] == 3600
+
+
+def test_a_timed_out_trial_still_undoes_what_it_created(monkeypatch):
+    """A trial cut off by its ceiling never returns a result; teardown must work
+    from the trace it got as far as recording. Before, a timed-out market buy left
+    its executor running and the next suite member's pre-flight refused to start."""
+    from types import SimpleNamespace
+
+    import bench.cleanup
+    import bench.client
+    import config
+    from bench.trials import run_trial
+
+    monkeypatch.setenv("BENCH_ENV_MODE", "live")
+    monkeypatch.setattr(config, "case_timeout_s", lambda _baseline=None: 0.05)
+
+    async def placed_an_order_then_hung(case, model):
+        trace = bench.client._PARTIAL_TRACE.get()
+        call = {"tool": "mcp__bench_staging__create_order_executor", "tool_call_id": "t1", "args": {}}
+        trace.turns.append(([call], [{"tool_call_id": "t1", "output": '{"executor_id": "ex1"}'}]))
+        await asyncio.sleep(10)
+
+    torn: list = []
+
+    async def fake_teardown(result, model, **kw):
+        torn.append([c["tool"] for c in result.tool_calls])
+        return SimpleNamespace(resources=[])
+
+    monkeypatch.setattr(bench.client, "run_case", placed_an_order_then_hung)
+    monkeypatch.setattr(bench.cleanup, "teardown", fake_teardown)
+    case = SimpleNamespace(id="c1", type="tool", risk_level="destructive", expected_tools=[])
+    cards: list = []
+    asyncio.run(run_trial(case, "m", SimpleNamespace(load=lambda _: None), 1, cards, {}))
+
+    assert len(cards) == 1 and "ceiling" in cards[0].harness_artifact
+    assert torn == [["mcp__bench_staging__create_order_executor"]]

@@ -22,10 +22,12 @@ import json
 import os
 import re
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterator
 
 from condor_compat.acp.pydantic_ai_client import PydanticAIClient
 from condor_compat.acp.acp_client import ACPClient, is_acp_model, resolve_acp
@@ -349,6 +351,42 @@ def _missing_required_tools(called: list[str], required: list[str]) -> list[str]
 
 # ── Result types ───────────────────────────────────────────────────────────────
 @dataclass
+class PartialTrace:
+    """The tool calls and responses a case has made so far, filled in as they stream.
+
+    A trial cut off by its timeout never returns a result, and teardown reads what
+    to undo from the trace — so without this, an order a model placed before it
+    ran out of time stayed open, and the next run's pre-flight refused to start.
+    Each turn's lists are shared, not copied, so the trace is current to the moment
+    the trial was cancelled.
+    """
+
+    turns: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = field(default_factory=list)
+
+    @property
+    def tool_calls(self) -> list[dict[str, Any]]:
+        return [c for calls, _ in self.turns for c in calls]
+
+    @property
+    def tool_responses(self) -> list[dict[str, Any]]:
+        return [r for _, responses in self.turns for r in responses]
+
+
+_PARTIAL_TRACE: ContextVar[PartialTrace | None] = ContextVar("partial_trace", default=None)
+
+
+@contextmanager
+def recording_trace() -> Iterator[PartialTrace]:
+    """Record every turn run inside the block (including tasks started in it)."""
+    trace = PartialTrace()
+    token = _PARTIAL_TRACE.set(trace)
+    try:
+        yield trace
+    finally:
+        _PARTIAL_TRACE.reset(token)
+
+
+@dataclass
 class TurnResult:
     response: str
     tool_calls: list[dict[str, Any]]
@@ -593,6 +631,8 @@ async def _stream_turn(
     # arguments and final status in place.
     call_index: dict[str, int] = {}
     error: str | None = None
+    if (partial := _PARTIAL_TRACE.get()) is not None:
+        partial.turns.append((tool_calls, tool_responses))
     t0 = time.monotonic()
     try:
         async for event in client.prompt_stream(prompt):

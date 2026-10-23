@@ -210,3 +210,87 @@ def test_the_form_remembers_lane_trials_split_and_category():
                 {"taskCategories": ["nope"]}):
         with pytest.raises(FormStateError):
             _clean_benchmark(bad)
+
+
+# ── Settings keys in the run form ──────────────────────────────────────────────
+def test_the_run_form_sees_a_settings_key_masked_never_raw(client, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secretvalue1234")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    providers = {p["id"]: p for p in client.get("/api/providers").json()["providers"]}
+    assert providers["openrouter"]["settings_key"] == "••••1234"
+    assert providers["groq"]["settings_key"] is None
+    assert providers["ollama"]["settings_key"] is None, "local providers take no key"
+    assert "secretvalue" not in client.get("/api/providers").text
+
+
+def test_a_settings_key_only_goes_to_that_providers_own_endpoint(monkeypatch):
+    from dashboard.backend.app import _settings_key_for
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secretvalue1234")
+    assert _settings_key_for("https://openrouter.ai/api/v1", "openrouter") == "sk-or-v1-secretvalue1234"
+    assert _settings_key_for("https://openrouter.ai/api/v1/", "openrouter") == "sk-or-v1-secretvalue1234"
+    # A caller-chosen URL never gets the install's key.
+    assert _settings_key_for("https://evil.example/v1", "openrouter") == ""
+    assert _settings_key_for("https://openrouter.ai/api/v1", "custom") == ""
+
+
+def test_model_listing_falls_back_to_the_settings_key(client, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secretvalue1234")
+    seen = {}
+
+    async def fake_get(self, url, headers=None, **kw):
+        seen["auth"] = (headers or {}).get("Authorization")
+        return httpx.Response(200, json={"data": [{"id": "openai/gpt-4o-mini"}]},
+                              request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    r = client.get("/api/provider-models", params={"base_url": "https://openrouter.ai/api/v1",
+                                                   "provider": "openrouter"})
+    assert r.status_code == 200 and "openai/gpt-4o-mini" in r.json()["models"]
+    assert seen["auth"] == "Bearer sk-or-v1-secretvalue1234"
+
+    r = client.get("/api/provider-models", params={"base_url": "https://evil.example/v1",
+                                                   "provider": "openrouter"})
+    assert seen["auth"] is None, "an unknown URL got the saved key"
+
+
+# ── Model catalogue for the suite pickers ──────────────────────────────────────
+def test_the_model_catalog_is_live_where_it_can_be_and_says_why_not(client, monkeypatch):
+    import dashboard.backend.app as A
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secretvalue1234")
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    calls = []
+
+    async def fake_list(base_url, api_key="", provider="", *, timeout=10):
+        calls.append((provider, api_key))
+        if provider == "openrouter":
+            return ["openai/gpt-4o-mini", "deepseek/deepseek-chat"]
+        if provider == "lmstudio":
+            return ["qwen2.5-7b-instruct"]
+        raise ConnectionError("refused")
+
+    monkeypatch.setattr(A, "_list_models", fake_list)
+    A._CATALOG_CACHE.update(at=0.0, data=None)
+    groups = {g["provider"]: g for g in client.get("/api/model-catalog").json()["groups"]}
+
+    assert list(groups)[0] == "registry", "the registry comes first"
+    assert groups["openrouter"]["source"] == "live"
+    assert "openrouter:deepseek/deepseek-chat" in groups["openrouter"]["models"]
+    assert ("openrouter", "sk-or-v1-secretvalue1234") in calls, "the Settings key is used"
+    assert groups["groq"]["source"] == "built-in" and "add a key in Settings" in groups["groq"]["note"]
+    assert not any(p == "groq" for p, _ in calls), "no key, no call"
+    assert "not reachable" in groups["ollama"]["note"]
+    assert groups["lmstudio"]["models"] == ["lmstudio:qwen2.5-7b-instruct"]
+    assert "claude-code:sonnet" in groups["claude-code"]["models"]
+    assert "secretvalue" not in client.get("/api/model-catalog").text
+
+    # Cached: a second load does not refetch; refresh does.
+    n = len(calls)
+    client.get("/api/model-catalog")
+    assert len(calls) == n
+    client.get("/api/model-catalog", params={"refresh": 1})
+    assert len(calls) > n
+    A._CATALOG_CACHE.update(at=0.0, data=None)

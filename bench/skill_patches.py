@@ -46,6 +46,11 @@ _PATCHES: list[tuple[str, str, str, str, str]] = [
 ]
 
 
+def patch_specs() -> list[tuple[str, str, str]]:
+    """``(relative path, bad, good)`` for each patch — to recognise a file bench patched."""
+    return [(rel, bad, good) for _name, rel, bad, good, _why in _PATCHES]
+
+
 @dataclass(frozen=True)
 class PatchResult:
     name: str

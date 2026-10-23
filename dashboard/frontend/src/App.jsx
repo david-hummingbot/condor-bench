@@ -7,6 +7,7 @@ import ModelRouter from './components/ModelRouter.jsx'
 import Runs from './components/Runs.jsx'
 import CustomPrompt from './components/CustomPrompt.jsx'
 import Suites from './components/Suites.jsx'
+import CompareCondor from './components/CompareCondor.jsx'
 import Settings from './components/Settings.jsx'
 import Overview from './components/Overview.jsx'
 import { listRuns } from './api.js'
@@ -26,7 +27,14 @@ import './styles.css'
  */
 const SECTIONS = [
   { id: 'overview', label: 'Overview' },
-  { id: 'suites', label: 'Suites' },
+  {
+    id: 'suites',
+    label: 'Suites',
+    pages: [
+      { id: 'compare', label: 'Compare Condor' },
+      { id: 'advanced', label: 'Advanced' },
+    ],
+  },
   {
     id: 'run',
     label: 'Quick Run',
@@ -94,6 +102,7 @@ export default function App() {
     try {
       const data = await listRuns()
       setRuns(data.runs || [])
+      return data
     } catch {}
   }, [])
 
@@ -108,7 +117,15 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    refreshRuns()
+    // A reload must not lose a run that is still going on the server — its state
+    // lives there, and the stream replays everything it has emitted so far.
+    refreshRuns().then((data) => {
+      const live = (data?.active || []).find((r) => r.run_type !== 'custom-prompt')
+      if (live) {
+        setActiveRunId((id) => id || live.run_id)
+        setRunStatus((s) => s || 'running')
+      }
+    })
     refreshConfig()
   }, [])
 
@@ -211,7 +228,8 @@ export default function App() {
         {key === 'overview' && (
           <Overview runs={runs} config={config} onNavigate={navigate} />
         )}
-        {key === 'suites' && <Suites onRunStarted={handleRunStarted} />}
+        {key === 'suites/compare' && <CompareCondor onRunStarted={handleRunStarted} />}
+        {key === 'suites/advanced' && <Suites onRunStarted={handleRunStarted} />}
         {key === 'run/benchmark' && (
           <RunConfig onRunStarted={handleRunStarted} isRunning={isRunning} config={config} />
         )}

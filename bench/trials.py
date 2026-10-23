@@ -119,7 +119,7 @@ async def run_trial(
     caller needs in order to stop.
     """
     from bench.cleanup import created_resources, teardown
-    from bench.client import run_case
+    from bench.client import recording_trace, run_case
     from bench.dataset import is_mutating
     from bench.reporter import trial_key
     from bench.scorer import harness_card, score_case, timeout_card, with_trial
@@ -130,6 +130,7 @@ async def run_trial(
     lane = current_lane()
     response = ""
     error: str | None = None
+    partial = None
 
     if lane == "mock":
         # Every trial starts from the fixture: the mock is stateful, and a trial
@@ -147,7 +148,8 @@ async def run_trial(
         # proportional to how slow it has always been.
         baseline = store.load(case.id)
         timeout_s = case_timeout_s(baseline.latency_s if baseline else None)
-        with case_span(case.id, trial=trial, model=model, lane=lane) as trace_link:
+        with case_span(case.id, trial=trial, model=model, lane=lane) as trace_link, \
+                recording_trace() as partial:
             result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
         baseline_latency = baseline.latency_s if baseline else result.latency_s
         card = await score_case(case, result, baseline_latency, trial_idx=trial)
@@ -190,6 +192,17 @@ async def run_trial(
         error = f"{exc} — recorded as a harness artifact"
     scorecards.append(card)
     await events._fire("trial_done", case, trial, card, response, error)
+    # A trial cut off mid-way may already have created something — a timed-out
+    # `budgeted_buy` left its market order's executor running, and the next run's
+    # pre-flight refused to start. Undo what its trace got as far as recording.
+    if partial is not None and (is_mutating(case) or created_resources(partial)):
+        report = await teardown(
+            partial,
+            model,
+            agent_slug=getattr(case, "agent_slug", None),
+            tick=getattr(case, "type", "") == "tick",
+        )
+        await events._fire("cleanup", case, trial, report)
     return card
 
 

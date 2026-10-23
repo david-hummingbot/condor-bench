@@ -45,10 +45,12 @@ async def _run(job: dict) -> dict:
     include_in_matrix = bool(job.get("include_in_matrix", False))
     member_run_id = job.get("member_run_id") or uuid.uuid4().hex[:8]
 
-    from bench.staging_health import StagingUnhealthy, assert_ready
+    from bench.staging_health import StagingUnhealthy, a_assert_ready
 
+    # The async form: this already runs inside asyncio.run(), and the sync
+    # assert_ready() starts its own loop — which failed every suite member at start.
     try:
-        assert_ready()
+        await a_assert_ready()
     except StagingUnhealthy as exc:
         return {"ok": False, "error": str(exc), "member_run_id": member_run_id}
 
@@ -106,7 +108,26 @@ async def _run(job: dict) -> dict:
 
     trials = max(1, int(job.get("trials") or 1))
     cases, _skipped = cases_for_lane(cases)
-    await run_cases(cases, model, store, trials, scorecards=scorecards, responses=responses)
+
+    # Bind declared markets ({venue.pair} …) against this checkout's target. A case
+    # that cannot bind is recorded as a harness row per trial, not run with its
+    # placeholders and not silently dropped.
+    from bench.market_resolver import resolve_cases, split_resolvable, unresolvable_card
+    from bench.scorer import with_trial
+
+    bound, resolutions = await resolve_cases(cases)
+    cases, unbindable = split_resolvable(bound, resolutions)
+    for case in unbindable:
+        card = unresolvable_card(case, model, resolutions[case.id])
+        scorecards.extend(with_trial(card, t) for t in range(1, trials + 1))
+    for case in cases:
+        rendered = getattr(case, "question", None) or getattr(case, "scenario_name", None)
+        if rendered:
+            prompts[case.id] = rendered
+    await run_cases(
+        cases, model, store, trials, scorecards=scorecards, responses=responses,
+        events=_progress_events(cases, model, trials, already=len(scorecards)),
+    )
 
     pin = build_manifest(
         run_type="suite",
@@ -140,6 +161,37 @@ async def _run(job: dict) -> dict:
         "summary_path": str(run_dir / "summary.json"),
         "cases": len(cases),
     }
+
+
+def _progress_events(cases: list, model: str, trials: int, *, already: int):
+    """Report each trial on stdout as it starts and finishes (``PROGRESS_PREFIX``
+    lines), so the dashboard can show a member's progress while it runs."""
+    from bench.client import case_input_text
+    from bench.suite_runner import PROGRESS_PREFIX
+    from bench.trials import TrialEvents
+
+    total = already + len(cases) * trials
+    done = already
+
+    def send(event: dict) -> None:
+        print(PROGRESS_PREFIX + json.dumps(event, default=str), flush=True)
+
+    async def trial_started(case, trial, n):
+        send({"type": "case_started", "model": model, "case_id": case.id, "trial": trial,
+              "trials": n, "case_type": case.type, "case_number": done + 1, "total": total,
+              "question": case_input_text(case)})
+
+    async def trial_done(case, trial, card, response, error):
+        nonlocal done
+        done += 1
+        scorecard = card.as_dict()
+        scorecard["question"] = case_input_text(case)
+        send({"type": "case_done", "model": model, "case_id": case.id, "trial": trial,
+              "scorecard": scorecard, "response": (response or "")[:1000],
+              "question": scorecard["question"], "error": error,
+              "completed": done, "total": total})
+
+    return TrialEvents(trial_started=trial_started, trial_done=trial_done)
 
 
 def main() -> int:

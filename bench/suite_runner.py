@@ -15,6 +15,12 @@ from bench.suites import get_environment, get_suite
 from config import ROOT
 
 DEFAULT_TRIALS = 1
+#: A worker's stdout line starting with this carries one progress event as JSON.
+#: Every other line is the worker's own output; the last of those is its result.
+PROGRESS_PREFIX = "@@bench-progress "
+#: A progress line carries a scorecard and a response; the 64 KiB default would
+#: fail the read on a long one.
+_WORKER_LINE_LIMIT = 16 * 1024 * 1024
 
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
 WaitFn = Callable[[], Awaitable[None]]
@@ -177,8 +183,9 @@ async def run_suite(
 ) -> dict[str, Any]:
     """Fan out suite × environments × models via subprocess workers.
 
-    Returns ``{run_group_id, members: [...]}``. Emits ``member_*`` and case-level
-    progress is owned by the worker (parent only sees member boundaries).
+    Returns ``{run_group_id, members: [...]}``. Emits ``member_*`` at member
+    boundaries, and passes on each worker's ``case_started`` / ``case_done`` as it
+    reports them, counted across the whole group.
     """
     suite = get_suite(suite_id)
     env_ids = environment_ids or list(suite.get("environment_ids") or [])
@@ -239,6 +246,7 @@ async def run_suite(
     results: list[dict[str, Any]] = []
     current_proc: asyncio.subprocess.Process | None = None
 
+    member_total = 0  # trials per member, from the first worker that reports
     for index, (env, model_cfg) in enumerate(members_plan):
         # Members are subprocesses, so this is the finest boundary the parent can
         # pause on — the current member runs to completion first. Held before the
@@ -334,10 +342,36 @@ async def run_suite(
                 env=env_vars,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=_WORKER_LINE_LIMIT,
             )
-            stdout_b, stderr_b = await current_proc.communicate()
-            stdout = stdout_b.decode("utf-8", errors="replace").strip()
-            stderr = stderr_b.decode("utf-8", errors="replace").strip()
+            # Read as it runs, not at exit: a member is a whole checkout's worth of
+            # cases × trials, and waiting for it left the progress bar still for
+            # half an hour. Progress is counted across the group, assuming each
+            # member runs the size of the first one that reported.
+            stderr_task = asyncio.create_task(current_proc.stderr.read())
+            out_lines: list[str] = []
+            async for raw in current_proc.stdout:
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line.startswith(PROGRESS_PREFIX):
+                    out_lines.append(line)
+                    continue
+                try:
+                    event = json.loads(line[len(PROGRESS_PREFIX):])
+                except ValueError:
+                    continue
+                member_total = member_total or int(event.get("total") or 0)
+                event.update(
+                    environment_id=env["id"],
+                    member_index=index + 1,
+                    total_members=len(members_plan),
+                    total=member_total * len(members_plan),
+                )
+                if "completed" in event:
+                    event["completed"] = member_total * index + int(event["completed"])
+                await emit(event)
+            await current_proc.wait()
+            stdout = "\n".join(out_lines).strip()
+            stderr = (await stderr_task).decode("utf-8", errors="replace").strip()
             payload: dict[str, Any]
             try:
                 # Worker prints a single JSON object on the last non-empty line.

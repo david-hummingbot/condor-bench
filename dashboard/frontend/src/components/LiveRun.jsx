@@ -24,6 +24,9 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
   // finishes the case in flight. `status` becomes 'paused' when it actually stops.
   const [pausePending, setPausePending] = useState(false)
   const esRef = useRef(null)
+  // A suite run reports per trial once a member's worker starts; from then on the
+  // bar counts trials, and member boundaries must not reset it to member counts.
+  const trialProgress = useRef(false)
 
   const [memberInfo, setMemberInfo] = useState(null)
 
@@ -34,6 +37,7 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
     setCompleted(0)
     setError('')
     setMemberInfo(null)
+    trialProgress.current = false
 
     const es = new EventSource(streamUrl(runId))
     esRef.current = es
@@ -58,10 +62,12 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
           total: evt.total_members,
           environment_id: evt.environment_id,
         })
-        setCompleted(Math.max(0, (evt.member_index || 1) - 1))
-        setTotal(evt.total_members || 0)
+        if (!trialProgress.current) {
+          setCompleted(Math.max(0, (evt.member_index || 1) - 1))
+          setTotal(evt.total_members || 0)
+        }
       } else if (t === 'member_done') {
-        setCompleted(evt.member_index || completed + 1)
+        if (!trialProgress.current) setCompleted(evt.member_index || completed + 1)
         setCases(prev => [
           {
             case_id: `member:${evt.environment_id}`,
@@ -83,13 +89,14 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
           },
           ...prev,
         ])
-        setCompleted((c) => c + 1)
+        if (!trialProgress.current) setCompleted((c) => c + 1)
       } else if (t === 'model_started') {
         setCurrentModel(evt.model)
       } else if (t === 'note') {
         // Runner notes: the lane in use, cases another lane needs, warmup detail.
         setNotes(prev => [...prev.slice(-19), evt])
       } else if (t === 'case_started') {
+        if (evt.member_index) trialProgress.current = true
         setCurrentCase({ id: evt.case_id, type: evt.case_type, trial: evt.trial, trials: evt.trials })
         setTotal(evt.total || 0)
       } else if (t === 'case_done') {
@@ -103,6 +110,7 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
               response: evt.response,
               question: evt.question || evt.scorecard.question,
               model: evt.model,
+              environment_id: evt.environment_id,
               error: evt.error,
             },
             ...prev,
@@ -313,6 +321,7 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
                     </td>
                     <td style={{ color: 'var(--muted)', fontSize: 12 }}>
                       {c.model ? c.model.split(':').slice(1).join(':') || c.model : '—'}
+                      {c.environment_id && <div>{c.environment_id}</div>}
                     </td>
                     <td style={{ textAlign: 'right', color: scoreColor(c.composite), fontWeight: 600 }}>
                       {fmtScore(c.composite)}
