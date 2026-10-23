@@ -9,8 +9,7 @@ import {
   createSuiteCase,
   deleteEnvironment,
   deleteSuiteCase,
-  getModelRegistry,
-  getProviders,
+  getModelCatalog,
   getSuite,
   importSuiteCases,
   listEnvironments,
@@ -23,7 +22,7 @@ import {
 } from '../api.js'
 import PageHeader from './PageHeader.jsx'
 import EmptyState from './EmptyState.jsx'
-import ModelPicker from './ModelPicker.jsx'
+import ModelPicker, { catalogOptions } from './ModelPicker.jsx'
 
 const SUITE_TABS = [
   { id: 'cases', label: 'Cases' },
@@ -31,33 +30,6 @@ const SUITE_TABS = [
   { id: 'compare', label: 'Compare' },
   { id: 'envs', label: 'Environments' },
 ]
-
-function buildModelOptions(registry, providers) {
-  const seen = new Set()
-  const out = []
-  for (const m of registry || []) {
-    if (!m.key || seen.has(m.key)) continue
-    seen.add(m.key)
-    const size = m.params_b != null ? `${m.params_b}B` : m.provider || 'cloud'
-    out.push({ key: m.key, label: `${m.key} (${size})` })
-  }
-  for (const p of providers || []) {
-    if (p.bare_key) {
-      if (!seen.has(p.id)) {
-        seen.add(p.id)
-        out.push({ key: p.id, label: `${p.label} (agent)` })
-      }
-      continue
-    }
-    for (const model of p.models || []) {
-      const key = `${p.id}:${model}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      out.push({ key, label: key })
-    }
-  }
-  return out
-}
 
 export default function Suites({ onRunStarted }) {
   const [suites, setSuites] = useState([])
@@ -101,13 +73,13 @@ export default function Suites({ onRunStarted }) {
   useEffect(() => {
     refresh().catch((err) => setError(String(err.message || err)))
     listPresets().then((d) => setPresets(d.presets || [])).catch(() => {})
-    Promise.all([getModelRegistry(), getProviders()])
-      .then(([reg, prov]) => {
-        const opts = buildModelOptions(reg.models, prov.providers)
+    getModelCatalog()
+      .then((catalog) => {
+        const opts = catalogOptions(catalog)
         setModelOptions(opts)
         setSuiteForm((f) => ({
           ...f,
-          model_key: f.model_key || opts[0]?.key || '',
+          model_key: f.model_key || opts.find((o) => !o.note)?.id || '',
         }))
       })
       .catch(() => {})
@@ -169,7 +141,7 @@ export default function Suites({ onRunStarted }) {
       setSuiteForm({
         name: '',
         environment_ids: [],
-        model_key: modelOptions[0]?.key || '',
+        model_key: modelOptions.find((o) => !o.note)?.id || '',
       })
       await refresh()
       setSelectedId(created.id)
@@ -361,7 +333,7 @@ export default function Suites({ onRunStarted }) {
             <label className="settings-field">
               <span className="settings-label">Model</span>
               <ModelPicker
-                models={modelOptions.map((m) => ({ id: m.key, name: m.label }))}
+                models={modelOptions}
                 value={suiteForm.model_key}
                 onChange={(v) => setSuiteForm({ ...suiteForm, model_key: v })}
                 placeholder="Choose a model"
@@ -687,7 +659,7 @@ const ci = (c, f = (x) => x.toFixed(3)) => (c ? `[${f(c[0])}, ${f(c[1])}]` : '')
  * Paired deltas difference the same case and trial on both sides, which is what
  * lets a few dozen tasks resolve a real change.
  */
-function CompareView({ compare }) {
+export function CompareView({ compare }) {
   const pairs = compare.deltas?.pairs || []
   return (
     <>

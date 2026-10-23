@@ -13,6 +13,7 @@
 # Results (not tracked — too large; track baselines separately)
 results/
 !results/.gitkeep
+results-archive/
 
 # Baselines are tracked so teams share the same reference
 # baseline/
@@ -26,6 +27,8 @@ results/
 # excluded directory to reconsider files inside it.
 suites/environments/*
 !suites/environments/.gitkeep
+# Suites Compare Condor generates — they point at this machine's checkouts.
+suites/compare-*/
 
 # Python
 __pycache__/
@@ -48,3 +51,5 @@ node_modules/
 # Runtime artefact: condor's ConfigManager appends here when bench registers its
 # staging server entry, so it grows on every staging-check / test run.
 audit_log.yml
+# Bench-managed worktrees of condor branches/PRs (Compare Condor)
+.condor-worktrees/

@@ -1,13 +1,37 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 
 function asOption(m) {
-  if (typeof m === 'string') return { id: m, name: m, description: '' }
+  if (typeof m === 'string') return { id: m, name: m, description: '', group: '' }
   const id = m.id || m.key
   return {
     id,
     name: m.name || m.label || id,
     description: m.description || '',
+    group: m.group || '',
+    note: m.note || '',
   }
+}
+
+/**
+ * Picker options from /api/model-catalog: every provider's models, in the
+ * catalogue's group order, each id once (the registry claims it first). A group
+ * with nothing to offer still shows its note ("not reachable", "add a key").
+ */
+export function catalogOptions(catalog) {
+  const seen = new Set()
+  const out = []
+  for (const g of catalog?.groups || []) {
+    const group = g.source === 'live' ? `${g.label} · live (${g.models.length})` : g.label
+    let added = 0
+    for (const key of g.models || []) {
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ id: key, name: g.labels?.[key] || key, group, description: g.note || '' })
+      added += 1
+    }
+    if (!added && g.note) out.push({ id: `__note__${g.provider}`, name: g.note, group, note: true })
+  }
+  return out
 }
 
 /**
@@ -33,14 +57,16 @@ export default function ModelPicker({
   const searchRef = useRef(null)
   const selectedRef = useRef(null)
 
-  const options = useMemo(
+  const allOptions = useMemo(
     () => (models || []).map(asOption).filter(o => o.id),
     [models],
   )
+  // Note rows (a group with nothing to offer) are shown, never selectable.
+  const options = useMemo(() => allOptions.filter(o => !o.note), [allOptions])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return options
+    if (!q) return allOptions
     return options.filter(o =>
       o.id.toLowerCase().includes(q)
       || o.name.toLowerCase().includes(q)
@@ -140,9 +166,15 @@ export default function ModelPicker({
                 {emptyLabel}
               </button>
             )}
-            {filtered.map(o => (
+            {filtered.map((o, i) => (
+              <Fragment key={o.id}>
+              {o.group && o.group !== filtered[i - 1]?.group && (
+                <div className="model-picker-group">{o.group}</div>
+              )}
+              {o.note ? (
+                <div className="model-picker-empty">{o.name}</div>
+              ) : (
               <button
-                key={o.id}
                 type="button"
                 ref={o.id === value ? selectedRef : null}
                 data-selected={o.id === value ? 'true' : undefined}
@@ -155,6 +187,8 @@ export default function ModelPicker({
                   <span className="model-picker-option-id">{o.id}</span>
                 )}
               </button>
+              )}
+              </Fragment>
             ))}
             {!filtered.length && (
               <div className="model-picker-empty">No matches</div>

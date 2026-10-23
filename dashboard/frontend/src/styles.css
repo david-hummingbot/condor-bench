@@ -750,3 +750,10 @@ code { font-family: var(--mono); font-size: 0.92em; }
   .page-header { flex-direction: column; }
   .page-header-actions { margin-left: 0; }
 }
+
+.model-picker-group {
+  position: sticky; top: 0; z-index: 1;
+  padding: 6px 10px 4px; font-size: 10px; font-weight: 650; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--muted); background: var(--panel);
+  border-top: 1px solid var(--border);
+}

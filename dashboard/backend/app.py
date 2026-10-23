@@ -939,15 +939,21 @@ async def get_providers():
     # Providers marked `registry_models` list the registry's models for their prefix.
     from bench.matrix import load_models
 
+    return {"providers": [{**p, "settings_key": _settings_key_display(p)} for p in _resolved_providers()]}
+
+
+def _resolved_providers() -> list[dict]:
+    """PROVIDERS with registry-backed model lists filled in (NVIDIA's nim-smoke'd set)."""
+    from bench.matrix import load_models
+
     registry = [m.key for m in load_models()]
     out = []
     for p in PROVIDERS:
         if p.get("registry_models"):
             prefix = f"{p['id']}:"
             p = {**p, "models": [k[len(prefix):] for k in registry if k.startswith(prefix)]}
-        p = {**p, "settings_key": _settings_key_display(p)}
         out.append(p)
-    return {"providers": out}
+    return out
 
 
 def _settings_key_display(provider: dict) -> str | None:
@@ -1063,12 +1069,14 @@ def _fallback_model_urls(base_url: str, provider: str = "") -> list[str]:
     return out
 
 
-@app.get("/api/provider-models")
-async def get_provider_models(base_url: str, api_key: str = "", provider: str = ""):
+async def _list_models(
+    base_url: str, api_key: str = "", provider: str = "", *, timeout: float = 10
+) -> list[str]:
+    """Model ids an OpenAI-compatible (or Ollama / LM Studio) endpoint lists.
+
+    Raises the last error when no list endpoint answered with any model.
+    """
     headers: dict[str, str] = {}
-    # No key typed in the form: use the one saved in Settings, for that provider's
-    # own endpoint only.
-    api_key = api_key or _settings_key_for(base_url, provider)
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     urls = [_openai_compat_models_url(base_url), *_fallback_model_urls(base_url, provider)]
@@ -1083,18 +1091,97 @@ async def get_provider_models(base_url: str, api_key: str = "", provider: str = 
 
     collected: set[str] = set()
     last_error: Exception | None = None
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        parts = await asyncio.gather(*(_one(client, url) for url in urls))
+    for ids, err in parts:
+        collected.update(ids)
+        if err is not None:
+            last_error = err
+    if collected:
+        return sorted(collected)
+    raise last_error or RuntimeError("no models returned")
+
+
+@app.get("/api/provider-models")
+async def get_provider_models(base_url: str, api_key: str = "", provider: str = ""):
+    # No key typed in the form: use the one saved in Settings, for that provider's
+    # own endpoint only.
+    api_key = api_key or _settings_key_for(base_url, provider)
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            parts = await asyncio.gather(*(_one(client, url) for url in urls))
-        for ids, err in parts:
-            collected.update(ids)
-            if err is not None:
-                last_error = err
+        return {"models": await _list_models(base_url, api_key, provider)}
     except Exception as exc:
         raise HTTPException(400, str(exc))
-    if collected:
-        return {"models": sorted(collected)}
-    raise HTTPException(400, str(last_error) if last_error else "no models returned")
+
+
+# Live catalogues change slowly and some are hundreds of ids; a page load should
+# not refetch OpenRouter each time. ``?refresh=1`` bypasses this.
+_CATALOG_CACHE: dict[str, Any] = {"at": 0.0, "data": None}
+_CATALOG_TTL_S = 300
+#: Claude Code aliases the bridge advertises; any other id can still be typed.
+_ACP_ALIASES = {"claude-code": ["sonnet", "opus", "haiku"]}
+
+
+async def _catalog_group(p: dict) -> dict:
+    """One provider's models as full model keys, live where that is possible."""
+    group = {"provider": p["id"], "label": p["label"], "source": "built-in", "note": "", "models": []}
+    if p.get("bare_key"):
+        group["source"] = "agent"
+        group["models"] = [p["id"]] + [f"{p['id']}:{a}" for a in _ACP_ALIASES.get(p["id"], [])]
+        group["note"] = "runs whatever model its CLI is set to unless a :model is named"
+        return group
+    static = [f"{p['id']}:{m}" for m in p.get("models") or []]
+    if not p.get("fetch_models"):
+        group["models"] = static
+        return group
+    if p.get("kind") == "cloud":
+        key = _settings_key_for(str(p.get("api_base") or ""), p["id"])
+        if not key:
+            group["models"] = static
+            group["note"] = "starter list — add a key in Settings for the full catalogue"
+            return group
+        url = str(p["api_base"])
+    else:
+        url = str(p.get("default_url") or "")
+        key = ""
+        if not url:
+            return {**group, "note": "needs a URL — use Quick Run → Benchmark"}
+    try:
+        # A local server answers at once or is not running; don't hold the page.
+        ids = await _list_models(url, key, p["id"], timeout=2 if p.get("kind") == "local" else 6)
+        group["models"] = [f"{p['id']}:{m}" for m in ids]
+        group["source"] = "live"
+    except Exception as exc:  # noqa: BLE001 — a dead provider must not sink the page
+        group["models"] = static
+        group["note"] = (
+            f"not reachable at {url}" if p.get("kind") == "local" else f"catalogue unavailable ({exc})"
+        )[:160]
+    return group
+
+
+@app.get("/api/model-catalog")
+async def get_model_catalog(refresh: bool = False):
+    """Every model a run can use, grouped by provider, live catalogues included.
+
+    The registry (datasets/models.json) first, then each provider: OpenRouter and
+    Groq from their live lists with the Settings key, Ollama and LM Studio from
+    what is installed locally, the rest from their built-in lists.
+    """
+    now = time.time()
+    if not refresh and _CATALOG_CACHE["data"] and now - _CATALOG_CACHE["at"] < _CATALOG_TTL_S:
+        return _CATALOG_CACHE["data"]
+
+    from bench.matrix import load_models
+
+    registry = []
+    for m in load_models():
+        size = f"{m.params_b:g}B" if m.params_b is not None else m.provider
+        registry.append({"key": m.key, "label": f"{m.key} ({size})"})
+    groups = [{"provider": "registry", "label": "Registry (datasets/models.json)", "source": "registry",
+               "note": "", "models": [r["key"] for r in registry], "labels": {r["key"]: r["label"] for r in registry}}]
+    groups += await asyncio.gather(*(_catalog_group(p) for p in _resolved_providers()))
+    data = {"groups": groups, "generated_at": now}
+    _CATALOG_CACHE.update(at=now, data=data)
+    return data
 
 
 class ModelConfig(BaseModel):
@@ -1650,6 +1737,11 @@ class SuiteRunRequest(BaseModel):
 
 @app.post("/api/suites/{suite_id}/run")
 async def api_run_suite(suite_id: str, req: SuiteRunRequest):
+    return await _start_suite_run(suite_id, req)
+
+
+async def _start_suite_run(suite_id: str, req: SuiteRunRequest) -> dict:
+    """Validate and start a suite run in the background; shared with Compare Condor."""
     from bench.suites import SuiteStoreError, get_suite
 
     for state in _active_runs.values():
@@ -1736,6 +1828,83 @@ async def api_run_suite(suite_id: str, req: SuiteRunRequest):
     task = asyncio.create_task(_go())
     _active_runs[run_id]["task"] = task
     return {"run_id": run_id, "suite_id": suite_id}
+
+
+# ── Compare Condor (current checkout vs a branch / PR / folder) ────────────────
+class ComparePrepareRequest(BaseModel):
+    folder: str | None = None
+    # A branch name, or a PR as "#285".
+    ref: str | None = None
+
+
+class CompareRunRequest(BaseModel):
+    candidate_path: str
+    label: str = ""
+    model: ModelConfig
+    trials: int = Field(1, ge=1, le=10)
+    case_set: str = "practical"
+
+
+@app.get("/api/compare-condor")
+async def api_compare_condor():
+    """The fixed baseline, checkouts worth offering as the candidate, and case sets."""
+    from bench import condor_compare as cc
+
+    try:
+        base = cc.baseline().as_dict()
+        found = [c.as_dict() for c in await asyncio.to_thread(cc.candidates)]
+    except cc.CompareError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    sets = {}
+    for path in sorted(cc.TEMPLATES_DIR.glob("*.jsonl")):
+        rows = cc.load_template(path.stem)
+        sets[path.stem] = [
+            {"id": r.get("id"), "question": r.get("question"), "risk_level": r.get("risk_level", "read_only"),
+             "tags": r.get("tags", [])}
+            for r in rows
+        ]
+    return {"baseline": base, "candidates": found, "case_sets": sets,
+            "worktree_root": str(cc.WORKTREE_ROOT)}
+
+
+@app.post("/api/compare-condor/prepare")
+async def api_compare_prepare(req: ComparePrepareRequest):
+    """Make the candidate runnable: worktree for a branch/PR, local config, uv env."""
+    from bench import condor_compare as cc
+
+    try:
+        return await asyncio.to_thread(cc.prepare, folder=req.folder or None, ref=req.ref or None)
+    except cc.CompareError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/compare-condor/run")
+async def api_compare_run(req: CompareRunRequest):
+    """Set up the Experiment A suite (baseline vs candidate) and start it."""
+    from bench import condor_compare as cc
+
+    try:
+        suite = await asyncio.to_thread(
+            cc.setup_suite, req.candidate_path, label=req.label,
+            model=req.model.model_dump(), case_set=req.case_set,
+        )
+    except cc.CompareError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    started = await _start_suite_run(
+        suite["id"], SuiteRunRequest(trials=req.trials, experiment_type="A")
+    )
+    return {**started, "suite": suite}
+
+
+@app.delete("/api/compare-condor/worktrees/{slug}")
+async def api_compare_remove_worktree(slug: str):
+    from bench import condor_compare as cc
+
+    try:
+        await asyncio.to_thread(cc.remove_worktree, slug)
+    except cc.CompareError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"removed": slug}
 
 
 @app.get("/api/run-groups/{run_group_id}")
