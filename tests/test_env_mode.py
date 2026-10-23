@@ -333,3 +333,43 @@ def test_a_timed_out_trial_still_undoes_what_it_created(monkeypatch):
 
     assert len(cards) == 1 and "ceiling" in cards[0].harness_artifact
     assert torn == [["mcp__bench_staging__create_order_executor"]]
+
+
+def test_a_cancelled_trial_still_undoes_what_it_created(monkeypatch):
+    """The dashboard's Cancel, a server shutdown or a stopped suite worker cancel
+    the trial; an order it already placed must not stay open on staging."""
+    from types import SimpleNamespace
+
+    import bench.cleanup
+    import bench.client
+    from bench.trials import run_trial
+
+    monkeypatch.setenv("BENCH_ENV_MODE", "live")
+    placed = asyncio.Event()
+
+    async def placed_an_order_then_hung(case, model):
+        trace = bench.client._PARTIAL_TRACE.get()
+        call = {"tool": "mcp__bench_staging__create_order_executor", "tool_call_id": "t1", "args": {}}
+        trace.turns.append(([call], [{"tool_call_id": "t1", "output": '{"executor_id": "ex1"}'}]))
+        placed.set()
+        await asyncio.sleep(60)
+
+    torn: list = []
+
+    async def fake_teardown(result, model, **kw):
+        torn.append([c["tool"] for c in result.tool_calls])
+        return SimpleNamespace(resources=[])
+
+    monkeypatch.setattr(bench.client, "run_case", placed_an_order_then_hung)
+    monkeypatch.setattr(bench.cleanup, "teardown", fake_teardown)
+    case = SimpleNamespace(id="c1", type="tool", risk_level="destructive", expected_tools=[])
+
+    async def go():
+        task = asyncio.create_task(run_trial(case, "m", SimpleNamespace(load=lambda _: None), 1, [], {}))
+        await placed.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert torn == [["mcp__bench_staging__create_order_executor"]], "undone exactly once"

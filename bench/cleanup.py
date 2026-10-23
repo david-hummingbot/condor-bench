@@ -97,6 +97,16 @@ _STATE_SETTERS: dict[str, dict[str, Any]] = {
 # account / connector / pair rather than resetting something else.
 _STATE_SETTER_SCOPE = ("account_name", "connector_name", "trading_pair")
 
+# Args that pick *which store* a create wrote to, carried into its undo. condor's
+# `manage_routines` resolves its library from `agent` / `shared`, and
+# `manage_skill` from `agent`; an undo without them looks in the environment's
+# default library — missing the routine the case made, or deleting a same-named one
+# that was already there.
+_UNDO_SCOPE: dict[str, tuple[str, ...]] = {
+    "manage_routines": ("agent", "shared"),
+    "manage_skill": ("agent",),
+}
+
 _UNDO = {
     # Typed create tools undo through stop_executor; the empty action means
     # _undo_args must not send ``action=`` (stop_executor does not take one).
@@ -291,9 +301,15 @@ def created_resources(result: Any) -> list[CreatedResource]:
             # than inferring creation from a default.
             if action not in creating:
                 continue
-        identifier = _identifier(
-            tool, args, responses_by_id.get(call.get("tool_call_id")), action
-        )
+        response = responses_by_id.get(call.get("tool_call_id"))
+        # A create the tool refused created nothing, and undoing it can destroy
+        # something that predates the run: condor's `create_routine` answers
+        # "Routine 'x' already exists" for a taken name, and the undo then deleted
+        # the user's own routine x. A create still in flight (no response yet) is
+        # kept — it may have landed.
+        if response is not None and tool_error(response, tool):
+            continue
+        identifier = _identifier(tool, args, response, action)
         found.append(
             CreatedResource(
                 tool=tool,
@@ -374,6 +390,9 @@ def tool_error(outcome: Any, tool: str = "") -> str | None:
     text = _outcome_text(outcome)
     # FastMCP servers also answer with a plain string for an unknown action.
     if text and re.match(r"\s*(unknown|invalid|unsupported)\s+action\b", text, re.I):
+        return text.strip()[:200]
+    # The MCP SDK's own wording for a tool that raised, when the trace kept only text.
+    if text and re.match(r"\s*error executing tool\b", text, re.I):
         return text.strip()[:200]
 
     # condor's tools report a *refused* call as an ordinary result whose content is
@@ -532,6 +551,9 @@ def _undo_args(resource: CreatedResource, undo_action: str) -> dict[str, Any]:
     args: dict[str, Any] = {}
     if undo_action:
         args["action"] = undo_action
+    for key in _UNDO_SCOPE.get(resource.tool, ()):
+        if resource.args.get(key) is not None:
+            args[key] = resource.args[key]
     by_create = _UNDO_BY_CREATE.get((resource.tool, resource.action))
     if by_create:
         args[by_create[1]] = resource.identifier
