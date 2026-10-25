@@ -140,6 +140,22 @@ def test_clearing_the_last_field_removes_the_env_line(tmp_path, monkeypatch):
     assert FORM_STATE_KEY not in text
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [("envMode", "mock"), ("trials", 3), ("splits", ["regression"]),
+     ("taskCategories", ["negative_safety"])],
+)
+def test_a_form_that_only_sets_lane_trials_split_or_category_is_kept(
+    tmp_path, monkeypatch, field, value
+):
+    # These four were missing from the blank check, so a form that set only one
+    # of them was deleted from .env and came back as live with one trial.
+    path = _env(tmp_path, monkeypatch)
+    update_form_state({"benchmark": {field: value}})
+    assert FORM_STATE_KEY in path.read_text()
+    assert get_form_state()["benchmark"][field] == value
+
+
 def test_settings_save_keeps_the_form_line_verbatim(tmp_path, monkeypatch):
     from bench import settings_store
 

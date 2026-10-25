@@ -1193,8 +1193,13 @@ async def _list_models(
     raise last_error or RuntimeError("no models returned")
 
 
-@app.get("/api/provider-models")
-async def get_provider_models(base_url: str, api_key: str = "", provider: str = ""):
+class ProviderModelsRequest(BaseModel):
+    base_url: str
+    api_key: str = ""
+    provider: str = ""
+
+
+async def _provider_models(base_url: str, api_key: str, provider: str) -> dict:
     # No key typed in the form: use the one saved in Settings, for that provider's
     # own endpoint only.
     api_key = api_key or _settings_key_for(base_url, provider)
@@ -1202,6 +1207,21 @@ async def get_provider_models(base_url: str, api_key: str = "", provider: str = 
         return {"models": await _list_models(base_url, api_key, provider)}
     except Exception as exc:
         raise HTTPException(400, str(exc))
+
+
+@app.post("/api/provider-models")
+async def post_provider_models(body: ProviderModelsRequest):
+    # A typed key travels in the body. It used to be a query parameter, and
+    # uvicorn's access log writes the full request line, so every "Load models"
+    # click left the key in plaintext in the server log.
+    return await _provider_models(body.base_url, body.api_key, body.provider)
+
+
+@app.get("/api/provider-models")
+async def get_provider_models(base_url: str, provider: str = ""):
+    # Kept for keyless lookups (local servers, or the key saved in Settings). It
+    # takes no api_key on purpose: anything in the query string is logged.
+    return await _provider_models(base_url, "", provider)
 
 
 # Live catalogues change slowly and some are hundreds of ids; a page load should

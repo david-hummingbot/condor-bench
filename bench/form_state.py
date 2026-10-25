@@ -229,21 +229,13 @@ def _choice_list(value: Any, name: str, allowed: frozenset[str]) -> list[str]:
 
 
 def _blank(state: dict[str, Any]) -> bool:
-    if state.get("providers"):
-        return False
-    bench = state["benchmark"]
-    if (
-        bench["layers"]
-        or bench["domain"]
-        or bench["category"]
-        or bench["riskLevels"]
-        or bench["coreOnly"]
-    ):
-        return False
-    prompt = state["prompt"]
-    if prompt["question"] or prompt["turns"] or prompt["expectedTools"] or prompt["agentSlug"]:
-        return False
-    return True
+    # Blank means "every field still at its default", judged against the same
+    # defaults the form loads with. A hand-kept list of fields went stale when
+    # envMode, trials, splits and taskCategories were added: a form that set only
+    # those counted as blank, the line was deleted, and a reload came back as a
+    # live run with one trial.
+    empty = empty_form_state()
+    return all(state.get(key) == empty[key] for key in empty)
 
 
 def _env_path():

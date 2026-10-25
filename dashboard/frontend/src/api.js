@@ -10,10 +10,14 @@ async function handle(res) {
 export const getConfig = () => fetch('/api/config').then(handle)
 export const getProviders = () => fetch('/api/providers').then(handle)
 
+// POST, not GET: a typed key in the query string ended up in plaintext in
+// uvicorn's access log, which records the full request line.
 export function getProviderModels(baseUrl, apiKey = '', provider = '') {
-  const params = new URLSearchParams({ base_url: baseUrl, api_key: apiKey })
-  if (provider) params.set('provider', provider)
-  return fetch('/api/provider-models?' + params).then(handle)
+  return fetch('/api/provider-models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ base_url: baseUrl, api_key: apiKey || '', provider: provider || '' }),
+  }).then(handle)
 }
 
 /** Model ids an ACP bridge (Claude Code, Gemini CLI) will accept. */

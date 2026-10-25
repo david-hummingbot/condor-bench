@@ -153,7 +153,11 @@ export default function ModelPicker({
                 commit(typed)
                 return
               }
-              if (filtered[0]) commit(filtered[0].id)
+              // With no filter the list includes note rows ("not reachable", "add a
+              // key"), and one can come first; committing it stored `__note__<provider>`
+              // as the model. Take the first row that is a real model.
+              const first = filtered.find(o => !o.note)
+              if (first) commit(first.id)
             }}
           />
           <div className="model-picker-list" role="listbox">
