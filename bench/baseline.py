@@ -25,9 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from config import BASELINE_DIR, BASELINE_MODEL, case_timeout_s, staging_config
-from bench.cleanup import created_resources, teardown
-from bench.client import run_case
-from bench.dataset import is_mutating
+from bench.client import recording_trace, run_case
 from bench.market_resolver import resolve_cases
 from metrics.answer_quality import is_infra_failure
 
@@ -130,6 +128,9 @@ class BaselineRecord:
     # Digest of the case this latency was measured against. Empty on records
     # written before fingerprints existed.
     fingerprint: str = ""
+    # The lane it was measured on. Records written before lanes existed carry
+    # none and are live — every one of them was measured against staging.
+    lane: str = "live"
 
     def as_dict(self) -> dict:
         return {
@@ -138,38 +139,77 @@ class BaselineRecord:
             "latency_s": round(self.latency_s, 3),
             "timestamp": self.timestamp,
             "fingerprint": self.fingerprint,
+            "lane": self.lane,
         }
 
 
+def _current_lane() -> str:
+    return str(staging_config().get("env_mode") or "live")
+
+
 class BaselineStore:
-    def __init__(self, directory: Path | None = None) -> None:
+    """Baseline records for one lane.
+
+    Lanes are kept apart because `runner.py baseline` honours BENCH_ENV_MODE=mock,
+    and mock records used to be written over the live ones: the mock answers in a
+    fraction of staging's time, so every live run after that scored latency
+    (`min(1, baseline / test)`) and sized its timeout (`case_timeout_s`) from
+    mock timings. Live records stay where they always were (``baseline/<id>.json``,
+    unrewritten); mock records live under ``baseline/mock/``. A store reads and
+    writes only its own lane, so a live run can never be handed a mock reference.
+
+    ``lane`` defaults to the process's lane, read on each call rather than frozen
+    at construction, so a long-lived store follows BENCH_ENV_MODE like the rest
+    of the run does.
+    """
+
+    def __init__(self, directory: Path | None = None, lane: str | None = None) -> None:
         self._dir = directory or BASELINE_DIR
+        self._lane = lane
         self._dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def lane(self) -> str:
+        return self._lane or _current_lane()
+
+    def _lane_dir(self) -> Path:
+        return self._dir if self.lane == "live" else self._dir / self.lane
+
     def _path(self, case_id: str) -> Path:
-        return self._dir / f"{case_id}.json"
+        return self._lane_dir() / f"{case_id}.json"
 
     def save(self, record: BaselineRecord) -> None:
-        self._path(record.case_id).write_text(json.dumps(record.as_dict(), indent=2))
+        if record.lane != self.lane:
+            raise ValueError(
+                f"refusing to save a {record.lane}-lane baseline for {record.case_id} "
+                f"into the {self.lane} lane's store"
+            )
+        path = self._path(record.case_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record.as_dict(), indent=2))
 
     def load(self, case_id: str) -> BaselineRecord | None:
         p = self._path(case_id)
         if not p.exists():
             return None
         data = json.loads(p.read_text())
-        return BaselineRecord(
+        record = BaselineRecord(
             case_id=data["case_id"],
             model=data["model"],
             latency_s=float(data.get("latency_s", 30.0)),
             timestamp=data.get("timestamp", ""),
             fingerprint=str(data.get("fingerprint", "")),
+            lane=str(data.get("lane") or "live"),
         )
+        # Belt and braces: a record that says it is from another lane is not this
+        # lane's reference, wherever it happens to be on disk.
+        return record if record.lane == self.lane else None
 
     def exists(self, case_id: str) -> bool:
-        return self._path(case_id).exists()
+        return self.load(case_id) is not None
 
     def list(self) -> list[str]:
-        return [p.stem for p in sorted(self._dir.glob("*.json"))]
+        return [p.stem for p in sorted(self._lane_dir().glob("*.json"))]
 
     def missing(self, case_ids: list[str]) -> list[str]:
         return [c for c in case_ids if not self.exists(c)]
@@ -210,7 +250,7 @@ async def generate_baselines(
 
     from bench.dataset import runs_on_lane
 
-    lane = str(staging_config().get("env_mode") or "live")
+    lane = _current_lane()
     to_run = [c for c in cases if _wanted(c) and runs_on_lane(c, lane)]
     if only:
         unknown = only - {c.id for c in cases}
@@ -263,50 +303,99 @@ async def generate_baselines(
         )
         to_run = [c for c in to_run if c.id not in set(unbound)]
 
+    from bench.probe_journal import ensure_probe_journal
+    from bench.trials import bounded_teardown, finish_despite_cancel, needs_undo
+
+    async def teardown_note(text: str) -> None:
+        console.print(f"      [red]{text}[/red]")
+
     for case in track(to_run, description="Baseline"):
         # The bound copy is what runs; the dataset case is what gets fingerprinted.
         # Binding is per-box — the same case takes binance here and hyperliquid
         # elsewhere — so a digest over the bound copy would call every baseline
         # stale on the next machine.
         runnable = bound_by_id.get(case.id, case)
+        result = None
+        partial = None
+        # Baselines are latency references, so they must be produced by the
+        # same code path a test run uses — otherwise the reference is measured
+        # against different wiring than the runs it scores. That now includes
+        # the timeout: latency_score is min(1, baseline / test), so an inflated
+        # baseline is *rewarding*, not penalising. `c012` once took 609s for a
+        # bare manage_skill:list, and a reference that long would have handed
+        # every model a free 1.0 on that case forever. Better to record no
+        # baseline than a runaway one.
+        #
+        # Which is why the ceiling is `case_timeout_s`, the same per-case scale a
+        # scored run gets, and not the flat CASE_TIMEOUT_S this used to pass — the
+        # one number that comment says a run no longer uses. The flat 180s cut off
+        # the cases it was least able to judge: agent_meteora_launch_lp_007 has a
+        # 136.3s reference and was killed at 180s, where its own scale allows 545s.
+        # Re-measuring scales from the record being replaced, since how long the
+        # case has always taken is the best estimate of how long it will take;
+        # a case with none falls to the CASE_TIMEOUT_MIN_S floor.
+        prior = store.load(case.id)
+        ceiling = case_timeout_s(prior.latency_s if prior else None)
         try:
-            # Baselines are latency references, so they must be produced by the
-            # same code path a test run uses — otherwise the reference is measured
-            # against different wiring than the runs it scores. That now includes
-            # the timeout: latency_score is min(1, baseline / test), so an inflated
-            # baseline is *rewarding*, not penalising. `c012` once took 609s for a
-            # bare manage_skill:list, and a reference that long would have handed
-            # every model a free 1.0 on that case forever. Better to record no
-            # baseline than a runaway one.
-            #
-            # Which is why the ceiling is `case_timeout_s`, the same per-case scale a
-            # scored run gets, and not the flat CASE_TIMEOUT_S this used to pass — the
-            # one number that comment says a run no longer uses. The flat 180s cut off
-            # the cases it was least able to judge: agent_meteora_launch_lp_007 has a
-            # 136.3s reference and was killed at 180s, where its own scale allows 545s.
-            # Re-measuring scales from the record being replaced, since how long the
-            # case has always taken is the best estimate of how long it will take;
-            # a case with none falls to the CASE_TIMEOUT_MIN_S floor.
-            prior = store.load(case.id)
-            ceiling = case_timeout_s(prior.latency_s if prior else None)
-            if staging_config().get("env_mode") == "mock":
+            if lane == "mock":
                 # Same seeding a scored mock trial gets, faults included: a
                 # mock-only case's reference must measure the scenario it scores.
                 from bench.lanes import arm_mock_faults, reset_mock
 
                 reset_mock()
                 arm_mock_faults(getattr(case, "mock_faults", None) or [])
-            result = await asyncio.wait_for(
-                run_case(runnable, model), timeout=ceiling
-            )
+            # Same fixture a scored trial gets: a journal read case measured
+            # against no journal at all is a reference for a different question.
+            ensure_probe_journal(runnable)
+            # Recorded as it streams, so a case cut off below still names what it
+            # created — the trace a scored trial's teardown reads in that spot.
+            with recording_trace() as partial:
+                result = await asyncio.wait_for(
+                    run_case(runnable, model), timeout=ceiling
+                )
+        except asyncio.CancelledError:
+            # A stopped baseline run still owes staging the undo of what this case
+            # got as far as creating.
+            if needs_undo(runnable, partial):
+                await finish_despite_cancel(
+                    asyncio.ensure_future(
+                        bounded_teardown(runnable, partial, model, teardown_note)
+                    )
+                )
+            raise
         except asyncio.TimeoutError:
             console.print(
                 f"[red]Timeout on {case.id} after {ceiling:.0f}s — "
                 "no baseline recorded[/red]"
             )
-            continue
         except Exception as exc:
             console.print(f"[red]Error on {case.id}: {exc}[/red]")
+
+        # Same teardown a scored run does, on every path. Baselining the whole
+        # dataset executes every mutating and destructive case, so without this it
+        # leaves behind executors, routines, strategies and leverage changes — and
+        # the pre-flight's orphaned-executor check is blocking, so one baseline run
+        # would lock out every run after it. The timeout, error and infra-failure
+        # paths used to `continue` before reaching this, so a mutating case that
+        # timed out left its executor running on staging and did exactly that.
+        trace = result if result is not None else partial
+        if needs_undo(runnable, trace):
+            report = await finish_despite_cancel(
+                asyncio.ensure_future(bounded_teardown(runnable, trace, model, teardown_note))
+            )
+            if report is not None:
+                for row in report.kept_positions:
+                    console.print(
+                        f"      [yellow]position kept: {row.get('tool')} "
+                        f"{row.get('identifier')} — {row.get('note')}[/yellow]"
+                    )
+                for row in report.failed + report.manual:
+                    console.print(
+                        f"      [yellow]left behind: {row.get('tool')} "
+                        f"{row.get('identifier')} — "
+                        f"{row.get('error') or row.get('reason', 'manual')}[/yellow]"
+                    )
+        if result is None:
             continue
 
         # A run that failed measured the failure, not the job. `explore_dex_pools`
@@ -331,30 +420,6 @@ async def generate_baselines(
             )
             continue
 
-        # Same teardown a scored run does. Baselining the whole dataset executes
-        # every mutating and destructive case, so without this it leaves behind
-        # executors, routines, strategies and leverage changes — and the pre-flight's
-        # orphaned-executor check is blocking, so one baseline run would lock out
-        # every run after it.
-        if is_mutating(case) or created_resources(result):
-            report = await teardown(
-                result,
-                model,
-                agent_slug=getattr(runnable, "agent_slug", None),
-                tick=getattr(case, "type", "") == "tick",
-            )
-            for row in report.kept_positions:
-                console.print(
-                    f"      [yellow]position kept: {row.get('tool')} "
-                    f"{row.get('identifier')} — {row.get('note')}[/yellow]"
-                )
-            for row in report.failed + report.manual:
-                console.print(
-                    f"      [yellow]left behind: {row.get('tool')} "
-                    f"{row.get('identifier')} — "
-                    f"{row.get('error') or row.get('reason', 'manual')}[/yellow]"
-                )
-
         ts = datetime.now(timezone.utc).isoformat()
         record = BaselineRecord(
             case_id=result.case_id,
@@ -362,6 +427,7 @@ async def generate_baselines(
             latency_s=result.latency_s,
             timestamp=ts,
             fingerprint=case_fingerprint(case),
+            lane=lane,
         )
         store.save(record)
         console.print(f"  [dim]{case.id}[/dim] → {result.latency_s:.1f}s")

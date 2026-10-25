@@ -1,4 +1,5 @@
-"""JSON-RPC 2.0 peer — vendored from condor/condor/acp/jsonrpc.py (unchanged)."""
+"""JSON-RPC 2.0 peer — vendored from condor/condor/acp/jsonrpc.py
+(one bench-side fix: send_request registers its future before writing)."""
 from __future__ import annotations
 
 import asyncio
@@ -37,11 +38,19 @@ class JSONRPCPeer:
         req_id = self._next_id
         self._next_id += 1
         msg = {"jsonrpc": "2.0", "method": method, "params": params, "id": req_id}
-        writer.write((json.dumps(msg) + "\n").encode())
-        await writer.drain()
-        log.debug("-> %s (id=%d)", method, req_id)
+        # Bench-side fix of an upstream bug (condor registers the future after
+        # drain()): a reply read while drain() is suspended found no pending
+        # future, was dropped, and the request then hung until the case timeout.
+        # Register first, so the reader can always resolve it.
         future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
         self._pending[req_id] = future
+        try:
+            writer.write((json.dumps(msg) + "\n").encode())
+            await writer.drain()
+        except BaseException:
+            self._pending.pop(req_id, None)
+            raise
+        log.debug("-> %s (id=%d)", method, req_id)
         return await future
 
     async def send_notification(self, method: str, params: dict[str, Any], writer: asyncio.StreamWriter) -> None:

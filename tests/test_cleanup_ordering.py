@@ -333,3 +333,52 @@ def test_a_refused_undo_on_the_real_mcp_result_type_is_an_error():
     assert tool_error(refused) == "Executor not found"
     ok = types.CallToolResult(content=[types.TextContent(type="text", text="stopped")], is_error=False)
     assert tool_error(ok) is None
+
+
+_LEVERAGE = "set_account_position_mode_and_leverage"
+_LEVERAGE_ARGS = {"connector_name": "binance_perpetual_testnet", "trading_pair": "BTC-USDT", "leverage": 5}
+
+
+def test_a_leverage_call_in_flight_when_the_trial_was_cut_off_is_still_reset():
+    """A timed-out trial's trace can end on a setter that was sent and not yet
+    answered. It may have landed, and skipping it left leverage changed with no
+    report entry at all — the ratchet `_STATE_SETTERS` exists to stop."""
+    from bench.client import PartialTrace
+
+    partial = PartialTrace()
+    partial.turns.append(([{"tool": _LEVERAGE, "tool_call_id": "t1", "args": _LEVERAGE_ARGS}], []))
+    (reset,) = created_resources(partial)
+    assert reset.tool == _LEVERAGE and reset.identifier == "BTC-USDT"
+
+    # A finished trace still reads a missing response as a failed call (the
+    # `tool_set_leverage_003` false alarm stays fixed).
+    finished = _trace([{"tool": _LEVERAGE, "tool_call_id": "t1", "args": _LEVERAGE_ARGS}], [])
+    assert created_resources(finished) == []
+
+
+def test_id_less_creates_never_borrow_another_calls_executor_id():
+    """Every id-less response used to share the key None, so both creates resolved
+    to the last response's id: the second executor was stopped twice and the
+    first was left running."""
+    calls = [{"tool": "create_order_executor", "args": {}},
+             {"tool": "create_order_executor", "args": {}}]
+    paired = _trace(calls, [{"tool": "create_order_executor", "output": "Executor ID: first\n"},
+                            {"tool": "create_order_executor", "output": "Executor ID: second\n"}])
+    assert [r.identifier for r in created_resources(paired)] == ["first", "second"]
+
+    # One response for two calls: which call it answers is unknowable, so neither
+    # gets an id — teardown reports both for manual attention instead of guessing.
+    ambiguous = _trace(calls, [{"tool": "create_order_executor", "output": "Executor ID: second\n"}])
+    assert [r.identifier for r in created_resources(ambiguous)] == [None, None]
+
+
+def test_an_id_less_setter_is_not_judged_by_another_calls_response():
+    """The None key also handed an id-less leverage call the last response in the
+    trace — here a refused executor create — and skipped the reset as "failed"."""
+    trace = _trace(
+        [{"tool": _LEVERAGE, "args": _LEVERAGE_ARGS},
+         {"tool": "create_order_executor", "args": {}}],
+        [{"tool": _LEVERAGE, "output": "Leverage set to 5x"},
+         {"tool": "create_order_executor", "output": '{"error": "insufficient balance"}'}],
+    )
+    assert [r.tool for r in created_resources(trace)] == [_LEVERAGE]

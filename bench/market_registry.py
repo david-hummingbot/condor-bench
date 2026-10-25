@@ -220,12 +220,26 @@ class MarketRegistry:
             return conn.credentialed_on[0]
         return self.accounts[0] if self.accounts else ""
 
-    async def pairs(self, connector: str, *, timeout_s: float = 20.0) -> tuple[str, ...]:
+    async def pairs(
+        self, connector: str, *, namespace: str = CEX, timeout_s: float = 20.0
+    ) -> tuple[str, ...]:
         """Trading pairs the connector currently lists, cached per registry.
 
         Empty is a real answer here, not an error: a thin connector reports no
         rules until something warms it (see :mod:`bench.market_warmup`).
+
+        Only a 2xx answer is cached. A 4xx/5xx or a network failure is
+        *unknown*, returned as empty for this call and retried on the next — a
+        500 used to be cached as "this connector has no markets", so one bad
+        moment on the API ruled the connector out for the rest of the run.
         """
+        if namespace == GATEWAY:
+            # `trading-rules` is the CEX endpoint; asking it about `meteora` probes
+            # a different service and answers about nothing. The gateway lists
+            # pools per (connector, network) at `/gateway/pools`, and the registry
+            # does not know a network to ask with — so a gateway connector's pairs
+            # are unknown here, never "whatever the CEX endpoint said".
+            return ()
         if connector in self._pairs:
             return self._pairs[connector]
         pairs: tuple[str, ...] = ()
@@ -234,14 +248,14 @@ class MarketRegistry:
             try:
                 async with httpx.AsyncClient(timeout=timeout_s, auth=auth) as client:
                     r = await client.get(f"{self.api_url}/connectors/{connector}/trading-rules")
-                    if r.status_code < 400:
-                        payload = r.json()
-                        if isinstance(payload, dict):
-                            pairs = tuple(sorted(str(k) for k in payload))
+                if r.status_code >= 400:
+                    return ()
+                payload = r.json()
+                if isinstance(payload, dict):
+                    pairs = tuple(sorted(str(k) for k in payload))
             except Exception:
-                # Unknown, not empty — but a failed rules fetch must not be
-                # cached as "this connector has no markets", so leave the cache
-                # alone and let the next call retry.
+                # Unknown, not empty — leave the cache alone and let the next call
+                # retry.
                 return ()
         self._pairs[connector] = pairs
         return pairs
@@ -293,7 +307,7 @@ class MarketRegistry:
             ):
                 chosen = ""
                 if wanted:
-                    available = await self.pairs(name)
+                    available = await self.pairs(name, namespace=namespace)
                     if not available:
                         # No rules yet is only forgivable for the connector the
                         # case already names — warmup runs before the case and
@@ -407,15 +421,33 @@ async def probe_registry(*, timeout_s: float = 20.0) -> MarketRegistry:
                 ),
                 return_exceptions=True,
             )
+            # An account whose credentials could not be read has *unknown* keys,
+            # not none. Skipping it made every connector keyed only there look
+            # uncredentialed, so a case needing one was reported as broken on this
+            # box — the "empty registry reads as nothing credentialed" failure
+            # this module's docstring rules out, one account at a time.
+            unread: list[str] = []
             for account, result in zip(accounts, results):
-                if isinstance(result, BaseException) or result.status_code >= 400:
+                if isinstance(result, BaseException):
+                    unread.append(f"{account} ({type(result).__name__}: {result})")
+                    continue
+                if result.status_code >= 400:
+                    unread.append(f"{account} (HTTP {result.status_code})")
                     continue
                 try:
                     named = _connector_names(result.json())
-                except Exception:
+                except Exception as exc:
+                    unread.append(f"{account} (unreadable body: {type(exc).__name__})")
                     continue
                 for name in named:
                     creds.setdefault(name, []).append(account)
+            if unread:
+                return MarketRegistry(
+                    api_url=url,
+                    accounts=tuple(accounts),
+                    ok=False,
+                    error=f"could not read credentials for account(s): {', '.join(unread)}",
+                )
     except Exception as exc:
         return MarketRegistry(
             api_url=url, ok=False, error=f"{url} unreachable: {type(exc).__name__}: {exc}"

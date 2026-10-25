@@ -348,3 +348,164 @@ def test_a_case_with_no_record_falls_to_the_floor_not_to_zero():
 
     assert case_timeout_s(None) == CASE_TIMEOUT_MIN_S
     assert case_timeout_s(0) == CASE_TIMEOUT_MIN_S
+
+
+# ── baseline generation undoes what each case created, on every path ──────────
+# The timeout, error and infra-failure branches all `continue`d before the
+# teardown block, so a mutating case that timed out left its executor on
+# staging — and the orphaned-executor pre-flight then blocked every later run.
+
+_CREATE = {"tool": "create_order_executor", "tool_call_id": "c1", "args": {}}
+
+
+def _generate_with(monkeypatch, run_case, *, case=None):
+    import asyncio
+
+    import bench.baseline as baseline_mod
+    import bench.cleanup
+
+    monkeypatch.delenv("BENCH_ENV_MODE", raising=False)
+    torn: list = []
+
+    async def fake_teardown(trace, model, **kw):
+        torn.append([c["tool"] for c in trace.tool_calls])
+        return SimpleNamespace(kept_positions=[], failed=[], manual=[])
+
+    async def resolve(cases):
+        return list(cases), {c.id: SimpleNamespace(ok=True, reason=lambda: "") for c in cases}
+
+    class _Store:
+        def __init__(self):
+            self.saved = []
+
+        def exists(self, case_id):
+            return False
+
+        def load(self, case_id):
+            return None
+
+        def save(self, record):
+            self.saved.append(record)
+
+    monkeypatch.setattr(bench.cleanup, "teardown", fake_teardown)
+    monkeypatch.setattr(baseline_mod, "run_case", run_case)
+    monkeypatch.setattr(baseline_mod, "resolve_cases", resolve)
+    monkeypatch.setattr(baseline_mod, "case_timeout_s", lambda _latency: 0.05)
+    store = _Store()
+    asyncio.run(baseline_mod.generate_baselines(
+        [case or _case(risk_level="mutating")], store, model="m"))
+    return torn, store.saved
+
+
+def _record_create():
+    """Put a create into the trace the way the client does as a call streams."""
+    from bench.client import _PARTIAL_TRACE
+
+    _PARTIAL_TRACE.get().turns.append(([dict(_CREATE)], []))
+
+
+def test_a_baseline_case_that_times_out_is_still_torn_down(monkeypatch):
+    import asyncio
+
+    async def slow(case, model):
+        _record_create()
+        await asyncio.sleep(10)
+
+    torn, saved = _generate_with(monkeypatch, slow)
+    assert torn == [["create_order_executor"]], "the timed-out case's executor was left running"
+    assert saved == []
+
+
+def test_a_baseline_case_that_errors_is_still_torn_down(monkeypatch):
+    async def boom(case, model):
+        _record_create()
+        raise RuntimeError("bridge died")
+
+    torn, saved = _generate_with(monkeypatch, boom)
+    assert torn == [["create_order_executor"]]
+    assert saved == []
+
+
+def test_an_infra_failed_baseline_case_is_still_torn_down(monkeypatch):
+    async def infra(case, model):
+        return SimpleNamespace(
+            case_id=case.id, latency_s=1.0, tool_calls=[dict(_CREATE)], tool_responses=[],
+            response="Credit balance is too low", error=None,
+        )
+
+    torn, saved = _generate_with(monkeypatch, infra)
+    assert torn == [["create_order_executor"]]
+    assert saved == [], "an infra failure is still no reference"
+
+
+# ── lanes ─────────────────────────────────────────────────────────────────────
+# `runner.py baseline` honours BENCH_ENV_MODE=mock, and mock timings overwrote the
+# live references — live latency_score and case_timeout_s were then sized from a
+# mock that answers in a fraction of staging's time.
+
+
+def test_a_mock_baseline_never_lands_where_a_live_run_reads(tmp_path):
+    from bench.baseline import BaselineStore
+
+    live, mock = BaselineStore(tmp_path, lane="live"), BaselineStore(tmp_path, lane="mock")
+    live.save(BaselineRecord(case_id="c1", model="m", latency_s=40.0))
+    mock.save(BaselineRecord(case_id="c1", model="m", latency_s=2.0, lane="mock"))
+
+    assert live.load("c1").latency_s == 40.0, "the mock run overwrote the live reference"
+    assert mock.load("c1").latency_s == 2.0 and mock.load("c1").lane == "mock"
+    assert live.list() == ["c1"] and mock.list() == ["c1"]
+
+    # A store refuses a record from the other lane rather than filing it.
+    import pytest
+
+    with pytest.raises(ValueError):
+        live.save(BaselineRecord(case_id="c2", model="m", latency_s=2.0, lane="mock"))
+    assert not live.exists("c2")
+
+
+def test_a_record_without_a_lane_is_live_and_is_not_rewritten(tmp_path):
+    """Every baseline/*.json predates lanes, and all of them were measured live."""
+    import json
+
+    from bench.baseline import BaselineStore
+
+    legacy = {"case_id": "c1", "model": "m", "latency_s": 31.0, "timestamp": "t",
+              "fingerprint": "abc"}
+    path = tmp_path / "c1.json"
+    path.write_text(json.dumps(legacy))
+    before = path.read_text()
+
+    record = BaselineStore(tmp_path, lane="live").load("c1")
+    assert record.lane == "live" and record.latency_s == 31.0
+    assert BaselineStore(tmp_path, lane="mock").load("c1") is None
+    assert path.read_text() == before
+
+
+def test_a_live_store_ignores_a_mock_record_left_in_the_live_path(tmp_path):
+    import json
+
+    from bench.baseline import BaselineStore
+
+    (tmp_path / "c1.json").write_text(json.dumps(
+        {"case_id": "c1", "model": "m", "latency_s": 2.0, "lane": "mock"}))
+    assert BaselineStore(tmp_path, lane="live").load("c1") is None
+
+
+def test_the_store_follows_the_runs_lane_by_default(tmp_path, monkeypatch):
+    from bench.baseline import BaselineStore
+
+    store = BaselineStore(tmp_path)
+    monkeypatch.delenv("BENCH_ENV_MODE", raising=False)
+    assert store.lane == "live"
+    monkeypatch.setenv("BENCH_ENV_MODE", "mock")
+    assert store.lane == "mock"
+
+
+def test_generated_records_carry_their_lane(monkeypatch):
+    async def ok(case, model):
+        return SimpleNamespace(case_id=case.id, latency_s=3.0, tool_calls=[], tool_responses=[],
+                               response="BTC is 63700.", error=None)
+
+    _, saved = _generate_with(monkeypatch, ok, case=_case())
+    (record,) = saved
+    assert record.lane == "live"

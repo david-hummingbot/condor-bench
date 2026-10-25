@@ -51,6 +51,51 @@ async def finish_despite_cancel(fut: Any) -> Any:
     return result
 
 
+def needs_undo(case: Any, trace: Any) -> bool:
+    """Whether *trace* may have left something on staging that teardown must undo.
+
+    Keyed on the trace as well as the case's risk level: a read-only case is
+    exactly where a model that falls for a prompt injection creates something
+    nobody planned to clean up.
+    """
+    from bench.cleanup import created_resources
+    from bench.dataset import is_mutating
+
+    return trace is not None and (is_mutating(case) or bool(created_resources(trace)))
+
+
+async def bounded_teardown(
+    case: Any,
+    trace: Any,
+    model: str,
+    on_timeout: Callable[[str], Awaitable[None]] | None = None,
+) -> Any:
+    """Undo what *trace* created, within TEARDOWN_TIMEOUT_S. The report, or None.
+
+    Shared by scored trials and baseline generation, so both undo through the
+    same wiring (the case's agent_slug, and the tick seat for a tick case).
+    """
+    from bench.cleanup import teardown
+
+    try:
+        return await asyncio.wait_for(
+            teardown(
+                trace,
+                model,
+                agent_slug=getattr(case, "agent_slug", None),
+                tick=getattr(case, "type", "") == "tick",
+            ),
+            timeout=TEARDOWN_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        if on_timeout is not None:
+            await on_timeout(
+                f"teardown did not finish in {TEARDOWN_TIMEOUT_S:.0f}s — check staging "
+                "for leftovers (the next pre-flight reports any executor)"
+            )
+        return None
+
+
 @dataclass
 class TrialEvents:
     """Optional async hooks. Any left as None is skipped.
@@ -148,9 +193,8 @@ async def run_trial(
     become a recorded harness card — except ``asyncio.CancelledError``, which the
     caller needs in order to stop.
     """
-    from bench.cleanup import created_resources, teardown
     from bench.client import recording_trace, run_case
-    from bench.dataset import is_mutating
+    from bench.probe_journal import ensure_probe_journal
     from bench.reporter import trial_key
     from bench.scorer import harness_card, score_case, timeout_card, with_trial
     from bench.traces import case_span
@@ -165,30 +209,11 @@ async def run_trial(
     # exception after this point must not undo the same resources a second time.
     undo: asyncio.Future | None = None
 
-    async def bounded_teardown(trace: Any) -> Any:
-        try:
-            return await asyncio.wait_for(
-                teardown(
-                    trace,
-                    model,
-                    agent_slug=getattr(case, "agent_slug", None),
-                    tick=getattr(case, "type", "") == "tick",
-                ),
-                timeout=TEARDOWN_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
-            await events._fire(
-                "note", case,
-                f"teardown did not finish in {TEARDOWN_TIMEOUT_S:.0f}s — check staging "
-                "for leftovers (the next pre-flight reports any executor)", "error",
-            )
-            return None
+    async def teardown_note(text: str) -> None:
+        await events._fire("note", case, text, "error")
 
     def start_undo(trace: Any) -> asyncio.Future:
-        return asyncio.ensure_future(bounded_teardown(trace))
-
-    def needs_undo(trace: Any) -> bool:
-        return trace is not None and (is_mutating(case) or bool(created_resources(trace)))
+        return asyncio.ensure_future(bounded_teardown(case, trace, model, teardown_note))
 
     if lane == "mock":
         # Every trial starts from the fixture: the mock is stateful, and a trial
@@ -202,6 +227,10 @@ async def run_trial(
             await events._fire("trial_done", case, trial, card, "", reason)
             return card
     try:
+        # Every trial gets a fresh probe journal. Kept across trials, trial 1's
+        # write satisfied trial 2's "read it back" (and an earlier model's entries
+        # a later model's), so a roundtrip case could pass without writing.
+        ensure_probe_journal(case)
         # Baseline first: the ceiling is sized from it, so a slow case gets room
         # proportional to how slow it has always been.
         baseline = store.load(case.id)
@@ -220,10 +249,8 @@ async def run_trial(
         await events._fire("trial_done", case, trial, card, response, None)
 
         # Undo what the trial created, whatever its score — an aborted half-created
-        # resource still needs removing. Keyed on the trace as well as the case's
-        # risk level: a read-only case is exactly where a model that falls for a
-        # prompt injection creates something nobody planned to clean up.
-        if needs_undo(result):
+        # resource still needs removing (see needs_undo for why the trace counts).
+        if needs_undo(case, result):
             undo = start_undo(result)
             report = await finish_despite_cancel(undo)
             if report is not None:
@@ -234,7 +261,7 @@ async def run_trial(
         # worker stopped by its runner) still owes staging the undo: an order
         # placed before the cancel otherwise stays open and blocks the next
         # pre-flight. Finish a teardown already under way, or undo from the trace.
-        if undo is None and needs_undo(partial):
+        if undo is None and needs_undo(case, partial):
             undo = start_undo(partial)
         if undo is not None:
             await finish_despite_cancel(undo)
@@ -258,7 +285,7 @@ async def run_trial(
     # `budgeted_buy` left its market order's executor running, and the next run's
     # pre-flight refused to start. Undo what its trace got as far as recording,
     # started before anything that can be cancelled so a cancel cannot skip it.
-    owned = undo is None and needs_undo(partial)
+    owned = undo is None and needs_undo(case, partial)
     if owned:
         undo = start_undo(partial)
     report = None

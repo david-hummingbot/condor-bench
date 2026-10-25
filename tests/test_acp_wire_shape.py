@@ -845,3 +845,64 @@ def test_the_pydantic_client_reports_errors_on_prompt_done_not_as_text():
         "message on PromptDone(error=...) so _prompt_failure can see the failure"
     )
     assert "PromptDone(stop_reason=\"error\", error=self._format_error(e))" in src
+
+
+# ── A reply that arrives during drain() ───────────────────────────────────────
+# condor wrote the request, awaited drain(), and only then put the future in
+# `_pending`. The read loop runs while drain() is suspended, so a fast reply read
+# in that window found no pending entry and was dropped — and the prompt then
+# waited for an answer that had already come, until the case timeout. These
+# writers deliver the reply from inside drain() to hold that window open.
+
+
+class _ReplyingWriter:
+    """A stream writer whose drain() lets the peer read the reply to what was written."""
+
+    def __init__(self, peer, result) -> None:
+        self.peer, self.result, self.sent = peer, result, []
+
+    def write(self, data: bytes) -> None:
+        import json
+
+        self.sent.append(json.loads(data))
+
+    async def drain(self) -> None:
+        import json
+
+        reply = {"jsonrpc": "2.0", "id": self.sent[-1]["id"], "result": self.result}
+        await self.peer.handle_line(json.dumps(reply), self)
+
+
+def test_a_reply_read_during_drain_resolves_the_request():
+    import asyncio
+
+    from condor_compat.acp.jsonrpc import JSONRPCPeer
+
+    async def go():
+        peer = JSONRPCPeer()
+        writer = _ReplyingWriter(peer, {"ok": True})
+        return await asyncio.wait_for(peer.send_request("initialize", {}, writer), timeout=2)
+
+    assert asyncio.run(go()) == {"ok": True}
+
+
+def test_a_prompt_reply_read_during_drain_ends_the_turn():
+    import asyncio
+    from types import SimpleNamespace
+
+    from condor_compat.acp.client import PromptDone
+
+    async def go():
+        client = _client()
+        client._session_id = "s1"
+        stdin = _ReplyingWriter(client._peer, {"stopReason": "end_turn"})
+        client._process = SimpleNamespace(stdin=stdin, returncode=None)
+
+        async def collect():
+            return [e async for e in client.prompt_stream("hi")]
+
+        return await asyncio.wait_for(collect(), timeout=2)
+
+    events = asyncio.run(go())
+    assert isinstance(events[-1], PromptDone)
+    assert events[-1].stop_reason == "end_turn"

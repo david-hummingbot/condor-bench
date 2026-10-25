@@ -40,6 +40,7 @@ dirties that repo.
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -229,14 +230,31 @@ def _seed_journal(case: Any, strategy_dir: Path) -> str | None:
 
 
 def ensure_probe_journal(case: Any) -> str | None:
-    """Create (and for read cases, seed) the probe agent's journal. Note or None.
+    """Give the case a fresh probe journal (seeded for read cases). Note or None.
 
-    Idempotent: an existing directory is left exactly as it is, so journal
-    entries a case wrote survive until ``clean_probe_journals.py`` clears them.
+    Called before every trial (:func:`bench.trials.run_trial`), and each call
+    starts the journal over. It used to return early whenever the strategy
+    directory existed, which broke two ways:
+
+    * ``clean_probe_journals.py`` removes ``sessions/session_N`` but leaves the
+      strategy directory, so after a clean the seed was never written again and
+      ``tool_journal_read_001`` read an empty journal for every model after.
+    * Entries persisted between trials and between models, so a roundtrip case
+      (``c_journal_roundtrip_001``: write a learning, read it back) could pass on
+      the entry an earlier trial — or an earlier model — had written.
+
+    The directory is per case under a ``bench_`` slug (see
+    :func:`probe_strategy_dir`), so clearing it touches nothing a real agent owns.
     """
     target = probe_strategy_dir(case)
-    if target is None or target.is_dir():
+    if target is None:
         return None
+    if target.exists():
+        agent_dir = target.parent.parent
+        # Never step outside the bench_ agent, even through a symlink.
+        if not target.resolve().is_relative_to(agent_dir.resolve()):
+            return f"refused to reset probe journal {target} — outside {agent_dir.name}"
+        shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
     note = f"provisioned probe journal {target.parent.parent.name}/{target.name}"
     if should_seed(case):

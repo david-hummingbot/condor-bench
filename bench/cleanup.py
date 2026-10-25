@@ -228,14 +228,25 @@ def created_resources(result: Any) -> list[CreatedResource]:
     Uses the call arguments plus, when available, the tool's response — an
     executor's id is assigned server-side and only appears in the response.
     """
+    calls = list(getattr(result, "tool_calls", []) or [])
+    responses = list(getattr(result, "tool_responses", []) or [])
     responses_by_id = {
-        r.get("tool_call_id"): r.get("output")
-        for r in getattr(result, "tool_responses", []) or []
+        r.get("tool_call_id"): r.get("output") for r in responses if r.get("tool_call_id")
     }
+    unnumbered = _pair_unnumbered(calls, responses)
+    # A cut-off trial's trace (bench.client.PartialTrace) can end on a call that
+    # was sent and never answered. On a finished trace a missing response means
+    # the call failed; here it may equally mean it was still in flight.
+    cut_off = bool(getattr(result, "cut_off", False))
 
     found: list[CreatedResource] = []
-    for call in getattr(result, "tool_calls", []) or []:
+    for index, call in enumerate(calls):
         tool = normalize_tool_name(str(call.get("tool", "")))
+        call_id = call.get("tool_call_id")
+        if call_id:
+            response = responses_by_id.get(call_id, _NO_RESPONSE)
+        else:
+            response = unnumbered.get(index, _NO_RESPONSE)
         if tool in _STATE_SETTERS:
             setter_args = call.get("args") or {}
             # A setter whose own call failed set nothing, so there is nothing to
@@ -259,9 +270,12 @@ def created_resources(result: Any) -> list[CreatedResource]:
             # expensive direction: leverage has no delete, so a missing reset
             # ratchets across every later run, while a redundant one costs a call.
             # Unnumbered traces therefore keep the old behaviour and reset.
-            call_id = call.get("tool_call_id")
-            response = responses_by_id.get(call_id, _NO_RESPONSE)
-            never_returned = call_id is not None and response is _NO_RESPONSE
+            #
+            # Same reasoning for a trace cut off by a timeout or a cancel: the
+            # last call may have landed with its answer still on the way, and
+            # skipping it there left leverage changed with nothing in the report
+            # saying so. Resetting costs one call.
+            never_returned = bool(call_id) and response is _NO_RESPONSE and not cut_off
             if never_returned or (
                 response is not _NO_RESPONSE and tool_error(response, tool)
             ):
@@ -301,7 +315,8 @@ def created_resources(result: Any) -> list[CreatedResource]:
             # than inferring creation from a default.
             if action not in creating:
                 continue
-        response = responses_by_id.get(call.get("tool_call_id"))
+        if response is _NO_RESPONSE:
+            response = None
         # A create the tool refused created nothing, and undoing it can destroy
         # something that predates the run: condor's `create_routine` answers
         # "Routine 'x' already exists" for a taken name, and the undo then deleted
@@ -320,6 +335,34 @@ def created_resources(result: Any) -> list[CreatedResource]:
             )
         )
     return found
+
+
+def _pair_unnumbered(calls: list[dict], responses: list[dict]) -> dict[int, Any]:
+    """``{call index: output}`` for calls that carry no ``tool_call_id``.
+
+    These used to be looked up by id like the rest, and every id-less response
+    shared the key ``None`` — so every id-less create resolved to the *last*
+    response. Two order executors became "stop the second one twice", and the
+    first was left running. Pairing is now positional per tool, and only when it
+    is unambiguous: the same number of id-less calls and responses for that tool.
+    Otherwise the calls get no response, so an executor id is reported as missing
+    (manual attention) rather than borrowed from another call.
+    """
+    calls_by_tool: dict[str, list[int]] = {}
+    for i, call in enumerate(calls):
+        if not call.get("tool_call_id"):
+            calls_by_tool.setdefault(normalize_tool_name(str(call.get("tool", ""))), []).append(i)
+    outputs_by_tool: dict[str, list[Any]] = {}
+    for r in responses:
+        if not r.get("tool_call_id"):
+            name = normalize_tool_name(str(r.get("tool", "")))
+            outputs_by_tool.setdefault(name, []).append(r.get("output"))
+    paired: dict[int, Any] = {}
+    for tool, indices in calls_by_tool.items():
+        outputs = outputs_by_tool.get(tool, [])
+        if len(outputs) == len(indices):
+            paired.update(zip(indices, outputs))
+    return paired
 
 
 def _identifier(tool: str, args: dict, response: Any, action: str = "") -> str | None:
