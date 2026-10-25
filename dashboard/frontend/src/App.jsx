@@ -140,6 +140,33 @@ export default function App() {
     refreshRuns()
   }
 
+  // LiveRun's onDone only fires while the Live page is mounted. A run that ended
+  // while the user was on another page left the "Benchmark running" strip up and
+  // the Benchmark Start button disabled until they opened Live or reloaded, so
+  // the app polls the run's status itself for as long as it thinks one is going.
+  useEffect(() => {
+    if (!activeRunId || runStatus !== 'running') return undefined
+    let stopped = false
+    const check = async () => {
+      try {
+        const res = await fetch(`/api/runs/${activeRunId}`)
+        if (stopped) return
+        // Gone from the server (it restarted): nothing is running any more.
+        if (res.status === 404) return handleRunDone()
+        if (!res.ok) return
+        const data = await res.json()
+        if (!stopped && ['completed', 'cancelled', 'failed'].includes(data.status)) handleRunDone()
+      } catch {
+        // A failed poll says nothing about the run; try again next tick.
+      }
+    }
+    const timer = setInterval(check, 3000)
+    return () => {
+      stopped = true
+      clearInterval(timer)
+    }
+  }, [activeRunId, runStatus])
+
   const isRunning = runStatus === 'running'
   const section = SECTIONS.find((s) => s.id === route.section)
   const key = route.page ? `${route.section}/${route.page}` : route.section

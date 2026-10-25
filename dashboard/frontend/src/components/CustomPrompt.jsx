@@ -259,14 +259,25 @@ export default function CustomPrompt() {
     try {
       const data = await getAcpModels(p.id)
       const models = data.models || []
-      const stillThere = prev && models.some(m => m.id === prev)
-      update(p.id, {
-        acpModels: models,
-        acpCurrent: data.current || '',
-        selectedModel: opts.keepSelection || stillThere
-          ? prev
-          : (models.some(m => m.id === 'default') ? 'default' : (models[0]?.id || '')),
-        loading: false,
+      // Functional update against the latest selection: `prev` was read before the
+      // await, and writing it back replaced a model typed while the bridge answered.
+      setCfg(prevCfg => {
+        const cur = prevCfg[p.id] || {}
+        const now = cur.selectedModel ?? ''
+        const picked = now !== prev
+        const stillThere = now && models.some(m => m.id === now)
+        return {
+          ...prevCfg,
+          [p.id]: {
+            ...cur,
+            acpModels: models,
+            acpCurrent: data.current || '',
+            selectedModel: opts.keepSelection || picked || stillThere
+              ? now
+              : (models.some(m => m.id === 'default') ? 'default' : (models[0]?.id || '')),
+            loading: false,
+          },
+        }
       })
     } catch (e) {
       update(p.id, { loading: false, loadError: e.message, acpModels: [] })
@@ -281,11 +292,22 @@ export default function CustomPrompt() {
     try {
       const data = await getProviderModels(url, state.apiKey, p.id)
       const models = data.models || []
-      const keep = state.selectedModel && models.includes(state.selectedModel)
-      update(p.id, {
-        loadedModels: models,
-        selectedModel: keep ? state.selectedModel : (models[0] || state.selectedModel),
-        loading: false,
+      // Decide against the selection as it is now, not as it was before the await:
+      // writing back the pre-load `state` replaced a model picked while the list
+      // was loading. A pick made during the load is the user's and is kept.
+      setCfg(prevCfg => {
+        const cur = prevCfg[p.id] || {}
+        const picked = cur.selectedModel !== state.selectedModel
+        const keep = cur.selectedModel && (picked || models.includes(cur.selectedModel))
+        return {
+          ...prevCfg,
+          [p.id]: {
+            ...cur,
+            loadedModels: models,
+            selectedModel: keep ? cur.selectedModel : (models[0] || cur.selectedModel),
+            loading: false,
+          },
+        }
       })
     } catch (e) {
       update(p.id, { loading: false, loadError: e.message })

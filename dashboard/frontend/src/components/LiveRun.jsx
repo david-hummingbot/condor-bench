@@ -29,18 +29,41 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
   const trialProgress = useRef(false)
 
   const [memberInfo, setMemberInfo] = useState(null)
+  // The stream's handlers are bound once per run, so reading `status` inside them
+  // gives the value from when the effect ran ('connecting'), never the current one.
+  // That made every transient drop look like a live run and mark it failed.
+  const statusRef = useRef(status)
+  statusRef.current = status
 
   useEffect(() => {
     if (!runId) return
+    // The backend stream replays every event from the start of the run on each
+    // connection. Clearing the derived state before a replay is what keeps a
+    // reconnect from listing every row twice.
+    const resetProgress = () => {
+      setCases([])
+      setCompleted(0)
+      setTotal(0)
+      setNotes([])
+      setMemberInfo(null)
+      setCurrentCase(null)
+      setCurrentModel(null)
+      setExpanded(null)
+      trialProgress.current = false
+    }
     setStatus('connecting')
-    setCases([])
-    setCompleted(0)
     setError('')
-    setMemberInfo(null)
-    trialProgress.current = false
+    resetProgress()
 
     const es = new EventSource(streamUrl(runId))
     esRef.current = es
+    let opened = false
+
+    es.onopen = () => {
+      if (opened) resetProgress()
+      opened = true
+      setError('')
+    }
 
     es.onmessage = (e) => {
       let evt
@@ -67,9 +90,14 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
           setTotal(evt.total_members || 0)
         }
       } else if (t === 'member_done') {
-        if (!trialProgress.current) setCompleted(evt.member_index || completed + 1)
+        // Functional updater: `completed` here is the value from when the stream
+        // was opened, so `completed + 1` always produced 1.
+        if (!trialProgress.current) setCompleted((c) => evt.member_index || c + 1)
         setCases(prev => [
           {
+            // A suite-member summary, not a scored case: it has no composite or
+            // `passed`, and the Pass column rendered that as a red ✗.
+            member: true,
             case_id: `member:${evt.environment_id}`,
             model: evt.model,
             domain: evt.environment_id,
@@ -135,11 +163,21 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
     }
 
     es.onerror = () => {
-      if (status !== 'completed' && status !== 'cancelled' && status !== 'failed') {
-        setError('Connection lost')
-        setStatus('failed')
+      const s = statusRef.current
+      if (s === 'completed' || s === 'cancelled' || s === 'failed') {
+        es.close()
+        return
       }
-      es.close()
+      // Still CONNECTING means the browser is retrying on its own; closing here (as
+      // this used to) turned every brief drop into a dead page and a run reported
+      // as failed while it was still going on the server. Only a stream the browser
+      // has given up on (e.g. the server restarted and the run is gone) is lost.
+      if (es.readyState === EventSource.CONNECTING) {
+        setError('Reconnecting to the run…')
+        return
+      }
+      setError('Connection lost — the run may still be going on the server; check Results.')
+      setStatus('disconnected')
     }
 
     return () => { es.close(); esRef.current = null }
@@ -214,7 +252,7 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
         {(status === 'running' || status === 'connecting' || status === 'paused') && (
           <button className="btn sm danger" onClick={handleCancel}>Cancel</button>
         )}
-        {(status === 'completed' || status === 'cancelled' || status === 'failed') && (
+        {(status === 'completed' || status === 'cancelled' || status === 'failed' || status === 'disconnected') && (
           <button className="btn sm primary" onClick={onViewRuns}>View in Results →</button>
         )}
       </PageHeader>
@@ -344,6 +382,9 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
                     <td style={{ textAlign: 'right' }}>
                       {c.error
                         ? <span style={{ color: 'var(--red)' }}>✗ err</span>
+                        // A finished suite member carries no score to pass or fail.
+                        : c.member
+                        ? <span className="muted">done</span>
                         // `passed` carries the hard gates; older events fall back to the threshold.
                         : ((c.passed ?? c.composite >= PASS_THRESHOLD)
                           ? <span style={{ color: 'var(--green)' }}>✓</span>

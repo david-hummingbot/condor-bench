@@ -106,7 +106,10 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
     // default is already selected. Waiting for a button press meant the common path
     // ran with the CLI's configured model, which is the one that can 400 on every
     // prompt and produce a run of empty rows.
-    if (enabling && typeof p === 'object' && p.fetch_acp_models && !cfg[id]?.acpModels) {
+    // Test the length, not the array: acpModels starts as [] (and is reset to []
+    // on a failed load), which is truthy, so `!acpModels` never fetched and the run
+    // went out as a bare `claude-code` key. An empty list also retries after an error.
+    if (enabling && typeof p === 'object' && p.fetch_acp_models && !cfg[id]?.acpModels?.length) {
       loadAcpModels(p)
     }
   }
@@ -120,11 +123,22 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
     try {
       const data = await getProviderModels(url, state.apiKey, p.id)
       const models = data.models || []
-      const keep = state.selectedModel && models.includes(state.selectedModel)
-      update(p.id, {
-        loadedModels: models,
-        selectedModel: keep ? state.selectedModel : (models[0] || state.selectedModel),
-        loading: false,
+      // Decide against the selection as it is now, not as it was before the await:
+      // writing back the pre-load `state` replaced a model picked while the list
+      // was loading. A pick made during the load is the user's and is kept.
+      setCfg(prevCfg => {
+        const cur = prevCfg[p.id] || {}
+        const picked = cur.selectedModel !== state.selectedModel
+        const keep = cur.selectedModel && (picked || models.includes(cur.selectedModel))
+        return {
+          ...prevCfg,
+          [p.id]: {
+            ...cur,
+            loadedModels: models,
+            selectedModel: keep ? cur.selectedModel : (models[0] || cur.selectedModel),
+            loading: false,
+          },
+        }
       })
     } catch (e) {
       update(p.id, { loading: false, error: e.message })
@@ -173,18 +187,29 @@ export default function RunConfig({ onRunStarted, isRunning, config }) {
     try {
       const data = await getAcpModels(p.id)
       const models = data.models || []
-      const stillThere = prev && models.some(m => m.id === prev)
-      update(p.id, {
-        acpModels: models,
-        acpCurrent: data.current || '',
-        // Default to the bridge's own recommendation, not to the CLI's configured
-        // model: that one is whatever happens to be in ~/.claude/settings.json and
-        // is exactly what can fail every prompt in the run. A restored selection
-        // is kept, including when this load was triggered by opening the page.
-        selectedModel: opts.keepSelection || stillThere
-          ? prev
-          : (models.some(m => m.id === 'default') ? 'default' : (models[0]?.id || '')),
-        loading: false,
+      // Functional update against the latest selection: `prev` was read before the
+      // await, and writing it back replaced a model typed while the bridge answered.
+      setCfg(prevCfg => {
+        const cur = prevCfg[p.id] || {}
+        const now = cur.selectedModel ?? ''
+        const picked = now !== prev
+        const stillThere = now && models.some(m => m.id === now)
+        return {
+          ...prevCfg,
+          [p.id]: {
+            ...cur,
+            acpModels: models,
+            acpCurrent: data.current || '',
+            // Default to the bridge's own recommendation, not to the CLI's configured
+            // model: that one is whatever happens to be in ~/.claude/settings.json and
+            // is exactly what can fail every prompt in the run. A restored selection
+            // is kept, including when this load was triggered by opening the page.
+            selectedModel: opts.keepSelection || picked || stillThere
+              ? now
+              : (models.some(m => m.id === 'default') ? 'default' : (models[0]?.id || '')),
+            loading: false,
+          },
+        }
       })
     } catch (e) {
       update(p.id, { loading: false, error: e.message, acpModels: [] })

@@ -256,6 +256,36 @@ def test_model_listing_falls_back_to_the_settings_key(client, monkeypatch):
     assert seen["auth"] is None, "an unknown URL got the saved key"
 
 
+def test_a_typed_key_goes_in_the_post_body_never_the_query_string(client, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-secretvalue1234")
+    seen = {}
+
+    async def fake_get(self, url, headers=None, **kw):
+        seen["auth"] = (headers or {}).get("Authorization")
+        return httpx.Response(200, json={"data": [{"id": "m1"}]}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    r = client.post("/api/provider-models", json={"base_url": "https://openrouter.ai/api/v1",
+                                                  "api_key": "sk-typed", "provider": "openrouter"})
+    assert r.status_code == 200 and r.json()["models"] == ["m1"]
+    assert seen["auth"] == "Bearer sk-typed", "the typed key overrides the Settings key"
+
+    # No key in the body: the Settings key, still only for the provider's own URL.
+    client.post("/api/provider-models", json={"base_url": "https://openrouter.ai/api/v1",
+                                              "provider": "openrouter"})
+    assert seen["auth"] == "Bearer sk-or-v1-secretvalue1234"
+    client.post("/api/provider-models", json={"base_url": "https://evil.example/v1",
+                                              "provider": "openrouter"})
+    assert seen["auth"] is None
+
+    # The GET no longer reads a key from the query string, where uvicorn logs it.
+    client.get("/api/provider-models", params={"base_url": "https://evil.example/v1",
+                                               "api_key": "sk-typed", "provider": "openrouter"})
+    assert seen["auth"] is None
+
+
 # ── Model catalogue for the suite pickers ──────────────────────────────────────
 def test_the_model_catalog_is_live_where_it_can_be_and_says_why_not(client, monkeypatch):
     import dashboard.backend.app as A
