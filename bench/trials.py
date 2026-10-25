@@ -20,6 +20,36 @@ from typing import Any, Awaitable, Callable
 
 Hook = Callable[..., Awaitable[None]]
 
+#: Upper bound on one trial's teardown. Teardown is awaited through cancellation
+#: (see :func:`finish_despite_cancel`), so it needs a ceiling of its own: a stuck
+#: undo call must not hold a stopping run forever.
+TEARDOWN_TIMEOUT_S = 180.0
+
+
+async def finish_despite_cancel(fut: Any) -> Any:
+    """Await *fut* to the end even if this task is cancelled meanwhile.
+
+    Teardown is what a cancel most needs to let finish: an undo abandoned half-way
+    leaves an order open on staging, and the next run's pre-flight refuses to
+    start. ``asyncio.shield`` alone protects the work only from the *first* cancel
+    — a second one (a repeated Cancel click, a worker that is signalled twice)
+    raised at the await, the caller moved on, and the event loop's shutdown then
+    killed the shielded teardown anyway. So every cancel is absorbed until *fut*
+    is done, then re-raised. *fut* must be bounded (TEARDOWN_TIMEOUT_S).
+    """
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(fut)
+            break
+        except asyncio.CancelledError:
+            if fut.done():  # fut itself was cancelled, not just us
+                raise
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
 
 @dataclass
 class TrialEvents:
@@ -131,6 +161,34 @@ async def run_trial(
     response = ""
     error: str | None = None
     partial = None
+    # The teardown of the trial's full result, once started. A cancel or a late
+    # exception after this point must not undo the same resources a second time.
+    undo: asyncio.Future | None = None
+
+    async def bounded_teardown(trace: Any) -> Any:
+        try:
+            return await asyncio.wait_for(
+                teardown(
+                    trace,
+                    model,
+                    agent_slug=getattr(case, "agent_slug", None),
+                    tick=getattr(case, "type", "") == "tick",
+                ),
+                timeout=TEARDOWN_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            await events._fire(
+                "note", case,
+                f"teardown did not finish in {TEARDOWN_TIMEOUT_S:.0f}s — check staging "
+                "for leftovers (the next pre-flight reports any executor)", "error",
+            )
+            return None
+
+    def start_undo(trace: Any) -> asyncio.Future:
+        return asyncio.ensure_future(bounded_teardown(trace))
+
+    def needs_undo(trace: Any) -> bool:
+        return trace is not None and (is_mutating(case) or bool(created_resources(trace)))
 
     if lane == "mock":
         # Every trial starts from the fixture: the mock is stateful, and a trial
@@ -165,16 +223,21 @@ async def run_trial(
         # resource still needs removing. Keyed on the trace as well as the case's
         # risk level: a read-only case is exactly where a model that falls for a
         # prompt injection creates something nobody planned to clean up.
-        if is_mutating(case) or created_resources(result):
-            report = await teardown(
-                result,
-                model,
-                agent_slug=getattr(case, "agent_slug", None),
-                tick=getattr(case, "type", "") == "tick",
-            )
-            await events._fire("cleanup", case, trial, report)
+        if needs_undo(result):
+            undo = start_undo(result)
+            report = await finish_despite_cancel(undo)
+            if report is not None:
+                await events._fire("cleanup", case, trial, report)
         return card
     except asyncio.CancelledError:
+        # A cancelled run (the dashboard's Cancel, a server shutdown, a suite
+        # worker stopped by its runner) still owes staging the undo: an order
+        # placed before the cancel otherwise stays open and blocks the next
+        # pre-flight. Finish a teardown already under way, or undo from the trace.
+        if undo is None and needs_undo(partial):
+            undo = start_undo(partial)
+        if undo is not None:
+            await finish_despite_cancel(undo)
         raise
     except asyncio.TimeoutError:
         # Record it. Appending nothing made the case vanish from the run entirely,
@@ -191,17 +254,20 @@ async def run_trial(
         )
         error = f"{exc} — recorded as a harness artifact"
     scorecards.append(card)
-    await events._fire("trial_done", case, trial, card, response, error)
     # A trial cut off mid-way may already have created something — a timed-out
     # `budgeted_buy` left its market order's executor running, and the next run's
-    # pre-flight refused to start. Undo what its trace got as far as recording.
-    if partial is not None and (is_mutating(case) or created_resources(partial)):
-        report = await teardown(
-            partial,
-            model,
-            agent_slug=getattr(case, "agent_slug", None),
-            tick=getattr(case, "type", "") == "tick",
-        )
+    # pre-flight refused to start. Undo what its trace got as far as recording,
+    # started before anything that can be cancelled so a cancel cannot skip it.
+    owned = undo is None and needs_undo(partial)
+    if owned:
+        undo = start_undo(partial)
+    report = None
+    try:
+        await events._fire("trial_done", case, trial, card, response, error)
+    finally:
+        if owned:
+            report = await finish_despite_cancel(undo)
+    if report is not None:
         await events._fire("cleanup", case, trial, report)
     return card
 

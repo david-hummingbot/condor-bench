@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import tempfile
 import uuid
 import subprocess
@@ -18,6 +19,9 @@ DEFAULT_TRIALS = 1
 #: A worker's stdout line starting with this carries one progress event as JSON.
 #: Every other line is the worker's own output; the last of those is its result.
 PROGRESS_PREFIX = "@@bench-progress "
+#: How long a stopped worker gets to undo what its trial in flight created
+#: (bench.trials tears down on cancellation) before its process group is killed.
+_WORKER_STOP_GRACE_S = 90.0
 #: A progress line carries a scorecard and a response; the 64 KiB default would
 #: fail the read on a long one.
 _WORKER_LINE_LIMIT = 16 * 1024 * 1024
@@ -37,6 +41,31 @@ _INFERENCE_ENV = {
     "reasoning": "BENCH_REASONING",
     "seed": "BENCH_SEED",
 }
+
+
+async def _stop_worker(proc: asyncio.subprocess.Process) -> None:
+    """Stop a worker and everything it started, giving it time to clean up.
+
+    The worker runs under ``uv run``, which cannot forward a SIGKILL: killing ``uv``
+    alone left the Python worker running, still placing orders on staging after
+    the run was marked cancelled. So the worker gets its own process group, the
+    whole group gets SIGTERM — which the worker turns into a cancellation that
+    tears down the trial in flight — and SIGKILL only if it outlives the grace.
+    """
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_WORKER_STOP_GRACE_S)
+    except asyncio.TimeoutError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await proc.wait()
 
 
 def _model_key(cfg: dict[str, Any]) -> str | None:
@@ -343,6 +372,7 @@ async def run_suite(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=_WORKER_LINE_LIMIT,
+                start_new_session=True,  # its own process group; see _stop_worker
             )
             # Read as it runs, not at exit: a member is a whole checkout's worth of
             # cases × trials, and waiting for it left the progress bar still for
@@ -417,10 +447,17 @@ async def run_suite(
                         "member_run_id": member_run_id,
                     }
                 )
-        except asyncio.CancelledError:
-            if current_proc and current_proc.returncode is None:
-                current_proc.kill()
-                await current_proc.wait()
+        except BaseException:
+            # Cancelled, or the progress stream failed (an oversized line, an emit
+            # that raised): either way the worker must not outlive the run.
+            # A second Cancel must not mark the run stopped while the worker is
+            # still undoing its trial: the run guard would let a new run's
+            # pre-flight race that teardown on the same account. _stop_worker is
+            # bounded by its grace and the SIGKILL that follows.
+            if current_proc is not None:
+                from bench.trials import finish_despite_cancel
+
+                await finish_despite_cancel(asyncio.ensure_future(_stop_worker(current_proc)))
             raise
         finally:
             current_proc = None

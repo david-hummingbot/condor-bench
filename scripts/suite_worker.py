@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import sys
 import uuid
 from pathlib import Path
@@ -194,6 +195,31 @@ def _progress_events(cases: list, model: str, trials: int, *, already: int):
     return TrialEvents(trial_started=trial_started, trial_done=trial_done)
 
 
+async def _run_until_stopped(job: dict) -> dict:
+    """Run the job; SIGTERM from the suite runner cancels it instead of killing it.
+
+    Cancelling is what lets the trial in flight undo what it already created
+    (bench.trials tears down on CancelledError) — a plain SIGTERM would exit with
+    an order still open on staging.
+    """
+    task = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+
+    def stop_once() -> None:
+        # One cancel only. The runner signals the whole process group and `uv run`
+        # forwards its own SIGTERM too, so the worker is signalled twice — and a
+        # second task.cancel() aborted the teardown the first one started. Later
+        # SIGTERMs are ignored; the runner's SIGKILL after its grace still stops it.
+        loop.add_signal_handler(signal.SIGTERM, lambda: None)
+        task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, stop_once)
+    try:
+        return await _run(job)
+    except asyncio.CancelledError:
+        return {"ok": False, "error": "cancelled", "member_run_id": job.get("member_run_id")}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Suite member worker")
     parser.add_argument("--job", required=True, help="Path to job JSON")
@@ -203,7 +229,7 @@ def main() -> int:
     if not os.environ.get("CONDOR_PATH") and not os.environ.get("CONDOR_REPO"):
         print(json.dumps({"ok": False, "error": "CONDOR_PATH not set for worker"}))
         return 2
-    result = asyncio.run(_run(job))
+    result = asyncio.run(_run_until_stopped(job))
     print(json.dumps(result))
     return 0 if result.get("ok") else 1
 

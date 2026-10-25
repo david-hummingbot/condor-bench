@@ -23,7 +23,7 @@ def _client(model: str) -> PydanticAIClient:
 
 
 def _is_null_safe(model) -> bool:
-    return type(model).__name__ == "_NullContentSafeOpenAIModel"
+    return type(model).__name__ == "_NullContentSafeOpenAIChatModel"
 
 
 def test_openai_prefix_uses_env_base_url_and_stays_null_safe(monkeypatch):

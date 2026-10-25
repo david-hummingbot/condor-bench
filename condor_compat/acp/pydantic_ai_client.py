@@ -36,7 +36,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -53,6 +53,10 @@ from .client import (
 )
 
 log = logging.getLogger(__name__)
+
+# pydantic-ai 2.x prints an ASCII banner on stderr once per process. Every
+# pydantic-ai import in this module is deferred, so this runs ahead of them all.
+os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
 
 def _infer_tool_filter_mode(model_name: str) -> str:
@@ -163,6 +167,10 @@ _SERVER_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
 # How often the MCP lifecycle task checks its stdio transports for a dead server
 # between shutdown checks (CORR-332, ported from condor 39cb7d50).
 MCP_TRANSPORT_POLL_SECONDS = 2.0
+
+# How long one liveness ping may take before the server is assumed to be busy
+# rather than gone. A dead transport answers at once, with an error.
+MCP_PING_TIMEOUT_SECONDS = 5.0
 
 
 def _get_server_semaphore(base_url: str) -> asyncio.Semaphore:
@@ -316,7 +324,7 @@ _NULL_SAFE_MODEL_CLS: Any = None
 
 
 def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
-    """Build an OpenAIModel that never sends an assistant ``content: null``.
+    """Build an OpenAIChatModel that never sends an assistant ``content: null``.
 
     Ollama's OpenAI-compatible ``/v1/chat/completions`` endpoint rejects any
     message whose ``content`` is null with ``invalid message content type:
@@ -331,9 +339,9 @@ def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
     """
     global _NULL_SAFE_MODEL_CLS
     if _NULL_SAFE_MODEL_CLS is None:
-        from pydantic_ai.models.openai import OpenAIModel
+        from pydantic_ai.models.openai import OpenAIChatModel
 
-        class _NullContentSafeOpenAIModel(OpenAIModel):
+        class _NullContentSafeOpenAIChatModel(OpenAIChatModel):
             async def _map_messages(self, *args: Any, **kwargs: Any) -> Any:
                 mapped = await super()._map_messages(*args, **kwargs)
                 for msg in mapped:
@@ -344,7 +352,7 @@ def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
                         msg["content"] = ""
                 return mapped
 
-        _NULL_SAFE_MODEL_CLS = _NullContentSafeOpenAIModel
+        _NULL_SAFE_MODEL_CLS = _NullContentSafeOpenAIChatModel
 
     return _NULL_SAFE_MODEL_CLS(model_id, provider=provider)
 
@@ -367,20 +375,42 @@ def _tool_args_to_dict(args: Any) -> dict | None:
     return None
 
 
-def _dead_transport(servers: list[Any]) -> str | None:
-    """Label of the first MCP server whose session streams are closed, if any.
+def _server_label(server: Any) -> str:
+    """The command an MCP toolset spawned, for a log line a human can act on."""
+    transport = getattr(getattr(server, "client", None), "transport", None)
+    return getattr(transport, "command", None) or repr(server)
 
-    When an MCP subprocess dies, the stdio reader hits EOF and the MCP session's
-    receive loop closes both of its streams. Nothing raises until the next request
-    (``anyio.ClosedResourceError``), so a closed stream is the only signal there is
-    (CORR-332). ``_closed`` is anyio's memory-stream flag; a server that has not
-    opened its streams reads as healthy.
+
+async def _dead_transport(servers: list[Any]) -> str | None:
+    """Label of the first MCP server whose transport is closed, if any.
+
+    When an MCP subprocess dies nothing raises until the next request, and the
+    toolset goes on reporting itself running and connected — so the only honest
+    signal is to send one (CORR-332). The request is a ``ping``, and what counts
+    is *who* answers it: a dead transport fails it locally with
+    ``CONNECTION_CLOSED``, while a live server answers — with a result, or with
+    a JSON-RPC error of its own (an MCP SDK 2.x server has no ``ping`` method
+    and says so). Any answer from the far side is proof of life.
+
+    A *timeout* is read as healthy on purpose: a server busy inside a slow tool
+    must not be torn down. A server that has not opened its client reads as
+    healthy too.
     """
+    from mcp.types import CONNECTION_CLOSED
+
     for server in servers:
-        for attr in ("_read_stream", "_write_stream"):
-            stream = getattr(server, attr, None)
-            if stream is not None and getattr(stream, "_closed", False):
-                return getattr(server, "command", None) or repr(server)
+        client = getattr(server, "client", None)
+        if client is None:
+            continue
+        try:
+            await asyncio.wait_for(client.ping(), MCP_PING_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            continue  # busy, not dead
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code is not None and code != CONNECTION_CLOSED:
+                continue  # the server answered, if only to refuse
+            return _server_label(server)
     return None
 
 
@@ -389,7 +419,7 @@ class PydanticAIClient:
 
     Mirrors ACPClient's interface: start() → prompt_stream() → stop().
     MCP servers are launched as stdio subprocesses, same as ACP does,
-    but tools are consumed via pydantic-ai's MCPServerStdio integration.
+    but tools are consumed via pydantic-ai's MCPToolset integration.
 
     Model resolution:
       - "ollama:llama3.1"  → uses ollama provider (localhost:11434)
@@ -593,7 +623,7 @@ class PydanticAIClient:
         # server by exporting that env var and normalising the key to "openai:",
         # so it never sets base_url explicitly. Without this fallback the model
         # dropped through to infer_model(), which honours OPENAI_BASE_URL but
-        # builds a stock OpenAIModel -- losing the assistant content:null
+        # builds a stock OpenAIChatModel -- losing the assistant content:null
         # coercion and making every tool-calling turn fail against Ollama with
         # "invalid message content type: <nil>".
         if prefix == "openai":
@@ -608,8 +638,15 @@ class PydanticAIClient:
                 model_id, OpenAIProvider(openai_client=openai_client)
             )
 
-        # Standard pydantic-ai resolution (openai, groq, anthropic, google)
+        # Standard pydantic-ai resolution (openai, groq, anthropic, google).
+        # "openai:" is pinned to chat completions: pydantic-ai 2.x re-pointed the
+        # bare prefix at the Responses API, so plain resolution would silently
+        # move every saved openai:* agent to a different endpoint (TASK-019).
+        # Ask for the chat model by name so the key keeps meaning what it did.
         from pydantic_ai.models import infer_model
+
+        if self.model_name.startswith("openai:"):
+            return infer_model(f"openai-chat:{model_id}")
 
         return infer_model(self.model_name)
 
@@ -692,12 +729,15 @@ class PydanticAIClient:
     async def start(self) -> None:
         """Initialize MCP servers and create the pydantic-ai agent."""
         from pydantic_ai import Agent
-        from pydantic_ai.mcp import MCPServerStdio
+        from pydantic_ai.capabilities import PrepareTools
+        from pydantic_ai.mcp import MCPToolset, StdioTransport
 
         toolsets = []
         for srv_config in self.mcp_server_configs:
             command = srv_config["command"]
-            args = srv_config.get("args", [])
+            # StdioTransport requires list[str]; YAML/config may yield ints
+            # (e.g. numeric hummingbot passwords).
+            args = [str(a) for a in srv_config.get("args", [])]
 
             # Inherit the parent process env (same as condor and ACPClient) so
             # cloud keys loaded via dotenv reach MCP tools like
@@ -709,7 +749,7 @@ class PydanticAIClient:
                 env.update(self.extra_env)
             for env_entry in srv_config.get("env", []):
                 if isinstance(env_entry, dict):
-                    env[env_entry["name"]] = env_entry["value"]
+                    env[str(env_entry["name"])] = str(env_entry["value"])
 
             # Bench-only: live mode launches condor's servers as
             # `uv run python -m mcp_servers.…`, which resolves the project from
@@ -717,12 +757,12 @@ class PydanticAIClient:
             # not, so the config carries it explicitly.
             cwd = srv_config.get("cwd")
 
-            mcp_server = MCPServerStdio(
-                command,
-                args=args,
-                env=env,
-                cwd=cwd,
-                timeout=30,
+            mcp_server = MCPToolset(
+                # keep_alive=False: with the default the subprocess outlives the
+                # agent's context, and every stopped session would leak one
+                # Python process per server.
+                StdioTransport(command, args, env=env, cwd=cwd, keep_alive=False),
+                init_timeout=30,
                 # pydantic-ai drops a server's own `instructions` by default. The
                 # ACP host forwards them, so without this the two backends are not
                 # measuring the same task: condor's MCP server ships the live
@@ -743,7 +783,7 @@ class PydanticAIClient:
         self._agent = Agent(
             model,
             toolsets=toolsets,
-            prepare_tools=self._prepare_tools,
+            capabilities=[PrepareTools(self._prepare_tools)],
             model_settings=self.model_settings,
         )
 
@@ -881,13 +921,13 @@ class PydanticAIClient:
         """Background task that holds the MCP server context open.
 
         Polls the stdio transports rather than parking on the shutdown event: a
-        SIGKILLed MCP subprocess never raises out of ``run_mcp_servers()``, it only
+        SIGKILLed MCP subprocess never raises out of the agent's context, it only
         closes the session's streams, so waiting for an exception waits forever
         (CORR-332).
         """
         servers = list(self._mcp_servers)
         try:
-            async with self._agent.run_mcp_servers():
+            async with self._agent:
                 self._ready_event.set()
                 while not self._shutdown_event.is_set():
                     with contextlib.suppress(asyncio.TimeoutError):
@@ -895,7 +935,7 @@ class PydanticAIClient:
                             self._shutdown_event.wait(),
                             timeout=MCP_TRANSPORT_POLL_SECONDS,
                         )
-                    dead = _dead_transport(servers)
+                    dead = await _dead_transport(servers)
                     if dead is not None and not self._shutdown_event.is_set():
                         raise ConnectionError(f"MCP server transport closed: {dead}")
         except asyncio.CancelledError as exc:
@@ -920,13 +960,13 @@ class PydanticAIClient:
                 self._lifecycle_error = exc
             self._teardown_after_lifecycle_failure()
 
-    def _mark_dead_if_transport_closed(self, exc: BaseException) -> None:
+    async def _mark_dead_if_transport_closed(self, exc: BaseException) -> None:
         """A turn failed: if an MCP transport is gone, the client is dead.
 
         The prompt usually meets a killed subprocess before the lifecycle task's
         next poll does, so don't leave ``alive`` True in between.
         """
-        dead = _dead_transport(self._mcp_servers)
+        dead = await _dead_transport(list(self._mcp_servers))
         if dead is None or self._lifecycle_error is not None:
             return
         log.error(
@@ -999,10 +1039,59 @@ class PydanticAIClient:
         Uses pydantic-ai's streaming run with MCP tools.
         Tool calls go through the permission callback for risk checking.
         MCP servers are already running (started in start()), so we
-        call iter() directly without run_mcp_servers().
+        call iter() directly without entering the agent again.
+
+        The run itself lives in a task this client owns (:meth:`_run_turn`);
+        this generator only relays its events. A consumer may stop reading at
+        any ``yield`` — for bench, a trial cut off by its ceiling or a cancelled
+        run — and pydantic-ai's run cannot be unwound from a generator that is
+        being closed: its cancel scopes must exit in the task that entered them,
+        the same constraint ``_run_mcp_lifecycle`` exists for. Cancelling the
+        owned task instead ends the turn in order (condor CORR-714).
         """
         assert self._agent is not None, "Client not started"
 
+        # None marks the end of the turn; the task puts it however it ends.
+        events: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
+        turn = asyncio.create_task(self._run_turn(text, events))
+        try:
+            while (event := await events.get()) is not None:
+                yield event
+                # The reader is back for more: let the turn take its next step.
+                events.task_done()
+        finally:
+            turn.cancel()
+            try:
+                await turn
+            except asyncio.CancelledError:
+                # The turn's cancellation is ours to absorb -- only re-raise
+                # when it is *this* task being cancelled.
+                if not turn.cancelled():
+                    raise
+
+    async def _run_turn(self, text: str, events: asyncio.Queue[ACPEvent | None]) -> None:
+        """Run one turn start to finish, handing its events to ``events``.
+
+        Each event waits for the reader to come back for the next one, so the
+        run advances in step with its consumer exactly as it did when
+        ``prompt_stream`` was the run. ``PromptDone`` is the exception — nothing
+        follows it, and waiting there would keep the slot for a reader that
+        (rightly) stops at it.
+        """
+
+        async def emit(event: ACPEvent) -> None:
+            events.put_nowait(event)
+            if not isinstance(event, PromptDone):
+                await events.join()
+
+        try:
+            await self._run_turn_steps(text, emit)
+        finally:
+            events.put_nowait(None)
+
+    async def _run_turn_steps(
+        self, text: str, emit: Callable[[ACPEvent], Awaitable[None]]
+    ) -> None:
         # Serialize requests: local inference servers (LM Studio, Ollama) process
         # one request at a time. Without this, concurrent ticks race to connect
         # and the losing ticks ConnectTimeout against a busy server. Cloud
@@ -1022,16 +1111,13 @@ class PydanticAIClient:
                 ) as run:
                     async for node in run:
                         if isinstance(node, End):
-                            # Final result -- extract text from the result
-                            if hasattr(node, "data") and node.data:
-                                result_data = node.data
-                                if hasattr(result_data, "data"):
-                                    yield TextChunk(text=str(result_data.data))
+                            # Nothing to project: the final text already went
+                            # out as the last CallToolsNode's TextPart.
                             break
 
                         if isinstance(node, ModelRequestNode):
                             elapsed = time.monotonic() - start_time
-                            yield Heartbeat(elapsed_seconds=elapsed)
+                            await emit(Heartbeat(elapsed_seconds=elapsed))
                             # Extract tool return results from request parts
                             if hasattr(node, "request") and node.request:
                                 for part in node.request.parts:
@@ -1042,17 +1128,31 @@ class PydanticAIClient:
                                         # here and 1.0 on the ACP path for the same
                                         # tool returning the same data.
                                         output_str = stringify_tool_output(part.content)
-                                        yield ToolCallUpdate(
-                                            tool_call_id=part.tool_call_id or "",
-                                            status="completed",
-                                            output=output_str,
-                                        )
+                                        # pydantic-ai 2.x returns a tool that raised or
+                                        # was refused as a ToolReturnPart whose outcome
+                                        # is not "success" (1.x sent a RetryPromptPart,
+                                        # which nothing recorded). Say so explicitly: as
+                                        # a "completed" call with bare error text, a
+                                        # refused create read as one that may have landed,
+                                        # and teardown undid it — deleting a same-named
+                                        # routine that predated the run.
+                                        outcome = getattr(part, "outcome", "success")
+                                        if outcome != "success":
+                                            output_str = json.dumps(
+                                                {"error": output_str, "outcome": outcome}
+                                            )
+                                        await emit(
+                                            ToolCallUpdate(
+                                                tool_call_id=part.tool_call_id or "",
+                                                status="completed" if outcome == "success" else "failed",
+                                                output=output_str,
+                                            ))
 
                         elif isinstance(node, CallToolsNode):
                             # Emit text and tool-call events from model response
                             for part in node.model_response.parts:
                                 if isinstance(part, TextPart) and part.content:
-                                    yield TextChunk(text=part.content)
+                                    await emit(TextChunk(text=part.content))
 
                                 elif isinstance(part, ToolCallPart):
                                     tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
@@ -1083,27 +1183,30 @@ class PydanticAIClient:
                                             isinstance(outcome, dict)
                                             and outcome.get("outcome") == "cancelled"
                                         ):
-                                            yield ToolCallEvent(
-                                                tool_call_id=tool_id,
-                                                title=tool_name,
-                                                status="blocked",
-                                                kind="mcp",
-                                                input=_tool_args_to_dict(part.args),
-                                            )
+                                            await emit(
+                                                ToolCallEvent(
+                                                    tool_call_id=tool_id,
+                                                    title=tool_name,
+                                                    status="blocked",
+                                                    kind="mcp",
+                                                    input=_tool_args_to_dict(part.args),
+                                                ))
                                             continue
 
-                                    yield ToolCallEvent(
-                                        tool_call_id=tool_id,
-                                        title=tool_name,
-                                        status="in_progress",
-                                        kind="mcp",
-                                        input=_tool_args_to_dict(part.args),
-                                    )
+                                    await emit(
+                                        ToolCallEvent(
+                                            tool_call_id=tool_id,
+                                            title=tool_name,
+                                            status="in_progress",
+                                            kind="mcp",
+                                            input=_tool_args_to_dict(part.args),
+                                        ))
 
-                                    yield ToolCallUpdate(
-                                        tool_call_id=tool_id,
-                                        status="completed",
-                                    )
+                                    await emit(
+                                        ToolCallUpdate(
+                                            tool_call_id=tool_id,
+                                            status="completed",
+                                        ))
 
                     # Accumulate messages so the next prompt_stream() call sees
                     # this turn's context via message_history.
@@ -1113,11 +1216,11 @@ class PydanticAIClient:
                     usage_event = self._fold_run_usage(run)
 
                 if usage_event is not None:
-                    yield usage_event
-                yield PromptDone(stop_reason="end_turn")
+                    await emit(usage_event)
+                await emit(PromptDone(stop_reason="end_turn"))
 
             except asyncio.TimeoutError:
-                yield PromptDone(stop_reason="timeout")
+                await emit(PromptDone(stop_reason="timeout"))
             except Exception as e:
                 if self._is_tool_call_error(e):
                     log.warning(
@@ -1128,8 +1231,8 @@ class PydanticAIClient:
                     )
                     try:
                         response_text = await self._prompt_no_tools(text)
-                        yield TextChunk(text=response_text)
-                        yield PromptDone(stop_reason="end_turn")
+                        await emit(TextChunk(text=response_text))
+                        await emit(PromptDone(stop_reason="end_turn"))
                         return
                     except Exception as fallback_e:
                         log.warning(
@@ -1138,7 +1241,7 @@ class PydanticAIClient:
                             fallback_e,
                         )
                 log.exception("PydanticAI prompt error: %s", e)
-                self._mark_dead_if_transport_closed(e)
+                await self._mark_dead_if_transport_closed(e)
                 # The message goes on PromptDone, not into the transcript. condor
                 # renders this text to a user who can see their chat went wrong;
                 # bench *scores* it, and as a TextChunk it becomes the model's
@@ -1146,7 +1249,7 @@ class PydanticAIClient:
                 # something", so the run came back error-free and the judge graded
                 # a 400 from the provider as the model's response. An invalid model
                 # id scored as a bad answer instead of an infra failure.
-                yield PromptDone(stop_reason="error", error=self._format_error(e))
+                await emit(PromptDone(stop_reason="error", error=self._format_error(e)))
 
     def _fold_run_usage(self, run: Any) -> UsageEvent | None:
         """Add this run's token usage to the session total and return an event.
@@ -1160,7 +1263,7 @@ class PydanticAIClient:
         unmeasured one.
         """
         try:
-            usage = run.usage()
+            usage = run.usage
         except Exception:
             log.debug("PydanticAI run reported no usage", exc_info=True)
             return None

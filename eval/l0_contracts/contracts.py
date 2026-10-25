@@ -171,7 +171,9 @@ class SurfaceSession:
         out: dict[str, list[dict[str, Any]]] = {}
         for name, session in self.sessions.items():
             listed = await session.list_tools()
-            out[name] = [{"name": t.name, "inputSchema": t.inputSchema} for t in listed.tools]
+            # mcp 2.x field names (`inputSchema` before); the surface dict keeps
+            # the wire spelling the checks above read.
+            out[name] = [{"name": t.name, "inputSchema": t.input_schema} for t in listed.tools]
         return out
 
     async def run(self, inp: ContractInput) -> ContractOutcome:
@@ -191,7 +193,7 @@ class SurfaceSession:
         text = "\n".join(getattr(c, "text", "") or "" for c in (result.content or []))
         # Rejected means the arguments never reached the tool body: the server's
         # own argument validation answered, flagged as an error.
-        rejected = bool(result.isError) and "validation error" in text.lower()
+        rejected = bool(result.is_error) and "validation error" in text.lower()
         return ContractOutcome(
             rejected=rejected,
             error_text=text[:600],

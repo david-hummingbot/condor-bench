@@ -252,3 +252,89 @@ def test_suite_progress_streams_per_trial_across_members(monkeypatch):
     done = [(e["environment_id"], e["completed"], e["total"]) for e in events if e["type"] == "case_done"]
     assert done == [("a", 1, 4), ("a", 2, 4), ("b", 3, 4), ("b", 4, 4)]
     assert [m["status"] for m in out["members"]] == ["done", "done"]
+
+
+def test_stopping_a_worker_stops_what_it_started(monkeypatch):
+    """`uv run` cannot forward SIGKILL: killing only it left the Python worker
+    running, still placing orders after the run was marked cancelled."""
+    import asyncio
+    import os
+    import sys
+
+    import bench.suite_runner as sr
+
+    monkeypatch.setattr(sr, "_WORKER_STOP_GRACE_S", 2.0)
+    # A parent that ignores SIGTERM (as uv would not forward SIGKILL), with a child.
+    script = (
+        "import signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+
+    async def go():
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", script, stdout=asyncio.subprocess.PIPE, start_new_session=True
+        )
+        child = int((await proc.stdout.readline()).decode())
+        await sr._stop_worker(proc)
+        await asyncio.sleep(0.2)
+        return proc.returncode, child
+
+    code, child = asyncio.run(go())
+    assert code is not None
+    try:
+        os.kill(child, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    if alive:  # reap a zombie re-parented to init before declaring it alive
+        with open(f"/proc/{child}/stat") as f:
+            alive = f.read().split()[2] != "Z"
+    assert not alive, "the worker's own child must not survive"
+
+
+def test_a_worker_signalled_twice_still_finishes_its_teardown(tmp_path):
+    """The runner signals the process group and `uv run` forwards SIGTERM too; the
+    second signal used to cancel the teardown the first one started."""
+    import asyncio
+    import os
+    import signal
+
+    from config import ROOT
+
+    script = tmp_path / "worker_shape.py"
+    script.write_text(
+        "import asyncio, importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(ROOT / 'scripts' / 'suite_worker.py')!r})\n"
+        "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
+        "async def run(job):\n"
+        "    try:\n"
+        "        print('ready', flush=True)\n"
+        "        await asyncio.sleep(30)\n"
+        "    except asyncio.CancelledError:\n"
+        "        await asyncio.sleep(1.0)  # the trial's teardown\n"
+        "        print('teardown done', flush=True)\n"
+        "        raise\n"
+        "w._run = run\n"
+        "print(asyncio.run(w._run_until_stopped({'member_run_id': 'm0'})), flush=True)\n"
+    )
+
+    async def go():
+        proc = await asyncio.create_subprocess_exec(
+            "uv", "run", "python", str(script), cwd=str(ROOT),
+            stdout=asyncio.subprocess.PIPE, start_new_session=True)
+        while (await proc.stdout.readline()).strip() != b"ready":
+            pass
+        os.killpg(proc.pid, signal.SIGTERM)  # exactly what _stop_worker sends
+        # uv's forwarded copy can land after the teardown has started; send it late
+        # on purpose, since landing in the same loop iteration hides the bug.
+        await asyncio.sleep(0.3)
+        os.killpg(proc.pid, signal.SIGTERM)
+        out = (await proc.stdout.read()).decode()
+        await proc.wait()
+        return out
+
+    out = asyncio.run(go())
+    assert "teardown done" in out and "cancelled" in out

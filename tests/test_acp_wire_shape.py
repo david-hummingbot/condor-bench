@@ -838,7 +838,8 @@ def test_the_pydantic_client_reports_errors_on_prompt_done_not_as_text():
 
     from condor_compat.acp import pydantic_ai_client
 
-    src = inspect.getsource(pydantic_ai_client.PydanticAIClient.prompt_stream)
+    # The turn's body moved out of prompt_stream into the task it relays from.
+    src = inspect.getsource(pydantic_ai_client.PydanticAIClient._run_turn_steps)
     assert "TextChunk(text=self._format_error(e))" not in src, (
         "a failed prompt is reporting through the transcript again — put the "
         "message on PromptDone(error=...) so _prompt_failure can see the failure"

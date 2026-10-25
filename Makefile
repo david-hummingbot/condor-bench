@@ -3,6 +3,11 @@
         clean-journals \
         sweep matrix route test-pr test-nightly test-release promote
 
+# The dashboard holds API keys and can place orders, so it listens on loopback only.
+# For deliberate LAN access: make dashboard DASHBOARD_HOST=0.0.0.0 and set
+# DASHBOARD_ALLOWED_HOSTS to the name or address you will browse to.
+DASHBOARD_HOST ?= 127.0.0.1
+
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
 install:
@@ -141,7 +146,7 @@ dashboard:
 	@echo ""
 	@echo "  Dashboard → http://localhost:8001"
 	@echo ""
-	uv run uvicorn dashboard.backend.app:app --host 0.0.0.0 --port 8001
+	uv run uvicorn dashboard.backend.app:app --host $(DASHBOARD_HOST) --port 8001
 
 # Hot-reload dev mode: backend on :8001, Vite on :5173
 dashboard-dev:

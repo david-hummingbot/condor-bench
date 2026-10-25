@@ -1,7 +1,7 @@
 """GENERATED — do not edit. Vendored from condor by scripts/revendor.py.
 
 Source: condor/agents/prompts.py
-condor:  8e4860fa-dirty (main)
+condor:  0ea6e353-dirty (main)
 
 Imports are rewritten to condor_compat/upstream_shims.py; the prompt text itself
 is byte-for-byte condor's. Bench's additions are appended below the marker at the

@@ -279,3 +279,57 @@ def test_an_executor_id_is_read_through_the_acp_result_envelope():
     assert _identifier("create_order_executor", {}, wrapped) == "7s4zDavRMwg97LmRTNJHknEV37MeDa2RCfpffC717op4"
     # The pydantic-ai path's plain string still parses.
     assert _identifier("create_order_executor", {}, "Executor ID: abc123\nType: x") == "abc123"
+
+
+def _trace(calls, responses):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(tool_calls=calls, tool_responses=responses)
+
+
+def test_a_refused_create_is_not_undone():
+    """`create_routine` on a taken name answers "already exists"; undoing it
+    deleted the user's own routine of that name."""
+    trace = _trace(
+        [{"tool": "manage_routines", "tool_call_id": "a",
+          "args": {"action": "create_routine", "name": "price_alert"}},
+         {"tool": "create_order_executor", "tool_call_id": "b", "args": {}}],
+        [{"tool_call_id": "a", "output": json.dumps({"error": "Routine 'price_alert' already exists."})},
+         {"tool_call_id": "b", "output": "Error executing tool create_order_executor: insufficient balance"}],
+    )
+    assert created_resources(trace) == []
+
+
+def test_a_create_still_in_flight_is_still_undone():
+    trace = _trace([{"tool": "create_order_executor", "tool_call_id": "b", "args": {}}], [])
+    assert [r.tool for r in created_resources(trace)] == ["create_order_executor"]
+
+
+def test_an_undo_targets_the_store_the_create_wrote_to():
+    from bench.cleanup import _undo_args
+
+    trace = _trace(
+        [{"tool": "manage_routines", "tool_call_id": "a",
+          "args": {"action": "create_routine", "name": "bench_r", "agent": "bench_agent", "shared": False}},
+         {"tool": "manage_skill", "tool_call_id": "b",
+          "args": {"action": "create", "name": "bench_s", "agent": "bench_agent"}}],
+        [{"tool_call_id": "a", "output": json.dumps({"created": "bench_r"})},
+         {"tool_call_id": "b", "output": json.dumps({"created": "bench_s"})}],
+    )
+    routine, skill = created_resources(trace)
+    assert _undo_args(routine, "delete_routine") == {
+        "action": "delete_routine", "agent": "bench_agent", "shared": False, "name": "bench_r"}
+    assert _undo_args(skill, "delete") == {"action": "delete", "agent": "bench_agent", "name": "bench_s"}
+
+
+def test_a_refused_undo_on_the_real_mcp_result_type_is_an_error():
+    """mcp 2.x renamed `isError` to `is_error`; reading only the old name made every
+    refused undo a "removal". Built from the SDK's own type, not a fake."""
+    from mcp import types
+
+    refused = types.CallToolResult(
+        content=[types.TextContent(type="text", text="Executor not found")], is_error=True
+    )
+    assert tool_error(refused) == "Executor not found"
+    ok = types.CallToolResult(content=[types.TextContent(type="text", text="stopped")], is_error=False)
+    assert tool_error(ok) is None

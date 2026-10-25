@@ -33,8 +33,7 @@ from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -186,6 +185,21 @@ async def _emit(run_id: str, event: dict) -> None:
 # to prevent. It also has to keep showing up in /api/runs, or the UI offers no way
 # back to the run holding the lock.
 _ACTIVE_STATUSES = ("starting", "running", "paused")
+
+
+def _refuse_if_busy() -> None:
+    """One run at a time, of any kind — a paused run still holds the target.
+
+    Custom-prompt runs count too: they act on the same staging account, and they
+    set model keys and base URLs in this process's environment for the duration,
+    which a benchmark's trial in flight would then pick up.
+    """
+    for state in _active_runs.values():
+        if state["status"] in _ACTIVE_STATUSES:
+            raise HTTPException(409, f"A benchmark is already {state['status']}. Cancel it first.")
+    for state in _custom_runs.values():
+        if state["status"] in ("starting", "running"):
+            raise HTTPException(409, "A custom prompt is still running. Wait for it or cancel it first.")
 
 
 async def _await_resume(run_id: str, state: dict) -> None:
@@ -522,9 +536,25 @@ async def _emit_custom(run_id: str, event: dict) -> None:
         await q.put(event)
 
 
+async def _undo_custom(trace: Any, model: str, agent_slug: str | None) -> None:
+    """Undo what a custom prompt's agent created, if its trace shows anything."""
+    from bench.cleanup import created_resources, teardown
+    from bench.trials import TEARDOWN_TIMEOUT_S
+
+    if trace is not None and created_resources(trace):
+        try:
+            await asyncio.wait_for(
+                teardown(trace, model, agent_slug=agent_slug), timeout=TEARDOWN_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            log.error("custom prompt teardown did not finish in %.0fs", TEARDOWN_TIMEOUT_S)
+
+
 async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
     from bench.baseline import BaselineStore
-    from bench.client import run_consult
+    from bench.client import recording_trace, run_consult
+    from bench.trials import finish_despite_cancel
+    from config import case_timeout_s
     from bench.reporter import save_run
     from bench.scorer import score as do_score
 
@@ -554,18 +584,29 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
             await _emit_custom(run_id, {"type": "model_started", "model": model_key})
 
             env_backup: dict[str, str | None] = {}
+            # The same ceiling, trace and undo a benchmark trial gets: an ad-hoc
+            # prompt is a live agent, and "buy 0.01 BTC" left its executor running
+            # and the next run's pre-flight refusing to start. `undo` is what to
+            # tear down once this model is done — the full result when the call
+            # returned, else whatever the trace got as far as recording.
+            partial = undo = None
             try:
                 for k, v in env_vars.items():
                     env_backup[k] = os.environ.get(k)
                     os.environ[k] = v
 
-                result = await run_consult(
-                    cp_case_id,
-                    req.question,
-                    norm_key,
-                    extra_turns=req.turns,
-                    agent_slug=req.agent_slug,
-                )
+                with recording_trace() as partial:
+                    result = await asyncio.wait_for(
+                        run_consult(
+                            cp_case_id,
+                            req.question,
+                            norm_key,
+                            extra_turns=req.turns,
+                            agent_slug=req.agent_slug,
+                        ),
+                        timeout=case_timeout_s(None),
+                    )
+                undo = result
 
                 baseline = store.load(cp_case_id)
                 baseline_latency = baseline.latency_s if baseline else result.latency_s
@@ -612,13 +653,18 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                error = (
+                    f"timed out after {case_timeout_s(None):.0f}s"
+                    if isinstance(exc, TimeoutError)
+                    else str(exc)
+                )
                 await _emit_custom(run_id, {
                     "type": "model_done",
                     "model": model_key,
                     "response": "",
                     "tool_calls": [],
                     "scorecard": {},
-                    "error": str(exc),
+                    "error": error,
                 })
             finally:
                 for k, v in env_backup.items():
@@ -626,6 +672,11 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
                         os.environ.pop(k, None)
                     else:
                         os.environ[k] = v
+                # Here, not after the block: success, error and cancel all pass
+                # through, so no cancel landing mid-way can skip the undo.
+                await finish_despite_cancel(
+                    asyncio.ensure_future(_undo_custom(undo or partial, norm_key, req.agent_slug))
+                )
 
         state["status"] = "completed"
         await _emit_custom(run_id, {"type": "done", "status": "completed"})
@@ -648,18 +699,58 @@ async def lifespan(app: FastAPI):
 
     ensure_store_dirs()
     yield
-    for state in _active_runs.values():
-        task = state.get("task")
-        if task and not task.done():
-            task.cancel()
-    for state in _custom_runs.values():
-        task = state.get("task")
-        if task and not task.done():
-            task.cancel()
+    # Cancel the runs, then wait for them: a cancelled trial still undoes what it
+    # created, and uvicorn's loop shutdown would otherwise kill that teardown
+    # half-way (Ctrl-C, a --reload restart). Bounded by the trial teardown ceiling
+    # plus a suite worker's stop grace; a second Ctrl-C still exits at once.
+    from bench.trials import TEARDOWN_TIMEOUT_S
+
+    tasks = [
+        state["task"]
+        for state in [*_active_runs.values(), *_custom_runs.values()]
+        if state.get("task") is not None and not state["task"].done()
+    ]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        log.warning("Shutting down: waiting for %d run(s) to undo what they created", len(tasks))
+        await asyncio.wait(tasks, timeout=TEARDOWN_TIMEOUT_S + 120)
 
 
 app = FastAPI(title="condor-bench", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# The dashboard holds API keys (form state returns them in full, so the inputs can
+# be refilled) and can place orders, copy credentials into a folder and run
+# `uv sync` there. With `allow_origins=["*"]` any web page the user had open could
+# read the keys with one fetch; bound to 0.0.0.0, anyone on the LAN could too.
+# The UI is always same-origin (built, or behind Vite's proxy), so no cross-origin
+# caller is legitimate: refuse a request from a non-local Origin (a page's fetch or
+# form post) or addressed to a non-local Host (DNS rebinding — a same-origin GET
+# carries no Origin). DASHBOARD_ALLOWED_HOSTS adds names for deliberate LAN use.
+# "testserver" is what FastAPI's TestClient sends; no public name can be it.
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1", "testserver"}
+_EXTRA_HOSTS = {h.strip().lower() for h in os.environ.get("DASHBOARD_ALLOWED_HOSTS", "").split(",") if h.strip()}
+
+
+def _hostname(netloc: str) -> str:
+    netloc = netloc.strip().lower()
+    if netloc.startswith("["):
+        return netloc[: netloc.find("]") + 1]
+    return netloc.rsplit(":", 1)[0] if netloc.count(":") == 1 else netloc
+
+
+def _allowed_host(name: str) -> bool:
+    return name in _LOCAL_HOSTS or name in _EXTRA_HOSTS or name.endswith(".localhost")
+
+
+@app.middleware("http")
+async def _local_only(request: Request, call_next):
+    host = _hostname(request.headers.get("host", ""))
+    origin = request.headers.get("origin")
+    origin_host = _hostname(origin.split("://", 1)[-1]) if origin and origin != "null" else None
+    if not _allowed_host(host) or (origin is not None and (origin_host is None or not _allowed_host(origin_host))):
+        return JSONResponse({"detail": "The dashboard only answers local requests."}, status_code=403)
+    return await call_next(request)
 
 
 # ── API ────────────────────────────────────────────────────────────────────────
@@ -1225,12 +1316,7 @@ class CustomPromptRequest(BaseModel):
 
 @app.post("/api/runs")
 async def create_run(req: RunRequest):
-    # One run at a time (a paused run still holds the target — see _ACTIVE_STATUSES)
-    for state in _active_runs.values():
-        if state["status"] in _ACTIVE_STATUSES:
-            raise HTTPException(
-                409, f"A benchmark is already {state['status']}. Cancel it first."
-            )
+    _refuse_if_busy()
 
     run_id = uuid.uuid4().hex[:8]
     _active_runs[run_id] = {
@@ -1432,6 +1518,7 @@ async def get_run(run_dir_or_id: str):
 
 @app.post("/api/custom-prompt")
 async def create_custom_prompt(req: CustomPromptRequest):
+    _refuse_if_busy()
     run_id = uuid.uuid4().hex[:8]
     _custom_runs[run_id] = {
         "run_id": run_id,
@@ -1445,6 +1532,19 @@ async def create_custom_prompt(req: CustomPromptRequest):
     task = asyncio.create_task(_run_custom_prompt(run_id, req))
     _custom_runs[run_id]["task"] = task
     return {"run_id": run_id}
+
+
+@app.delete("/api/custom-prompt/{run_id}")
+async def cancel_custom_prompt(run_id: str):
+    """Stop a custom prompt. It still undoes what its agent created before it ends,
+    so the run guard holds until that teardown is done."""
+    state = _custom_runs.get(run_id)
+    if not state:
+        raise HTTPException(404, "Custom prompt run not found")
+    task = state.get("task")
+    if task and not task.done():
+        task.cancel()
+    return {"status": "cancelling"}
 
 
 @app.get("/api/custom-prompt/{run_id}/stream")
@@ -1744,11 +1844,7 @@ async def _start_suite_run(suite_id: str, req: SuiteRunRequest) -> dict:
     """Validate and start a suite run in the background; shared with Compare Condor."""
     from bench.suites import SuiteStoreError, get_suite
 
-    for state in _active_runs.values():
-        if state["status"] in _ACTIVE_STATUSES:
-            raise HTTPException(
-                409, f"A benchmark is already {state['status']}. Cancel it first."
-            )
+    _refuse_if_busy()
 
     try:
         suite = get_suite(suite_id)

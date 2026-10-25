@@ -28,6 +28,8 @@ export const createCustomPrompt = (body) =>
   fetch('/api/custom-prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(handle)
 
 export const streamCustomPromptUrl = (id) => `/api/custom-prompt/${id}/stream`
+export const cancelCustomPrompt = (id) =>
+  fetch(`/api/custom-prompt/${id}`, { method: 'DELETE' }).then(handle)
 
 export const cancelRun = (id) =>
   fetch(`/api/runs/${id}`, { method: 'DELETE' }).then(handle)

@@ -84,7 +84,7 @@ async def capture(repo: Path, module: str) -> dict[str, dict]:
 
     surface = {}
     for tool in tools:
-        schema = tool.inputSchema or {}
+        schema = tool.input_schema or {}  # `inputSchema` before mcp 2.x
         surface[tool.name] = {
             "required": sorted(schema.get("required") or []),
             "params": sorted((schema.get("properties") or {}).keys()),

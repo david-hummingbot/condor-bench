@@ -53,3 +53,6 @@ node_modules/
 audit_log.yml
 # Bench-managed worktrees of condor branches/PRs (Compare Condor)
 .condor-worktrees/
+
+# Agent worktrees (Claude Code)
+.claude/worktrees/
