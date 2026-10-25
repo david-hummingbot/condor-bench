@@ -321,6 +321,8 @@ async def run_suite(
             "run_group_id": run_group_id,
             "parent_run_id": parent_run_id,
             "member_run_id": member_run_id,
+            # Position in the plan; Compare reads the baseline as member 0.
+            "member_index": index,
             "model": model_key,
             "case_ids": case_ids,
             "include_in_matrix": bool(suite.get("include_in_matrix", False)),
@@ -340,18 +342,17 @@ async def run_suite(
         env_vars["CONDOR_PATH"] = str(env["condor_path"])
         if env.get("server_name"):
             env_vars["BENCH_SERVER_NAME"] = str(env["server_name"])
-        # Forward optional model credentials from the request config.
-        if model_cfg.get("api_key"):
-            # Best-effort: set common provider keys based on model prefix.
-            key = str(model_key)
-            if key.startswith("anthropic:"):
-                env_vars["ANTHROPIC_API_KEY"] = str(model_cfg["api_key"])
-            elif key.startswith("openrouter:"):
-                env_vars["OPENROUTER_API_KEY"] = str(model_cfg["api_key"])
-            elif key.startswith("openai:") or key.startswith("custom:"):
-                env_vars["OPENAI_API_KEY"] = str(model_cfg["api_key"])
-        if model_cfg.get("base_url"):
-            env_vars["OPENAI_BASE_URL"] = str(model_cfg["base_url"])
+        # Forward the request's credentials the way a dashboard run does: same
+        # provider -> variable mapping, same base-URL normalisation.
+        from bench.model_env import model_env_vars
+
+        env_vars.update(
+            model_env_vars(
+                str(model_key),
+                str(model_cfg["api_key"]) if model_cfg.get("api_key") else None,
+                str(model_cfg["base_url"]) if model_cfg.get("base_url") else None,
+            )
+        )
         # Per-model inference overrides reach the worker the same way the run-wide
         # BENCH_* settings do, so the worker's manifest records what it ran with.
         for key, value in (model_cfg.get("inference_config") or {}).items():

@@ -12,6 +12,7 @@ model and checkout alone.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,13 +21,60 @@ from bench.matrix import summary_lane
 from config import PASS_THRESHOLD, RESULTS_DIR
 
 
+def _summary_path(run_dir: str | Path) -> Path:
+    """``RESULTS_DIR/<run_dir>/summary.json``, for a run dir that is one plain name.
+
+    Run dirs are direct children of RESULTS_DIR. Anything else -- ``../x``, an
+    absolute path, ``.`` -- reads a summary.json the dashboard never wrote, so it is
+    treated as unknown rather than followed.
+    """
+    name = str(run_dir)
+    if not name or name in (".", "..") or "/" in name or "\\" in name or Path(name).name != name:
+        raise FileNotFoundError(f"No summary for run_dir={run_dir}")
+    return RESULTS_DIR / name / "summary.json"
+
+
 def load_summary(run_dir: str | Path) -> dict[str, Any]:
-    path = RESULTS_DIR / str(run_dir) / "summary.json"
+    path = _summary_path(run_dir)
     if not path.is_file():
         raise FileNotFoundError(f"No summary for run_dir={run_dir}")
     data = json.loads(path.read_text())
     data["run_dir"] = path.parent.name
     return data
+
+
+def _member_rank(member: dict[str, Any], suite_order: dict[str, list[str]]) -> int:
+    """Where *member* sat in its suite run's plan; the first is the baseline.
+
+    Deltas are "other minus first", so the order is the sign of every delta. The
+    plan is environments in the suite's order, then models, and the runner names
+    each member ``<parent_run_id>m<index>``; that index is the most direct record.
+    Runs saved without a parseable one fall back to the suite's environment order.
+    """
+    idx = member.get("member_index")
+    if isinstance(idx, int):
+        return idx
+    parent = member.get("parent_run_id")
+    if parent:
+        m = re.match(rf"^{re.escape(str(parent))}m(\d+)_", str(member.get("run_dir") or ""))
+        if m:
+            return int(m.group(1))
+    envs = suite_order.get(str(member.get("suite_id") or ""), [])
+    env = member.get("environment_id")
+    # Scale so a fallback rank never interleaves with a model index within an env.
+    return envs.index(env) * 1000 if env in envs else 10**9
+
+
+def _suite_env_order(suite_ids: set[str]) -> dict[str, list[str]]:
+    from bench.suites import SuiteStoreError, get_suite
+
+    out: dict[str, list[str]] = {}
+    for sid in suite_ids:
+        try:
+            out[sid] = list(get_suite(sid).get("environment_ids") or [])
+        except SuiteStoreError:
+            out[sid] = []
+    return out
 
 
 def load_run_group(run_group_id: str) -> list[dict[str, Any]]:
@@ -39,7 +87,13 @@ def load_run_group(run_group_id: str) -> list[dict[str, Any]]:
         if data.get("run_group_id") == run_group_id:
             data["run_dir"] = summary_path.parent.name
             members.append(data)
-    return sorted(members, key=lambda m: (m.get("environment_id") or "", m.get("model") or ""))
+    # Sorting by environment id put ``cmp-*`` ahead of ``condor-baseline`` and
+    # flipped the sign of every Compare Condor delta; keep the suite's own order.
+    order = _suite_env_order({str(m.get("suite_id")) for m in members if m.get("suite_id")})
+    return sorted(
+        members,
+        key=lambda m: (_member_rank(m, order), m.get("environment_id") or "", m.get("model") or ""),
+    )
 
 
 def _case_set(summary: dict) -> tuple[str, ...]:

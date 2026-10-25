@@ -144,6 +144,8 @@ async def _run(job: dict) -> dict:
     )
     pin["target_banner"] = target_banner()
     pin["parent_run_id"] = job.get("parent_run_id")
+    # Compare orders a group's members by this, so the baseline is the first.
+    pin["member_index"] = job.get("member_index")
     if job.get("preset"):
         pin["preset"] = job["preset"]
 

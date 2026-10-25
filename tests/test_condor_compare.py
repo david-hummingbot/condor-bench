@@ -338,3 +338,257 @@ def test_a_worker_signalled_twice_still_finishes_its_teardown(tmp_path):
 
     out = asyncio.run(go())
     assert "teardown done" in out and "cancelled" in out
+
+
+# ── regressions: ids, concurrency, the run endpoint ────────────────────────────
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    import bench.suites as suites
+
+    monkeypatch.setattr(suites, "SUITES_DIR", tmp_path / "suites")
+    monkeypatch.setattr(suites, "ENVIRONMENTS_DIR", tmp_path / "envs")
+    return suites
+
+
+def test_slugs_are_ids_the_suite_store_accepts():
+    """`release/1.2` kept its dot, the store refused `cmp-release-1.2`, and Compare
+    failed with a 500 after Prepare had succeeded."""
+    from bench.suites import _ID_RE
+
+    for ref in ("release/1.2", "v1.2.3", "Feature/X..Y", "-_-weird-_-", "a" * 200, "...."):
+        slug = cc._slug(ref)
+        assert _ID_RE.match(f"cmp-{slug}") and _ID_RE.match(f"compare-{slug}"), (ref, slug)
+        assert len(f"compare-{slug}") <= 64
+    assert cc.parse_ref("release/1.2")[2] == "release-1-2"
+
+
+def test_a_dotted_branch_sets_up_a_suite(world, store):
+    _git(world["base"], "push", "-q", "origin", "HEAD:refs/heads/release/1.2")
+    cand = Path(cc.prepare(ref="release/1.2")["candidate"]["path"])
+    suite = cc.setup_suite(str(cand), label="release/1.2", model={"model_key": "m"})
+    assert suite["id"] == "compare-release-1-2"
+    assert suite["environment_ids"] == [cc.BASELINE_ENV_ID, "cmp-release-1-2"]
+
+
+def test_a_worktree_named_under_the_old_slug_rule_can_still_be_removed(world):
+    base = world["base"]
+    target = cc.WORKTREE_ROOT / "release-1.2"
+    cc.WORKTREE_ROOT.mkdir(parents=True)
+    _git(base, "worktree", "add", "-q", "--detach", str(target), "HEAD")
+    cc.remove_worktree("release-1.2")
+    assert not target.exists()
+
+
+def test_a_concurrent_fetch_cannot_swap_the_commit_a_worktree_is_made_at(world, monkeypatch):
+    """Both prepares fetched into the shared FETCH_HEAD and read it back, so the
+    second one's fetch could land in between and the first got the wrong commit."""
+    base = world["base"]
+    feature = _git(base, "ls-remote", "origin", "refs/heads/feature/x").split()[0]
+    real = cc._git_ok
+    interleaved = []
+
+    def git_ok(repo, *args, **kw):
+        out = real(repo, *args, **kw)
+        if args[0] == "fetch" and not interleaved:
+            # Another prepare's fetch, between this fetch and its rev-parse.
+            interleaved.append(real(base, "fetch", "origin", "main"))
+        return out
+
+    monkeypatch.setattr(cc, "_git_ok", git_ok)
+    cand = Path(cc.prepare(ref="feature/x")["candidate"]["path"])
+    assert interleaved
+    assert _git(cand, "rev-parse", "HEAD") == feature
+
+
+def test_concurrent_prepares_each_get_their_own_ref(world):
+    from concurrent.futures import ThreadPoolExecutor
+
+    base = world["base"]
+    want = {
+        "feature/x": _git(base, "ls-remote", "origin", "refs/heads/feature/x").split()[0],
+        "#7": _git(base, "ls-remote", "origin", "refs/pull/7/head").split()[0],
+        "main": _git(base, "ls-remote", "origin", "refs/heads/main").split()[0],
+    }
+    with ThreadPoolExecutor(3) as pool:
+        out = dict(zip(want, pool.map(lambda r: cc.prepare(ref=r), want)))
+    for ref, commit in want.items():
+        assert _git(Path(out[ref]["candidate"]["path"]), "rev-parse", "HEAD") == commit, ref
+
+
+def test_two_folders_on_the_same_branch_get_their_own_environments(world, store):
+    """Both folders are on `main`; naming the environment after the branch made the
+    second Compare repoint the first one's environment at the second folder."""
+    one = _condor_repo(world["tmp"] / "one" / "condor")
+    two = _condor_repo(world["tmp"] / "two" / "condor")
+    s1 = cc.setup_suite(str(one), label="main", model={"model_key": "m"})
+    s2 = cc.setup_suite(str(two), label="main", model={"model_key": "m"})
+    assert s1["id"] != s2["id"]
+    env1, env2 = s1["environment_ids"][1], s2["environment_ids"][1]
+    assert env1 != env2
+    assert store.get_environment(env1)["condor_path"] == str(one.resolve())
+    assert store.get_environment(env2)["condor_path"] == str(two.resolve())
+    # The same folder maps to the same suite next time.
+    assert cc.setup_suite(str(one), label="main", model={"model_key": "m"})["id"] == s1["id"]
+
+
+def test_setup_survives_a_concurrent_environment_write(world, store, monkeypatch):
+    """A version conflict on update fell through to create, which then failed with
+    "already exists"; it is retried against the record as it is now."""
+    cand = Path(cc.prepare(ref="feature/x")["candidate"]["path"])
+    cc.setup_suite(str(cand), label="feature/x", model={"model_key": "m"})
+    real = store.update_environment
+    raced = []
+
+    def racing_update(eid, patch, *, expected_version):
+        if not raced:
+            raced.append(eid)
+            real(eid, {}, expected_version=None)  # someone else wrote it first
+        return real(eid, patch, expected_version=expected_version)
+
+    monkeypatch.setattr(store, "update_environment", racing_update)
+    suite = cc.setup_suite(str(cand), label="feature/x", model={"model_key": "m2"})
+    assert raced and suite["models"] == [{"model_key": "m2"}]
+
+
+def _compare_client():
+    from fastapi.testclient import TestClient
+
+    from dashboard.backend.app import app
+
+    return TestClient(app)
+
+
+_RUN_BODY = {"candidate_path": "/x", "label": "x", "model": {"model_key": "m"}}
+
+
+def test_compare_while_a_run_is_active_changes_nothing(monkeypatch):
+    """setup_suite rewrote the running group's suite and environments before the
+    busy check refused the second click."""
+    from dashboard.backend import app as appmod
+
+    calls = []
+    monkeypatch.setattr(cc, "setup_suite", lambda *a, **k: calls.append(a))
+    appmod._active_runs["busy-cmp"] = {"status": "running"}
+    try:
+        r = _compare_client().post("/api/compare-condor/run", json=_RUN_BODY)
+    finally:
+        appmod._active_runs.pop("busy-cmp", None)
+    assert r.status_code == 409
+    assert calls == [], "the suite must not be touched while a run is active"
+
+
+def test_a_store_error_during_compare_setup_is_a_4xx(monkeypatch):
+    from bench.suites import SuiteStoreError, VersionConflict
+
+    def bad_id(*a, **k):
+        raise SuiteStoreError("Invalid environment id 'cmp-x.y'")
+
+    monkeypatch.setattr(cc, "setup_suite", bad_id)
+    r = _compare_client().post("/api/compare-condor/run", json=_RUN_BODY)
+    assert r.status_code == 400 and "Invalid environment id" in r.json()["detail"]
+
+    def conflict(*a, **k):
+        raise VersionConflict("changed")
+
+    monkeypatch.setattr(cc, "setup_suite", conflict)
+    assert _compare_client().post("/api/compare-condor/run", json=_RUN_BODY).status_code == 409
+
+
+# ── the task-by-task table (dashboard/frontend/src/compareRows.js) ─────────────
+def _side_by_side(base_rows, cand_rows):
+    import shutil
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    from config import ROOT
+
+    module = (ROOT / "dashboard" / "frontend" / "src" / "compareRows.js").as_uri()
+    script = (
+        f"import {{ sideBySide }} from {json.dumps(module)};\n"
+        "let raw = ''; process.stdin.on('data', (d) => raw += d);\n"
+        "process.stdin.on('end', () => { const [b, c] = JSON.parse(raw);\n"
+        "  console.log(JSON.stringify(sideBySide(b, c))) })\n"
+    )
+    out = subprocess.run([node, "--input-type=module", "-e", script], input=json.dumps([base_rows, cand_rows]),
+                         capture_output=True, text=True, check=True)
+    return {r["task"]: r for r in json.loads(out.stdout)}
+
+
+def _row(task, *, passed=None, composite=0.9, error=None, harness=None, trial=1):
+    return {"case_id": f"compare-x__{task}", "trial_idx": trial, "passed": passed,
+            "composite": composite, "error": error, "harness_artifact": harness}
+
+
+def test_a_candidate_that_only_errors_reads_as_worse_not_no_data():
+    base = [_row("t", passed=True, trial=i) for i in (1, 2, 3)]
+    errored = [_row("t", error="boom: MCP server exited", composite=0.0, trial=1),
+               _row("t", error="timeout after 120s", harness="case exceeded its 120s ceiling",
+                    composite=0.0, trial=2),
+               _row("t", error="model returned nothing", composite=0.0, trial=3)]
+    row = _side_by_side(base, errored)["t"]
+    assert row["verdict"] == "worse"
+    assert "candidate only errored" in row["note"]
+    assert row["cand"]["n"] == 3 and row["cand"]["passed"] == 0
+    # Mirrored: the current checkout erroring is the candidate being better.
+    assert _side_by_side(errored, base)["t"]["verdict"] == "better"
+
+
+def test_harness_and_infra_rows_stay_excluded():
+    base = [_row("t", passed=True)]
+    cand = [_row("t", harness="market warm-up failed", error="infra: market warm-up failed"),
+            _row("t", error="infra: 429 rate limit")]
+    row = _side_by_side(base, cand)["t"]
+    assert row["verdict"] == "no data" and row["cand"]["excluded"] == 2 and row["cand"]["n"] == 0
+
+
+def test_an_errored_trial_counts_against_the_pass_rate():
+    base = [_row("t", passed=True, trial=1), _row("t", passed=True, trial=2)]
+    cand = [_row("t", passed=True, trial=1), _row("t", error="boom", composite=0.0, trial=2)]
+    row = _side_by_side(base, cand)["t"]
+    assert row["verdict"] == "worse" and row["cand"]["passed"] == 1 and row["cand"]["n"] == 2
+    assert row["delta"] == 0, "an error's 0.0 composite is not a measured score"
+
+
+# ── suite members get the request's credentials the way a dashboard run does ───
+def test_suite_workers_get_every_providers_key_and_a_normalised_base_url(monkeypatch):
+    """Only anthropic/openrouter/openai/custom keys were forwarded, so a Groq or
+    NVIDIA key typed in the form never reached the worker; and a base URL went
+    through raw where the dashboard adds scheme, port and /v1."""
+    import asyncio
+    import sys
+
+    import bench.suite_runner as sr
+
+    for var in ("GROQ_API_KEY", "NVIDIA_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    models = [
+        {"model_key": "groq:llama-3.3-70b-versatile", "api_key": "gsk_test"},
+        {"model_key": "nvidia:openai/gpt-oss-20b", "api_key": "nvapi-test"},
+        {"model_key": "lmstudio:qwen", "base_url": "localhost"},
+    ]
+    monkeypatch.setattr(sr, "get_suite", lambda sid: {"id": sid, "environment_ids": ["a"], "models": models})
+    monkeypatch.setattr(sr, "get_environment", lambda eid: {"id": eid, "condor_path": "/x"})
+    monkeypatch.setattr(sr, "check_experiment_freeze", lambda *a, **k: "adhoc")
+    seen: list = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def fake_exec(*args, env=None, **kw):
+        job = json.loads(Path(args[args.index("--job") + 1]).read_text())
+        seen.append((job, env))
+        ok = "import json; print(json.dumps({'ok': True, 'run_dir': 'r', 'cases': 0}))"
+        return await real_exec(sys.executable, "-c", ok, **{k: v for k, v in kw.items() if k != "cwd"})
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    async def emit(e):
+        pass
+
+    asyncio.run(sr.run_suite("s", parent_run_id="p", emit=emit))
+    (groq_job, groq), (nim_job, nim), (_, local) = seen
+    assert groq["GROQ_API_KEY"] == "gsk_test"
+    assert nim["NVIDIA_API_KEY"] == "nvapi-test"
+    assert local["OPENAI_BASE_URL"] == "http://localhost:1234/v1"
+    assert "OPENAI_BASE_URL" not in groq, "a base URL is only set for providers that use one"
+    # The plan position the summary records, so Compare can order members by it.
+    assert [groq_job["member_index"], nim_job["member_index"]] == [0, 1]

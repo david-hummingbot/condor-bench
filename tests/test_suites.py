@@ -180,6 +180,46 @@ def test_compare_multi_env_is_comparable_and_yields_deltas():
     assert result["deltas"]["pairs"][0]["latency_n"]["baseline"] == 1
 
 
+def _member_summary(results: Path, run_dir: str, env: str, pass_rate: float, **extra) -> None:
+    (results / run_dir).mkdir(parents=True)
+    (results / run_dir / "summary.json").write_text(json.dumps({
+        "run_group_id": "g1", "suite_id": "compare-x", "environment_id": env,
+        "model": "m", "models": ["m"], "case_ids": ["c"], "pass_rate": pass_rate,
+        "composite_avg": pass_rate, "cases_scored": 1, **extra,
+    }))
+
+
+@pytest.mark.parametrize("how", ["member_index", "run_dir", "suite_order"])
+def test_a_run_group_puts_the_suites_first_environment_first(tmp_path, monkeypatch, how):
+    """Members were sorted by environment id, so `cmp-*` came before
+    `condor-baseline`, became the delta baseline, and every sign in Suites flipped."""
+    import bench.compare as compare
+    import bench.suites as suites
+
+    results = tmp_path / "results"
+    monkeypatch.setattr(compare, "RESULTS_DIR", results)
+    monkeypatch.setattr(suites, "SUITES_DIR", tmp_path / "suites")
+    monkeypatch.setattr(suites, "ENVIRONMENTS_DIR", tmp_path / "envs")
+    for eid in ("condor-baseline", "cmp-x"):
+        suites.create_environment({"id": eid, "condor_path": "/x"})
+    suites.create_suite({"id": "compare-x", "environment_ids": ["condor-baseline", "cmp-x"]})
+
+    extra = {
+        "member_index": lambda i: {"member_index": i},
+        "run_dir": lambda i: {"parent_run_id": "p1"},
+        "suite_order": lambda i: {},
+    }[how]
+    names = ("p1m0_m", "p1m1_m") if how != "suite_order" else ("zz_m", "aa_m")
+    _member_summary(results, names[0], "condor-baseline", 0.8, **extra(0))
+    _member_summary(results, names[1], "cmp-x", 0.6, **extra(1))
+
+    members = compare.load_run_group("g1")
+    assert [m["environment_id"] for m in members] == ["condor-baseline", "cmp-x"]
+    deltas = compare.compare_summaries(members)["deltas"]
+    assert deltas["baseline_run_dir"] == names[0]
+    assert deltas["pairs"][0]["pass_rate_delta"] == -0.2, "candidate minus baseline"
+
+
 def test_build_run_pin_paths_are_strings():
     from config import build_run_pin
 

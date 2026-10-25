@@ -110,55 +110,17 @@ PROVIDERS = [
      "default_url": "", "models": [], "key_hint": "optional"},
 ]
 
-_PROVIDER_ENV: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "custom": "OPENAI_API_KEY",
-    "nvidia": "NVIDIA_API_KEY",
-}
-
 
 def _judge_key_configured() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
-def _normalize_openai_base_url(base_url: str, default_port: int | None = None) -> str:
-    """Ensure a user-supplied URL has an http:// scheme, optional default port, and /v1 suffix."""
-    from urllib.parse import urlparse
-    url = base_url.strip().rstrip("/")
-    if not url.startswith(("http://", "https://")):
-        url = "http://" + url
-    parsed = urlparse(url)
-    if default_port and not parsed.port:
-        url = f"{parsed.scheme}://{parsed.hostname}:{default_port}{parsed.path or ''}"
-    if not url.endswith("/v1"):
-        url += "/v1"
-    return url
-
-
-def _model_env_vars(model_key: str, api_key: str | None, base_url: str | None) -> dict[str, str]:
-    provider = model_key.partition(":")[0]
-    env: dict[str, str] = {}
-    if api_key:
-        var = _PROVIDER_ENV.get(provider)
-        if var:
-            env[var] = api_key
-    if base_url:
-        if provider == "ollama":
-            env["OLLAMA_HOST"] = base_url
-            # pydantic-ai uses AsyncOpenAI (OpenAI-compat) for ollama, so also
-            # set OPENAI_BASE_URL — the only path that reaches _build_model
-            env["OPENAI_BASE_URL"] = _normalize_openai_base_url(base_url, default_port=11434)
-            env.setdefault("OPENAI_API_KEY", "not-needed")
-        elif provider in ("lmstudio", "custom", "openai"):
-            env["OPENAI_BASE_URL"] = _normalize_openai_base_url(
-                base_url, default_port=1234 if provider == "lmstudio" else None
-            )
-            if not api_key:
-                env.setdefault("OPENAI_API_KEY", "local")
-    return env
+# Shared with the suite runner, which forwards the same keys to its workers.
+from bench.model_env import (  # noqa: E402
+    PROVIDER_ENV as _PROVIDER_ENV,
+    model_env_vars as _model_env_vars,
+    normalize_openai_base_url as _normalize_openai_base_url,
+)
 
 
 def _normalize_model_key(model_key: str) -> str:
@@ -1673,10 +1635,20 @@ async def api_delete_environment(env_id: str):
 
 @app.get("/api/environments/{env_id}/validate")
 async def api_validate_environment(env_id: str):
+    import subprocess
+
     from bench.suites import SuiteStoreError, validate_environment
 
     try:
-        return validate_environment(env_id)
+        # The probe is a `uv run` subprocess that can take up to a minute; run on
+        # the event loop it froze every SSE stream, cancel and pause meanwhile.
+        return await asyncio.to_thread(validate_environment, env_id)
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(
+            504,
+            f"Validating environment '{env_id}' did not finish in {exc.timeout:.0f}s — "
+            "check that its condor_path builds with `uv run` and try again.",
+        ) from exc
     except SuiteStoreError as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -1994,21 +1966,33 @@ async def api_compare_prepare(req: ComparePrepareRequest):
         raise HTTPException(400, str(exc)) from exc
 
 
+# Held from the busy check until the run is registered, so a second Compare click
+# cannot pass the check while the first is still writing the suite.
+_compare_run_lock = asyncio.Lock()
+
+
 @app.post("/api/compare-condor/run")
 async def api_compare_run(req: CompareRunRequest):
     """Set up the Experiment A suite (baseline vs candidate) and start it."""
     from bench import condor_compare as cc
+    from bench.suites import SuiteStoreError
 
-    try:
-        suite = await asyncio.to_thread(
-            cc.setup_suite, req.candidate_path, label=req.label,
-            model=req.model.model_dump(), case_set=req.case_set,
+    async with _compare_run_lock:
+        # Before setup_suite, not after: it rewrites the suite's cases, models and
+        # both environments, which a run in progress reads member by member.
+        _refuse_if_busy()
+        try:
+            suite = await asyncio.to_thread(
+                cc.setup_suite, req.candidate_path, label=req.label,
+                model=req.model.model_dump(), case_set=req.case_set,
+            )
+        except cc.CompareError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except SuiteStoreError as exc:
+            raise _suite_http_error(exc) from exc
+        started = await _start_suite_run(
+            suite["id"], SuiteRunRequest(trials=req.trials, experiment_type="A")
         )
-    except cc.CompareError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    started = await _start_suite_run(
-        suite["id"], SuiteRunRequest(trials=req.trials, experiment_type="A")
-    )
     return {**started, "suite": suite}
 
 
@@ -2037,8 +2021,12 @@ async def api_compare(
 ):
     from bench.compare import compare_runs
 
-    run_dirs = [r for r in (runs or "").split(",") if r.strip()] or None
-    return compare_runs(run_group_id=run_group, run_dirs=run_dirs)
+    run_dirs = [r.strip() for r in (runs or "").split(",") if r.strip()] or None
+    try:
+        return compare_runs(run_group_id=run_group, run_dirs=run_dirs)
+    except FileNotFoundError as exc:
+        # An unknown run dir, or one outside RESULTS_DIR (bench.compare refuses those).
+        raise HTTPException(404, str(exc)) from exc
 
 
 # ── Static files (must come last) ─────────────────────────────────────────────
