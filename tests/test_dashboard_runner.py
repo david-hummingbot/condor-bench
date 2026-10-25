@@ -389,3 +389,55 @@ def test_a_custom_prompt_can_be_cancelled():
             appmod._custom_runs.pop("cancel01", None)
 
     asyncio.run(go())
+
+
+def test_validating_an_environment_runs_off_the_event_loop(client, monkeypatch):
+    """The probe is a `uv run` subprocess of up to 60s, called synchronously from an
+    async endpoint: SSE, cancel and pause all stalled behind it, and a timeout was
+    an unhandled 500."""
+    import asyncio
+    import subprocess
+
+    import bench.suites as suites
+
+    seen = []
+
+    def probe(env_id):
+        try:
+            asyncio.get_running_loop()
+            seen.append("on the event loop")
+        except RuntimeError:
+            seen.append("in a worker thread")
+        return {"ok": True, "environment_id": env_id}
+
+    monkeypatch.setattr(suites, "validate_environment", probe)
+    assert client.get("/api/environments/e1/validate").json()["ok"] is True
+    assert seen == ["in a worker thread"]
+
+    def slow(env_id):
+        raise subprocess.TimeoutExpired(["uv", "run"], 60)
+
+    monkeypatch.setattr(suites, "validate_environment", slow)
+    r = client.get("/api/environments/e1/validate")
+    assert r.status_code == 504 and "did not finish in 60s" in r.json()["detail"]
+
+
+def test_compare_refuses_unknown_and_out_of_tree_run_dirs(client, monkeypatch, tmp_path):
+    """An unknown run dir was a 500, and `../` read any summary.json on disk."""
+    import json
+
+    import bench.compare as compare
+
+    results = tmp_path / "results"
+    (results / "r1").mkdir(parents=True)
+    (results / "r1" / "summary.json").write_text(json.dumps({"model": "m"}))
+    (tmp_path / "secret").mkdir()
+    (tmp_path / "secret" / "summary.json").write_text(json.dumps({"model": "leak"}))
+    monkeypatch.setattr(compare, "RESULTS_DIR", results)
+
+    for runs in ("r1,nope", "r1,../secret", f"r1,{tmp_path / 'secret'}", "r1,.", "r1,.."):
+        r = client.get("/api/compare", params={"runs": runs})
+        assert r.status_code == 404, (runs, r.status_code)
+    with pytest.raises(FileNotFoundError):
+        compare.load_summary("../secret")
+    assert compare.load_summary("r1")["run_dir"] == "r1"

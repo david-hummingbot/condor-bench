@@ -24,10 +24,12 @@ Running and comparing are the existing suite run and Compare.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,11 @@ BASELINE_ENV_ID = "condor-baseline"
 #: Untracked files a checkout needs to talk to the same servers as the baseline.
 LOCAL_FILES = ("config.yml", ".env")
 _PR_RE = re.compile(r"^(?:#|pr[/#-]?|pull/)?(\d+)(?:/head)?$", re.I)
+#: Prepares share the baseline repo's refs and worktree list; the dashboard runs
+#: each in a thread, so two at once must not interleave their fetch and checkout.
+_PREPARE_LOCK = threading.Lock()
+#: Longest slug that still fits ``compare-<slug>`` in a 64-char suite id.
+_SLUG_MAX = 56
 
 
 class CompareError(RuntimeError):
@@ -145,7 +152,14 @@ def candidates() -> list[Checkout]:
 
 # ── preparing the candidate ────────────────────────────────────────────────────
 def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9._-]+", "-", text.strip().lower()).strip("-")[:60] or "candidate"
+    """A name that is valid as a suite/environment id (``bench.suites._ID_RE``).
+
+    It once kept ``.``, which the store rejects: ``release/1.2`` prepared fine and
+    then failed at Compare with an id the store would not take.
+    """
+    slug = re.sub(r"[^a-z0-9_-]+", "-", text.strip().lower())
+    slug = re.sub(r"-+", "-", slug).strip("-_")[:_SLUG_MAX].strip("-_")
+    return slug or "candidate"
 
 
 def parse_ref(ref: str) -> tuple[str, str, str]:
@@ -168,10 +182,19 @@ def worktree_for(ref: str) -> Checkout:
     Detached at the fetched commit, under ``.condor-worktrees/<slug>``. Reused if
     it already exists (moved to the latest commit, unless it has local changes).
     """
+    with _PREPARE_LOCK:
+        return _worktree_for(ref)
+
+
+def _worktree_for(ref: str) -> Checkout:
     base = baseline_path()
     refspec, label, slug = parse_ref(ref)
-    _git_ok(base, "fetch", "origin", refspec, timeout=300)
-    commit = _git_ok(base, "rev-parse", "FETCH_HEAD")
+    # Fetched into a ref of its own, not read back from FETCH_HEAD: that file is
+    # shared by every fetch in the repo, so a second prepare could overwrite it
+    # between this fetch and the rev-parse and check out the other ref's commit.
+    local_ref = f"refs/bench/{slug}"
+    _git_ok(base, "fetch", "origin", f"+{refspec}:{local_ref}", timeout=300)
+    commit = _git_ok(base, "rev-parse", f"{local_ref}^{{commit}}")
     target = WORKTREE_ROOT / slug
     WORKTREE_ROOT.mkdir(parents=True, exist_ok=True)
     if target.exists():
@@ -257,7 +280,11 @@ def prepare(*, folder: str | None = None, ref: str | None = None) -> dict[str, A
 
 def remove_worktree(slug: str) -> None:
     """Delete a bench-managed worktree (``git worktree remove``)."""
-    target = (WORKTREE_ROOT / _slug(slug)).resolve()
+    # Taken as the folder name, not re-slugged: a worktree made under an older
+    # slug rule (``release-1.2``) must still be removable by the name it has.
+    if not slug or slug in (".", "..") or "/" in slug or "\\" in slug:
+        raise CompareError(f"No bench worktree named {slug!r}.")
+    target = (WORKTREE_ROOT / slug).resolve()
     if WORKTREE_ROOT.resolve() not in target.parents or not target.exists():
         raise CompareError(f"No bench worktree named {slug!r}.")
     _git_ok(baseline_path(), "worktree", "remove", "--force", str(target))
@@ -269,6 +296,46 @@ def load_template(name: str = "practical") -> list[dict[str, Any]]:
     if not path.is_file():
         raise CompareError(f"No case template {name!r} in {TEMPLATES_DIR}.")
     return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+
+
+def candidate_slug(cand: Path) -> str:
+    """The ``cmp-``/``compare-`` id suffix for a candidate checkout.
+
+    A bench worktree's folder is already its ref's slug (``feature-x``,
+    ``pr-285``). Any other folder is named after its path: naming it after its
+    branch gave two folders on ``main`` the same environment, and preparing the
+    second silently repointed the first's at the new path.
+    """
+    if WORKTREE_ROOT.resolve() in cand.parents:
+        return _slug(cand.name)
+    digest = hashlib.sha1(str(cand).encode()).hexdigest()[:8]
+    return f"{_slug(cand.name)[:_SLUG_MAX - 9].strip('-_') or 'condor'}-{digest}"
+
+
+def _upsert(get, update, create, attempts: int = 3):
+    """Update the record if it exists, else create it — tolerating a concurrent writer.
+
+    Catching every store error on update and falling back to create turned a
+    version conflict into "already exists"; a conflict is retried against the
+    record as it is now, and a create that lost a race becomes an update.
+    """
+    from bench import suites
+
+    for _ in range(attempts):
+        try:
+            current = get()
+        except suites.SuiteStoreError:
+            try:
+                return create()
+            except suites.SuiteStoreError as exc:
+                if "already exists" not in str(exc):
+                    raise
+                continue
+        try:
+            return update(current)
+        except suites.VersionConflict:
+            continue
+    raise suites.VersionConflict("The compare suite changed while it was being set up; try again.")
 
 
 def setup_suite(
@@ -283,20 +350,18 @@ def setup_suite(
 
     base = baseline_path()
     cand = Path(candidate_path).resolve()
-    slug = _slug(label or cand.name)
-    env_id = f"cmp-{slug}"[:64]
-    suite_id = f"compare-{slug}"[:64]
+    slug = candidate_slug(cand)
+    env_id = f"cmp-{slug}"
+    suite_id = f"compare-{slug}"
 
     def upsert_env(eid: str, name: str, path: Path) -> None:
         payload = {"id": eid, "name": name, "condor_path": str(path),
                    # Experiment A compares code, and bench's own skill patch dirties
                    # the baseline; dirtiness is recorded in each run's manifest instead.
                    "require_clean": False, "expected_branch": None}
-        try:
-            current = suites.get_environment(eid)
-            suites.update_environment(eid, payload, expected_version=current.get("version"))
-        except suites.SuiteStoreError:
-            suites.create_environment(payload)
+        _upsert(lambda: suites.get_environment(eid),
+                lambda cur: suites.update_environment(eid, payload, expected_version=cur.get("version")),
+                lambda: suites.create_environment(payload))
 
     upsert_env(BASELINE_ENV_ID, "Current condor (baseline)", base)
     upsert_env(env_id, label or cand.name, cand)
@@ -307,10 +372,8 @@ def setup_suite(
         "models": [model],
         "notes": f"Created by Compare Condor. Cases: {case_set}.",
     }
-    try:
-        current = suites.get_suite(suite_id)
-        suite = suites.update_suite(suite_id, meta, expected_version=current.get("version"))
-    except suites.SuiteStoreError:
-        suite = suites.create_suite({"id": suite_id, **meta})
+    suite = _upsert(lambda: suites.get_suite(suite_id),
+                    lambda cur: suites.update_suite(suite_id, meta, expected_version=cur.get("version")),
+                    lambda: suites.create_suite({"id": suite_id, **meta}))
     suites.replace_suite_cases(suite_id, load_template(case_set), expected_version=suite["version"])
     return suites.get_suite(suite_id)

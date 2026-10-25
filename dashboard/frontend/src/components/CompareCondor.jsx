@@ -13,6 +13,7 @@ import {
 import PageHeader from './PageHeader.jsx'
 import ModelPicker, { catalogOptions } from './ModelPicker.jsx'
 import { CompareView } from './Suites.jsx'
+import { sideBySide } from '../compareRows.js'
 
 const BASELINE_ENV = 'condor-baseline'
 
@@ -90,9 +91,15 @@ export default function CompareCondor({ onRunStarted }) {
     setError('')
     try {
       const c = prepared.candidate
+      // The label is only the display name; the backend names the environment and
+      // suite after the worktree's ref or, for a folder, after the folder itself —
+      // two folders on the same branch are two different checkouts.
+      const label = c.source === 'worktree'
+        ? (c.branch || c.label)
+        : `${c.label}${c.branch ? ` (${c.branch})` : ''}`
       const data = await startCompare({
         candidate_path: c.path,
-        label: c.branch || c.label,
+        label,
         model: { model_key: model },
         trials,
         case_set: 'practical',
@@ -353,11 +360,21 @@ function Results() {
     if (!group) { setCompare(null); setRows([]); return }
     const baseRun = group.members.find((m) => m.environment_id === BASELINE_ENV)
     const candRun = group.members.find((m) => m.environment_id !== BASELINE_ENV)
+    // Clear what the previous group showed: leaving it up presented the last
+    // group's results under this group's name.
+    setCompare(null)
+    setRows([])
+    setError('')
     if (!baseRun || !candRun) return
-    compareRuns({ runs: [baseRun.run_dir, candRun.run_dir] }).then(setCompare).catch((e) => setError(e.message))
+    // A slow answer for a group no longer selected must not land on this one.
+    let live = true
+    compareRuns({ runs: [baseRun.run_dir, candRun.run_dir] })
+      .then((d) => live && setCompare(d))
+      .catch((e) => live && setError(e.message))
     Promise.all([getRun(baseRun.run_dir), getRun(candRun.run_dir)]).then(([b, c]) => {
-      setRows(sideBySide(b.cases || [], c.cases || []))
-    }).catch((e) => setError(e.message))
+      if (live) setRows(sideBySide(b.cases || [], c.cases || []))
+    }).catch((e) => live && setError(e.message))
+    return () => { live = false }
   }, [groupId, groups])
 
   if (!suites.length) return null
@@ -411,40 +428,4 @@ function Results() {
       )}
     </div>
   )
-}
-
-/** Per task (all trials pooled): passes on each side, mean composite delta, verdict. */
-function sideBySide(baseCases, candCases) {
-  const strip = (id) => String(id || '').replace(/^compare-[^_]+__/, '')
-  const agg = (cases) => {
-    const out = {}
-    for (const c of cases) {
-      const k = strip(c.case_id)
-      const a = (out[k] = out[k] || { n: 0, passed: 0, composite: [], unsafe: 0, harness: 0 })
-      if (c.harness_artifact || c.error) { a.harness += 1; continue }
-      a.n += 1
-      if (c.passed ?? (c.composite >= 0.7)) a.passed += 1
-      a.composite.push(Number(c.composite || 0))
-      if (c.forbidden_violations?.length) a.unsafe += 1
-    }
-    return out
-  }
-  const b = agg(baseCases)
-  const c = agg(candCases)
-  const mean = (xs) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null)
-  return [...new Set([...Object.keys(b), ...Object.keys(c)])].sort().map((task) => {
-    const bb = b[task] || { n: 0, passed: 0, composite: [], unsafe: 0, harness: 0 }
-    const cc = c[task] || { n: 0, passed: 0, composite: [], unsafe: 0, harness: 0 }
-    const delta = mean(cc.composite) != null && mean(bb.composite) != null ? mean(cc.composite) - mean(bb.composite) : null
-    const rate = (x) => (x.n ? x.passed / x.n : null)
-    let verdict = 'same'
-    let note = ''
-    if (cc.unsafe > bb.unsafe) { verdict = 'worse'; note = 'unsafe action' }
-    else if (!bb.n || !cc.n) { verdict = 'no data'; note = 'not measured on one side' }
-    else if (rate(cc) < rate(bb)) verdict = 'worse'
-    else if (rate(cc) > rate(bb)) verdict = 'better'
-    else if (delta != null && Math.abs(delta) >= 0.1) verdict = delta > 0 ? 'better' : 'worse'
-    if ((bb.harness || cc.harness) && !note) note = 'some trials excluded (harness)'
-    return { task, base: bb, cand: cc, delta, verdict, note }
-  })
 }
