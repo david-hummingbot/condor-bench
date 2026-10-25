@@ -17,3 +17,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+import os
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_environment():
+    """Undo whatever a test leaves in ``os.environ``.
+
+    Code under test writes there on purpose — ``settings_store.update_settings``
+    applies a saved setting to the running process, which is what the dashboard
+    needs. In a test that write outlived the test: a group chat id saved by one
+    test mirrored into ``BENCH_USER_ID`` and made a later test read it as an
+    explicit user id, so the suite passed or failed depending on which tests ran
+    before it.
+    """
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
