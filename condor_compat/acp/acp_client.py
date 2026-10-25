@@ -434,6 +434,26 @@ class ACPClient:
         self.session_models = parse_session_models(result)
         await self._select_model(result)
 
+    async def new_session(self) -> None:
+        """Open a fresh ``session/new`` on the running bridge and make it current.
+
+        Bench-only (condor never needs a second session per process). The judge
+        grades many cases through one bridge: reusing one session meant every
+        verdict was written with all previous cases' transcripts and scores in its
+        context — anchoring the grade and growing the prompt quadratically. A new
+        session gives each judgement an empty context without paying the bridge's
+        startup again. The model pin is reapplied, since it is per session.
+        """
+        assert self._process and self._process.stdin
+        result = await self._peer.send_request(
+            "session/new",
+            {"cwd": self.working_dir, "mcpServers": self.mcp_servers},
+            self._process.stdin,
+        )
+        self._session_id = result["sessionId"]
+        self.session_models = parse_session_models(result)
+        await self._select_model(result)
+
     async def _select_model(self, session: dict) -> None:
         """Apply ``self.model`` over the protocol, or refuse to run the session.
 

@@ -526,9 +526,14 @@ def _console_events():
 
 async def _run_cases(cases, model: str, store, trials: int = 1):
     """Run and score every case *trials* times — see :func:`bench.trials.run_cases`."""
+    from bench.scorer import close_judge
     from bench.trials import run_cases
 
-    return await run_cases(cases, model, store, trials, events=_console_events())
+    try:
+        return await run_cases(cases, model, store, trials, events=_console_events())
+    finally:
+        # Inside the loop that judged the cases — see close_judge.
+        await close_judge()
 
 
 async def _run_trial(case, model: str, store, trial: int, scorecards: list, responses: dict) -> None:
@@ -1030,9 +1035,14 @@ def route(
             console.print(f"  {key} = {value}")
     for key, conflict in routing.get("config_conflicts", {}).items():
         per_domain = ", ".join(f"{d}→{m}" for d, m in conflict["per_domain"].items())
+        outcome = (
+            f"used {conflict['chosen']}, which passed all of them"
+            if conflict.get("chosen")
+            else "no model passed all of them, so it is left unset"
+        )
         console.print(
             f"\n[yellow]{key} is shared by domains that disagree ({per_domain}); "
-            f"used {conflict['chosen']}.[/yellow]"
+            f"{outcome}.[/yellow]"
         )
 
 
@@ -1093,11 +1103,15 @@ def _print_summary(scorecards, model: str, pass_threshold: float) -> None:
     n = len(valid) or 1
     console.print(f"\n[bold]{model}[/bold] — {len(valid)}/{len(scorecards)} cases scored")
     console.print(f"  Composite:      {sum(s.composite for s in valid)/n:.3f}")
-    console.print(f"  Answer quality: {sum(s.answer_quality for s in valid)/n:.3f}")
 
     def _avg(attr: str) -> str:
         rows = [getattr(s, attr) for s in valid if getattr(s, attr) is not None]
         return f"{sum(rows)/len(rows):.3f}" if rows else "n/a"
+
+    # A judge error leaves answer_quality None on a row that is still valid
+    # (error stays None), so summing it raised TypeError and aborted every
+    # remaining model in `sweep`. Average only the verdicts the judge returned.
+    console.print(f"  Answer quality: {_avg('answer_quality')}")
 
     console.print(f"  Tool accuracy:  {_avg('tool_accuracy')}")
     console.print(f"  Tool params:    {_avg('tool_params')}")
@@ -1206,16 +1220,21 @@ def suite_run_cmd(
         console.print(f"  [dim]{event.get('type')}[/dim] { {k:v for k,v in event.items() if k != 'type'} }")
 
     async def _go():
-        return await run_suite(
-            suite_id,
-            parent_run_id=run_id,
-            emit=emit,
-            case_ids=ids,
-            experiment_type=experiment,
-            adhoc=adhoc,
-            trials=trials,
-            preset=preset,
-        )
+        from bench.scorer import close_judge
+
+        try:
+            return await run_suite(
+                suite_id,
+                parent_run_id=run_id,
+                emit=emit,
+                case_ids=ids,
+                experiment_type=experiment,
+                adhoc=adhoc,
+                trials=trials,
+                preset=preset,
+            )
+        finally:
+            await close_judge()
 
     try:
         result = asyncio.run(_go())

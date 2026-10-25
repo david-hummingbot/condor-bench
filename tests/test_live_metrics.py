@@ -250,3 +250,40 @@ def test_a_legend_does_not_mask_a_real_error_elsewhere():
         "Error: the request was rejected"
     )
     assert _error_reason(payload)
+
+
+# ── Healthy fields that only *name* a failure mode (regression) ───────────────
+# `\btimed?\s*out\b` matched the `"timeout": 30` setting on a healthy config
+# payload, and `\berror\b(?:\s+\w+){0,4}\s*[:=]` matched "error rate: 0%" on a
+# healthy stats payload — both working calls scored 0.0 live validity.
+@pytest.mark.parametrize(
+    "output",
+    [
+        '{"connector": "binance", "timeout": 30, "retries": 3}',
+        "Connector config:\ntimeout: 30\nrate_limit: 1200",
+        "Bot performance: error rate: 0%, uptime 99.9%",
+        '{"result":"Health OK. Error count: 0. Latency p95: 120ms"}',
+    ],
+)
+def test_a_healthy_field_naming_a_failure_mode_is_not_an_error(output):
+    from metrics.live_validity import _error_reason
+
+    assert _error_reason(output) is None, f"false positive: {output[:60]}"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Request timed out after 30s",
+        "Error: insufficient balance",
+        "error: invalid connector",
+        "Error creating executor: insufficient balance",
+        "ReadTimeout: HTTPSConnectionPool(host='api', port=443)",
+        "TimeoutError while fetching candles",
+        "504 Gateway Timeout",
+    ],
+)
+def test_a_real_timeout_or_error_is_still_caught(output):
+    from metrics.live_validity import _error_reason
+
+    assert _error_reason(output), f"scored as success: {output[:60]}"

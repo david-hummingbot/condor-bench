@@ -222,5 +222,9 @@ class AnswerQualityMetric:
         except Exception as exc:
             return None, f"Judge error (not scored): {exc}"
 
+    async def aclose(self) -> None:
+        """Release the judge's transport (the ACP bridge subprocess, if any)."""
+        await self._judge.aclose()
+
     def passes(self, score: float) -> bool:
         return score >= self.threshold

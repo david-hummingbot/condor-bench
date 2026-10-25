@@ -142,6 +142,9 @@ class ClaudeJudge:
         self._acp: Any = None
         self._acp_key: str | None = None
         self._acp_tokens: tuple[int, int] = (0, 0)
+        # Judgements made on the current bridge; every one after the first opens a
+        # fresh session (see _acp_generate).
+        self._acp_judgements = 0
         self._acp_lock = asyncio.Lock()
 
     @property
@@ -207,6 +210,14 @@ class ClaudeJudge:
 
         async with self._acp_lock:
             client = await self._ensure_acp()
+            # One session per judgement. The bridge process is reused, but a shared
+            # session let each verdict see every earlier case's transcript and score
+            # (anchoring), and the context — and the tokens billed — grew with every
+            # case judged.
+            if self._acp_judgements:
+                await client.new_session()
+                self._acp_tokens = (0, 0)
+            self._acp_judgements += 1
             text_parts: list[str] = []
             usage_acc: dict[str, Any] = {}
             async for event in client.prompt_stream(_ACP_JUDGE_PREFIX + prompt):
@@ -258,10 +269,13 @@ class ClaudeJudge:
         self._acp = client
         self._acp_key = key
         self._acp_tokens = (0, 0)
+        # start() opened the first session, so the first judgement uses it as is.
+        self._acp_judgements = 0
         return client
 
     def _record_acp_usage(self, acc: dict[str, Any]) -> None:
-        # ACP usage is session-cumulative; JUDGE_USAGE wants per-call deltas.
+        # ACP usage is session-cumulative; JUDGE_USAGE wants per-call deltas. The
+        # baseline is reset whenever _acp_generate opens a new session.
         new_in = int(acc.get("input_tokens") or 0)
         new_out = int(acc.get("output_tokens") or 0)
         prev_in, prev_out = self._acp_tokens
@@ -281,6 +295,7 @@ class ClaudeJudge:
         self._acp = None
         self._acp_key = None
         self._acp_tokens = (0, 0)
+        self._acp_judgements = 0
 
 
 def _text_of(msg: object) -> str:

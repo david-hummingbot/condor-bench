@@ -25,10 +25,15 @@ class FakeACP:
         self.stopped = False
         self._alive = False
         self.replies = ['{"score": 0.8, "reason": "grounded"}']
+        # Per prompt, as the bridge reports it: cumulative for the *session*, so
+        # the second figure is a fresh session's own count.
         self.usage = [
             UsageEvent(input_tokens=10, output_tokens=5),
-            UsageEvent(input_tokens=25, output_tokens=12),
+            UsageEvent(input_tokens=15, output_tokens=7),
         ]
+        self.session = 1
+        # Which session each prompt was sent in.
+        self.prompt_sessions: list[int] = []
         self.done = PromptDone(stop_reason="end_turn")
         FakeACP.instances.append(self)
 
@@ -47,8 +52,12 @@ class FakeACP:
     def stderr_tail(self) -> str:
         return ""
 
+    async def new_session(self) -> None:
+        self.session += 1
+
     async def prompt_stream(self, text: str):
         self.prompts.append(text)
+        self.prompt_sessions.append(self.session)
         i = len(self.prompts) - 1
         yield TextChunk(self.replies[min(i, len(self.replies) - 1)])
         if i < len(self.usage):
@@ -122,7 +131,13 @@ def test_settings_schema_exposes_the_switch():
     assert field["default"] == "api"
 
 
-def test_acp_judge_reuses_one_session_and_records_usage_deltas(monkeypatch):
+def test_acp_judge_uses_a_fresh_session_per_judgement_and_records_usage(monkeypatch):
+    """One bridge process, one session per verdict.
+
+    A shared session put every earlier case's transcript and score in the context
+    of the next verdict — anchoring the grade and growing the prompt with every
+    case. The bridge is reused (startup is the expensive part); the session is not.
+    """
     monkeypatch.setattr("condor_compat.acp.acp_client.ACPClient", FakeACP)
     judge = ClaudeJudge(model="default", backend="acp")
     before = JUDGE_USAGE.snapshot()
@@ -147,9 +162,12 @@ def test_acp_judge_reuses_one_session_and_records_usage_deltas(monkeypatch):
     # the turn — which, for a judge, scores that sentence as the verdict.
     assert "ANTHROPIC_MODEL" not in (fake.kwargs.get("extra_env") or {})
     assert len(fake.prompts) == 2
+    assert fake.prompt_sessions == [1, 2], "the second verdict reused the first's session"
     assert all("JSON object only" in p for p in fake.prompts)
     assert all("Do not call tools" in p for p in fake.prompts)
 
+    # Each session's own usage, summed — the per-session baseline resets, so the
+    # second session's 15/7 is not read as a delta against the first's 10/5.
     delta = JUDGE_USAGE.delta_since(before)
     assert delta["input_tokens"] == 25
     assert delta["output_tokens"] == 12
@@ -184,3 +202,46 @@ def test_empty_acp_reply_raises(monkeypatch):
         await judge.aclose()
 
     asyncio.run(_run())
+
+
+def test_close_judge_stops_the_module_level_bridge(monkeypatch):
+    """The scorer's judge outlived the CLI's event loop: its bridge subprocess was
+    still open when `asyncio.run` returned, and exit-time cleanup printed
+    "Event loop is closed"."""
+    import bench.scorer as scorer
+    from metrics.answer_quality import AnswerQualityMetric
+
+    monkeypatch.setattr("condor_compat.acp.acp_client.ACPClient", FakeACP)
+    metric = AnswerQualityMetric()
+    metric._judge = ClaudeJudge(model="default", backend="acp")
+    monkeypatch.setattr(scorer, "_quality_metric", metric)
+
+    async def _run():
+        await metric._judge.a_generate("score this")
+        await scorer.close_judge()
+
+    asyncio.run(_run())
+    assert FakeACP.instances[0].stopped
+    assert metric._judge._acp is None
+
+
+def test_the_cli_closes_the_judge_inside_its_event_loop(monkeypatch):
+    """`runner._run_cases` is what every CLI scoring path `asyncio.run`s; it has to
+    close the judge before that loop ends, even when the trials raise."""
+    import bench.scorer
+    import bench.trials
+    import runner
+
+    closed: list[bool] = []
+
+    async def _close() -> None:
+        closed.append(True)
+
+    async def _boom(*a, **k):
+        raise RuntimeError("trial runner exploded")
+
+    monkeypatch.setattr(bench.scorer, "close_judge", _close)
+    monkeypatch.setattr(bench.trials, "run_cases", _boom)
+    with pytest.raises(RuntimeError, match="exploded"):
+        asyncio.run(runner._run_cases([], "m", None, 1))
+    assert closed == [True]

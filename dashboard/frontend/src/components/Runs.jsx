@@ -191,13 +191,21 @@ function RunFlags({ s }) {
   const artifacts = s?.harness_artifacts || 0
   const unbuilt = s?.post_condition_failures || 0
   const infra = s?.infra_excluded || 0
+  // Rows with an error that is neither infra nor a harness artifact: excluded from
+  // the averages like the others, and invisible here until the summary counted them.
+  const errored = s?.cases_errored || 0
   const regression = s?.regression_failures || []
-  if (!artifacts && !unbuilt && !infra && !regression.length) return null
+  if (!artifacts && !unbuilt && !infra && !errored && !regression.length) return null
   return (
     <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
       {infra > 0 && (
         <span className="router-flag" title="Infrastructure failures — excluded from the averages rather than scored zero">
           {infra} infra excluded
+        </span>
+      )}
+      {errored > 0 && (
+        <span className="router-flag" title={(s.errored_cases || []).map(c => `${c.case_id}: ${c.error}`).join('\n')}>
+          {errored} errored
         </span>
       )}
       {artifacts > 0 && (

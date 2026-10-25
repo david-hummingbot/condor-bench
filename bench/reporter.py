@@ -190,17 +190,36 @@ def _group_rates(valid: list[ScoreCard], attr: str) -> dict[str, Any]:
     return out
 
 
-def _trial_stats(valid: list[ScoreCard]) -> dict[str, Any]:
+def _is_unsafe(card: ScoreCard) -> bool:
+    return bool(card.forbidden_violations) or card.unsafe_action_rate > 0.0
+
+
+def _safety_rows(scorecards: list[ScoreCard], valid: list[ScoreCard]) -> list[ScoreCard]:
+    """The rows the unsafe rate is computed over: every scored row, plus every
+    excluded row that made a forbidden call.
+
+    Exclusion says the harness spoiled the *score*; it cannot un-place an order. A
+    provider that dropped mid-trial after the agent called a banned action left an
+    infra row, and counting only `valid` rows erased that action from the unsafe
+    rate — the same laundering `bench.trials.flag_mock_gaps` refuses to do.
+    """
+    kept = {id(sc) for sc in valid}
+    return valid + [sc for sc in scorecards if id(sc) not in kept and _is_unsafe(sc)]
+
+
+def _trial_stats(valid: list[ScoreCard], safety_rows: list[ScoreCard] | None = None) -> dict[str, Any]:
     """Phase 2 statistics over the scored rows (one row per case × trial).
 
     Pass and unsafe rates carry Wilson intervals; latency, tokens and cost carry
     median, p95 and a bootstrap CI. ``cost_per_success`` is total spend over the
     rows that reported a cost divided by the successes among them — the mean cost
-    of a *successful* row would hide what the failures cost.
+    of a *successful* row would hide what the failures cost. The unsafe interval is
+    over ``safety_rows`` (see :func:`_safety_rows`), defaulting to ``valid``.
     """
     n = len(valid)
     passes = sum(1 for s in valid if s.passed)
-    unsafe = sum(1 for s in valid if s.unsafe_action_rate > 0.0 or s.forbidden_violations)
+    safety_rows = valid if safety_rows is None else safety_rows
+    unsafe = sum(1 for s in safety_rows if _is_unsafe(s))
     by_case: dict[str, list[float]] = {}
     for s in valid:
         by_case.setdefault(s.case_id, []).append(1.0 if s.passed else 0.0)
@@ -211,7 +230,7 @@ def _trial_stats(valid: list[ScoreCard]) -> dict[str, Any]:
         "cases_unique": len(by_case),
         "pass_rate_ci": stats.rate_summary(passes, n)["ci"],
         "pass_gate_status": stats.rate_summary(passes, n, gate=DOMAIN_PASS_RATE)["gate_status"],
-        "unsafe_action_rate_ci": stats.rate_summary(unsafe, n)["ci"],
+        "unsafe_action_rate_ci": stats.rate_summary(unsafe, len(safety_rows))["ci"],
         # Mean per-case std dev of pass/fail across trials; None on a 1-trial run.
         "pass_consistency_std": stats.trial_consistency(by_case),
         # Only rows whose wall clock measures the model (see bench.nim).
@@ -256,8 +275,24 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
     # enough to lose everything.
     with_quality = [s for s in valid if s.answer_quality is not None]
     unjudged = [s.case_id for s in valid if s.answer_quality is None]
-    infra_excluded = sum(1 for sc in scorecards if sc.error and str(sc.error).startswith("infra:"))
+    # Every row lands in exactly one bucket, so cases_total == cases_scored +
+    # infra_excluded + harness_artifacts + errored. A harness_card is both
+    # "infra: …" and a harness artifact and was counted twice; an error that was
+    # neither (a crashed trial, a timeout without an artifact) was counted nowhere,
+    # so the excluded rows did not add up to what was missing from the score.
     artifacts = [sc for sc in scorecards if sc.harness_artifact]
+    infra_excluded = sum(
+        1
+        for sc in scorecards
+        if not sc.harness_artifact and sc.error and str(sc.error).startswith("infra:")
+    )
+    errored = [
+        sc
+        for sc in scorecards
+        if not sc.harness_artifact and sc.error and not str(sc.error).startswith("infra:")
+    ]
+    safety_rows = _safety_rows(scorecards, valid)
+    unsafe_rows = [sc for sc in safety_rows if _is_unsafe(sc)]
     # Caveats are scored, so they are counted separately — a reader still needs to
     # know that every row in an ACP run was offered one extra tool.
     notes = [sc for sc in scorecards if getattr(sc, "harness_note", None)]
@@ -274,8 +309,12 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "cases_total": len(scorecards),
         "cases_scored": len(valid),
+        # The four buckets partition cases_total: scored, infra-excluded, harness
+        # artifact (whatever its error says), or errored for any other reason.
         "infra_excluded": infra_excluded,
         "harness_artifacts": len(artifacts),
+        "cases_errored": len(errored),
+        "errored_cases": [{"case_id": sc.case_id, "error": sc.error} for sc in errored],
         "harness_artifact_cases": [
             {"case_id": sc.case_id, "reason": sc.harness_artifact} for sc in artifacts
         ],
@@ -324,7 +363,10 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
         # §5 scorecard metrics
         "task_success_count": sum(1 for s in valid if s.task_success),
         "task_success_rate": round(sum(1 for s in valid if s.task_success) / n, 4) if valid else 0.0,
-        "unsafe_action_rate": round(sum(1 for s in valid if s.unsafe_action_rate > 0.0 or s.forbidden_violations) / n, 4) if valid else 0.0,
+        # Over scored rows *plus* excluded rows that made a forbidden call: an
+        # unsafe action counts whether or not the rest of the trial was scoreable.
+        "unsafe_action_count": len(unsafe_rows),
+        "unsafe_action_rate": round(len(unsafe_rows) / len(safety_rows), 4) if safety_rows else 0.0,
         "first_call_validity_avg": (
             round(_mean([s.first_call_validity for s in valid if s.first_call_validity is not None]), 4)
             if any(s.first_call_validity is not None for s in valid)
@@ -345,7 +387,7 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
             if any(s.cost_per_success is not None for s in valid)
             else None
         ),
-        **_trial_stats(valid),
+        **_trial_stats(valid, safety_rows),
         "task_categories": _group_rates(valid, "task_category"),
         "splits": _group_rates(valid, "split"),
         # Regression tasks that failed in this run. Each one is a drop to look at:

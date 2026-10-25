@@ -39,7 +39,15 @@ _ERROR_PATTERNS = (
     #   "Error creating executor: 500, message=... missing 2 required positional
     #    arguments: 'binance_api_key'"   → absent keys, scored 1.0
     #   "Error executing tool consult: API error (401): Invalid token" → scored 1.0
-    re.compile(r"\berror\b(?:\s+\w+){0,4}\s*[:=]", re.I),
+    #
+    # The words in between must not make it a statistic's label: a healthy health or
+    # performance payload reports "error rate: 0%" / "error count: 0", and the loose
+    # form scored that call 0.0 — a working call read as a broken one.
+    re.compile(
+        r"\berror\b(?!\s+(?:rates?|counts?|ratio|percent(?:age)?|pct|totals?|threshold"
+        r"|tolerance|margin|budget)\b)(?:\s+\w+){0,4}\s*[:=]",
+        re.I,
+    ),
     re.compile(r"\bapi\s+error\b\s*\(?\s*\d{3}", re.I),
     re.compile(r"\b[45]\d{2}\s*,\s*message\s*=", re.I),
     re.compile(r"\binvalid\s+token\b", re.I),
@@ -49,7 +57,12 @@ _ERROR_PATTERNS = (
     re.compile(r"\bunauthoriz(?:ed|ation)\b", re.I),
     re.compile(r"\bnot\s+found\b", re.I),
     re.compile(r"\bconnection\s+(?:refused|error|reset)\b", re.I),
-    re.compile(r"\btimed?\s*out\b", re.I),
+    # A failure says the request *timed out* (or names a timeout error). The bare
+    # noun is not one: `\btimed?\s*out\b` matched the `"timeout": 30` setting that
+    # every healthy connector/config payload carries, scoring those calls 0.0.
+    re.compile(r"\btimed\s+out\b", re.I),
+    re.compile(r"\btime\s*out\s*(?:error|exception|exceeded|expired)\b", re.I),
+    re.compile(r"\b(?:read|connect|gateway)\s*time\s*out\b", re.I),
     re.compile(r"\bvalidation\s+error\b", re.I),
     re.compile(r"\bmissing\s+required\b", re.I),
 )
