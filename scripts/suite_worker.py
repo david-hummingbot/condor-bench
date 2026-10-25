@@ -203,7 +203,17 @@ async def _run_until_stopped(job: dict) -> dict:
     an order still open on staging.
     """
     task = asyncio.current_task()
-    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
+    loop = asyncio.get_running_loop()
+
+    def stop_once() -> None:
+        # One cancel only. The runner signals the whole process group and `uv run`
+        # forwards its own SIGTERM too, so the worker is signalled twice — and a
+        # second task.cancel() aborted the teardown the first one started. Later
+        # SIGTERMs are ignored; the runner's SIGKILL after its grace still stops it.
+        loop.add_signal_handler(signal.SIGTERM, lambda: None)
+        task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, stop_once)
     try:
         return await _run(job)
     except asyncio.CancelledError:

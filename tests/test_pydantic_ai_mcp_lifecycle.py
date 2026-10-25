@@ -200,3 +200,38 @@ def test_a_turn_that_fails_for_other_reasons_leaves_the_client_alive():
     asyncio.run(client._mark_dead_if_transport_closed(RuntimeError("model said no")))
     assert client._lifecycle_error is None
     assert client.alive
+
+
+# ── what a refused tool call looks like in the trace ──────────────────────────
+
+def test_a_refused_tool_call_is_recorded_as_an_error():
+    """pydantic-ai 2.x returns a tool that raised as a ToolReturnPart whose outcome
+    is not "success". Recorded as a plain "completed" output, a refused create read
+    as one that may have landed — and teardown deleted a routine that predated it."""
+    from pydantic_ai import Agent, ModelRetry
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from bench.cleanup import tool_error
+    from condor_compat.acp.client import ToolCallUpdate
+
+    def script(messages, info):
+        if len(messages) == 1:
+            return ModelResponse(parts=[ToolCallPart("manage_routines", {"name": "x"}, tool_call_id="c1")])
+        return ModelResponse(parts=[TextPart("it already exists")])
+
+    agent = Agent(FunctionModel(script), retries=2)
+
+    @agent.tool_plain
+    def manage_routines(name: str) -> str:
+        raise ModelRetry(f"Routine '{name}' already exists.")
+
+    client = PydanticAIClient(model="ollama:llama3.1")
+    client._agent = agent
+
+    async def collect():
+        return [e async for e in client.prompt_stream("make routine x")]
+
+    updates = [e for e in asyncio.run(collect()) if isinstance(e, ToolCallUpdate) and e.output]
+    assert updates and updates[0].status == "failed"
+    assert tool_error(updates[0].output) == "Routine 'x' already exists."

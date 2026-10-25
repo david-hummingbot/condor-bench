@@ -539,14 +539,21 @@ async def _emit_custom(run_id: str, event: dict) -> None:
 async def _undo_custom(trace: Any, model: str, agent_slug: str | None) -> None:
     """Undo what a custom prompt's agent created, if its trace shows anything."""
     from bench.cleanup import created_resources, teardown
+    from bench.trials import TEARDOWN_TIMEOUT_S
 
     if trace is not None and created_resources(trace):
-        await teardown(trace, model, agent_slug=agent_slug)
+        try:
+            await asyncio.wait_for(
+                teardown(trace, model, agent_slug=agent_slug), timeout=TEARDOWN_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            log.error("custom prompt teardown did not finish in %.0fs", TEARDOWN_TIMEOUT_S)
 
 
 async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
     from bench.baseline import BaselineStore
     from bench.client import recording_trace, run_consult
+    from bench.trials import finish_despite_cancel
     from config import case_timeout_s
     from bench.reporter import save_run
     from bench.scorer import score as do_score
@@ -644,7 +651,6 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
                     "error": result.error,
                 })
             except asyncio.CancelledError:
-                await asyncio.shield(_undo_custom(undo or partial, norm_key, req.agent_slug))
                 raise
             except Exception as exc:
                 error = (
@@ -666,7 +672,11 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
                         os.environ.pop(k, None)
                     else:
                         os.environ[k] = v
-            await _undo_custom(undo or partial, norm_key, req.agent_slug)
+                # Here, not after the block: success, error and cancel all pass
+                # through, so no cancel landing mid-way can skip the undo.
+                await finish_despite_cancel(
+                    asyncio.ensure_future(_undo_custom(undo or partial, norm_key, req.agent_slug))
+                )
 
         state["status"] = "completed"
         await _emit_custom(run_id, {"type": "done", "status": "completed"})
@@ -689,14 +699,22 @@ async def lifespan(app: FastAPI):
 
     ensure_store_dirs()
     yield
-    for state in _active_runs.values():
-        task = state.get("task")
-        if task and not task.done():
-            task.cancel()
-    for state in _custom_runs.values():
-        task = state.get("task")
-        if task and not task.done():
-            task.cancel()
+    # Cancel the runs, then wait for them: a cancelled trial still undoes what it
+    # created, and uvicorn's loop shutdown would otherwise kill that teardown
+    # half-way (Ctrl-C, a --reload restart). Bounded by the trial teardown ceiling
+    # plus a suite worker's stop grace; a second Ctrl-C still exits at once.
+    from bench.trials import TEARDOWN_TIMEOUT_S
+
+    tasks = [
+        state["task"]
+        for state in [*_active_runs.values(), *_custom_runs.values()]
+        if state.get("task") is not None and not state["task"].done()
+    ]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        log.warning("Shutting down: waiting for %d run(s) to undo what they created", len(tasks))
+        await asyncio.wait(tasks, timeout=TEARDOWN_TIMEOUT_S + 120)
 
 
 app = FastAPI(title="condor-bench", lifespan=lifespan)
@@ -1514,6 +1532,19 @@ async def create_custom_prompt(req: CustomPromptRequest):
     task = asyncio.create_task(_run_custom_prompt(run_id, req))
     _custom_runs[run_id]["task"] = task
     return {"run_id": run_id}
+
+
+@app.delete("/api/custom-prompt/{run_id}")
+async def cancel_custom_prompt(run_id: str):
+    """Stop a custom prompt. It still undoes what its agent created before it ends,
+    so the run guard holds until that teardown is done."""
+    state = _custom_runs.get(run_id)
+    if not state:
+        raise HTTPException(404, "Custom prompt run not found")
+    task = state.get("task")
+    if task and not task.done():
+        task.cancel()
+    return {"status": "cancelling"}
 
 
 @app.get("/api/custom-prompt/{run_id}/stream")

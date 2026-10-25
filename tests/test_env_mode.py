@@ -373,3 +373,80 @@ def test_a_cancelled_trial_still_undoes_what_it_created(monkeypatch):
 
     asyncio.run(go())
     assert torn == [["mcp__bench_staging__create_order_executor"]], "undone exactly once"
+
+
+def test_a_teardown_outlives_repeated_cancels():
+    """shield() alone survives one cancel; a second abandoned the undo half-way."""
+    from bench.trials import finish_despite_cancel
+
+    done: list = []
+
+    async def undo():
+        await asyncio.sleep(0.3)
+        done.append(True)
+        return "report"
+
+    async def go():
+        async def stopper():
+            await finish_despite_cancel(asyncio.ensure_future(undo()))
+
+        task = asyncio.create_task(stopper())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert done == [True]
+
+
+def test_a_cancel_during_a_timed_out_trials_report_still_undoes_it(monkeypatch):
+    """The `budgeted_buy` case: timed out, then Cancel lands while it is reported."""
+    from types import SimpleNamespace
+
+    import bench.cleanup
+    import bench.client
+    import config
+    from bench.trials import TrialEvents, run_trial
+
+    monkeypatch.setenv("BENCH_ENV_MODE", "live")
+    monkeypatch.setattr(config, "case_timeout_s", lambda _b=None: 0.05)
+
+    async def placed_an_order_then_hung(case, model):
+        call = {"tool": "create_order_executor", "tool_call_id": "t1", "args": {}}
+        bench.client._PARTIAL_TRACE.get().turns.append(
+            ([call], [{"tool_call_id": "t1", "output": '{"executor_id": "ex1"}'}]))
+        await asyncio.sleep(10)
+
+    finished: list = []
+
+    async def slow_teardown(result, model, **kw):
+        await asyncio.sleep(0.3)
+        finished.append([c["tool"] for c in result.tool_calls])
+        return SimpleNamespace(resources=[])
+
+    reporting = asyncio.Event()
+
+    async def trial_done(*a):
+        reporting.set()
+        await asyncio.sleep(10)  # the cancel lands here
+
+    monkeypatch.setattr(bench.client, "run_case", placed_an_order_then_hung)
+    monkeypatch.setattr(bench.cleanup, "teardown", slow_teardown)
+    case = SimpleNamespace(id="c1", type="tool", risk_level="destructive", expected_tools=[])
+
+    async def go():
+        task = asyncio.create_task(run_trial(
+            case, "m", SimpleNamespace(load=lambda _: None), 1, [], {},
+            TrialEvents(trial_done=trial_done)))
+        await reporting.wait()
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert finished == [["create_order_executor"]]

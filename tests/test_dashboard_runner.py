@@ -370,3 +370,22 @@ def test_runs_of_any_kind_do_not_overlap():
         assert exc.value.status_code == 409
     finally:
         appmod._custom_runs.pop("busy0001", None)
+
+
+def test_a_custom_prompt_can_be_cancelled():
+    """The run guard told the user to cancel a custom prompt that had no cancel."""
+    import asyncio
+
+    from dashboard.backend import app as appmod
+
+    async def go():
+        task = asyncio.create_task(asyncio.sleep(30))
+        appmod._custom_runs["cancel01"] = {"status": "running", "task": task}
+        try:
+            assert (await appmod.cancel_custom_prompt("cancel01")) == {"status": "cancelling"}
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            appmod._custom_runs.pop("cancel01", None)
+
+    asyncio.run(go())

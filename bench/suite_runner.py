@@ -450,8 +450,14 @@ async def run_suite(
         except BaseException:
             # Cancelled, or the progress stream failed (an oversized line, an emit
             # that raised): either way the worker must not outlive the run.
+            # A second Cancel must not mark the run stopped while the worker is
+            # still undoing its trial: the run guard would let a new run's
+            # pre-flight race that teardown on the same account. _stop_worker is
+            # bounded by its grace and the SIGKILL that follows.
             if current_proc is not None:
-                await asyncio.shield(_stop_worker(current_proc))
+                from bench.trials import finish_despite_cancel
+
+                await finish_despite_cancel(asyncio.ensure_future(_stop_worker(current_proc)))
             raise
         finally:
             current_proc = None

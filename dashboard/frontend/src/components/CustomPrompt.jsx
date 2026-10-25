@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { getProviders, getProviderModels, getAcpModels, createCustomPrompt, streamCustomPromptUrl, getFormState } from '../api.js'
+import { getProviders, getProviderModels, getAcpModels, createCustomPrompt, cancelCustomPrompt, streamCustomPromptUrl, getFormState } from '../api.js'
 import { EMPTY_FORM, SAVED_FIELDS_HINT, currentForm, providerFromSaved, seedForm, useSavedForm } from '../formPersist.js'
 import PageHeader from './PageHeader.jsx'
 import ModelPicker from './ModelPicker.jsx'
@@ -625,6 +625,19 @@ export default function CustomPrompt() {
           {status && <span style={{ marginLeft: 12, color: 'var(--muted)', fontSize: 12 }}>{status}</span>}
           {error && <span className="error-text" style={{ marginLeft: 12 }}>{error}</span>}
         </div>
+        {running && (
+          <button
+            className="btn"
+            onClick={() => {
+              const id = localStorage.getItem(CP_RUN_KEY)
+              if (!id) return
+              setStatus('Cancelling — undoing what the agent created…')
+              cancelCustomPrompt(id).catch((e) => setError(e.message))
+            }}
+          >
+            ■ Cancel
+          </button>
+        )}
         <button className="btn primary" onClick={handleRun} disabled={!canRun}>
           {running ? '⏳ Running…' : '▶ Run Prompt'}
         </button>

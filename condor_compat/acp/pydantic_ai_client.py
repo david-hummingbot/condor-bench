@@ -1128,10 +1128,23 @@ class PydanticAIClient:
                                         # here and 1.0 on the ACP path for the same
                                         # tool returning the same data.
                                         output_str = stringify_tool_output(part.content)
+                                        # pydantic-ai 2.x returns a tool that raised or
+                                        # was refused as a ToolReturnPart whose outcome
+                                        # is not "success" (1.x sent a RetryPromptPart,
+                                        # which nothing recorded). Say so explicitly: as
+                                        # a "completed" call with bare error text, a
+                                        # refused create read as one that may have landed,
+                                        # and teardown undid it — deleting a same-named
+                                        # routine that predated the run.
+                                        outcome = getattr(part, "outcome", "success")
+                                        if outcome != "success":
+                                            output_str = json.dumps(
+                                                {"error": output_str, "outcome": outcome}
+                                            )
                                         await emit(
                                             ToolCallUpdate(
                                                 tool_call_id=part.tool_call_id or "",
-                                                status="completed",
+                                                status="completed" if outcome == "success" else "failed",
                                                 output=output_str,
                                             ))
 
