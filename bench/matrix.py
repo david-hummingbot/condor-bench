@@ -14,7 +14,9 @@ would be wrong too: the documented workflow sweeps domain by domain
 (``sweep -d market_making_expert``), and that would erase every other domain for that
 model. So resolution is per *(model, cell)*: each cell takes the newest run that
 actually has cases for it, and cells carry ``run_dir`` so a surprising value can
-be traced back to the run that produced it.
+be traced back to the run that produced it. "Has cases" means scored (or unsafe)
+cases where any run has them: a newer run whose every row was excluded — a staging
+outage — only owns a cell no run ever scored.
 
 **Infra failures and harness artifacts are excluded, not scored 0.** A case that
 failed because staging was unreachable, or because it ran chat-scoped when it
@@ -32,6 +34,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from bench import stats
+from bench.atomic_io import atomic_write_text
 from config import (
     DATASETS_DIR,
     DESTRUCTIVE_FLOOR,
@@ -119,8 +122,14 @@ class Cell:
     # is 42 of the 80 cases, and the positional cut means the same half of the
     # surface is invisible to every capped model.
     withheld: int = 0
-    # Scored rows with a forbidden or unconfirmed write. The router requires zero.
+    # Rows with a forbidden or unconfirmed write — scored *or excluded*. The router
+    # requires zero. An excluded row is still counted: exclusion says the harness
+    # spoiled the score, not that the order was never placed (see
+    # `bench.trials.flag_mock_gaps`, which refuses the same laundering).
     unsafe: int = 0
+    # How many of `unsafe` are excluded rows, so the rate's denominator can include
+    # them without counting every excluded row as a safe trial.
+    unsafe_excluded: int = 0
     # Per-case pass/fail across trials, for the consistency figure.
     outcomes: dict[str, list[float]] = field(default_factory=dict)
     # Successes among the rows that reported a cost, so cost per success divides
@@ -132,6 +141,12 @@ class Cell:
         if (case.get("wiring") or {}).get("tools_truncated"):
             self.withheld += 1
         reason = _exclusion_reason(case)
+        if _is_unsafe(case):
+            # Before the exclusion return: an infra failure after a banned call used
+            # to drop the row here, and the cell (and so the router) read it as safe.
+            self.unsafe += 1
+            if reason:
+                self.unsafe_excluded += 1
         if reason:
             self.excluded += 1
             self.excluded_reasons.append(f"{case.get('case_id')}: {reason}")
@@ -143,8 +158,6 @@ class Cell:
         passed = _case_passed(case, composite)
         if passed:
             self.passed += 1
-        if case.get("forbidden_violations") or float(case.get("unsafe_action_rate") or 0.0) > 0.0:
-            self.unsafe += 1
         self.outcomes.setdefault(str(case.get("case_id")), []).append(1.0 if passed else 0.0)
         if case.get("risk_level") == "destructive" and composite < DESTRUCTIVE_FLOOR:
             self.destructive_failures.append(str(case.get("case_id")))
@@ -159,6 +172,11 @@ class Cell:
         # A NIM row's wall clock measures the hosted endpoint, not the model.
         if case.get("latency_s") is not None and case.get("latency_representative", True):
             self.latencies.append(float(case["latency_s"]))
+
+    @property
+    def _safety_rows(self) -> int:
+        """Scored rows plus the excluded rows that were unsafe anyway."""
+        return self.scored + self.unsafe_excluded
 
     def as_dict(self, gate: float = DOMAIN_PASS_RATE) -> dict[str, Any]:
         rate = stats.rate_summary(self.passed, self.scored, gate=gate)
@@ -178,8 +196,11 @@ class Cell:
             "gate": gate,
             "gate_status": rate["gate_status"],
             "unsafe": self.unsafe,
-            "unsafe_rate": round(self.unsafe / self.scored, 4) if self.scored else None,
-            "unsafe_rate_ci": stats.rate_summary(self.unsafe, self.scored)["ci"],
+            "unsafe_excluded": self.unsafe_excluded,
+            "unsafe_rate": (
+                round(self.unsafe / self._safety_rows, 4) if self._safety_rows else None
+            ),
+            "unsafe_rate_ci": stats.rate_summary(self.unsafe, self._safety_rows)["ci"],
             "trials": max((len(v) for v in self.outcomes.values()), default=0),
             "consistency_std": stats.trial_consistency(self.outcomes),
             "cost_per_success": (
@@ -221,6 +242,18 @@ def _exclusion_reason(case: dict) -> str | None:
     if error:
         return str(error)
     return None
+
+
+def _is_unsafe(case: dict) -> bool:
+    return bool(case.get("forbidden_violations")) or float(
+        case.get("unsafe_action_rate") or 0.0
+    ) > 0.0
+
+
+def _is_evidence(case: dict) -> bool:
+    """True when the row says something about the model: it was scored, or it made
+    an unsafe call (which is evidence however the rest of the trial went)."""
+    return _exclusion_reason(case) is None or _is_unsafe(case)
 
 
 def _round_mean(values: list[float], digits: int) -> float | None:
@@ -333,27 +366,35 @@ def build_matrix(
     overall: dict[str, dict[str, Cell]] = {}
     models_out: dict[str, Any] = {}
 
-    # Which run owns each (kind, key, model) cell. Runs are visited newest-first,
-    # so the first to claim a cell keeps it and older runs can only fill cells the
-    # newer ones never covered.
-    owner: dict[tuple[str, str, str], str] = {}
+    # Which run owns each (kind, key, model) cell: the newest run with *evidence*
+    # for it (a scored row, or an unsafe one), falling back to the newest run that
+    # covered it at all. "Newest that covered it" let a staging-outage run — every
+    # row infra-excluded — take the cell and blank a model's scored history; an
+    # all-excluded run is thin evidence and must not hide thicker, older evidence.
+    # Runs are visited newest-first, so the first to claim keeps it. The overall
+    # ("all") row goes through the same rule, so a model's overall figure comes from
+    # its newest run that scored anything rather than its newest run.
+    newest_covering: dict[tuple[str, str, str], str] = {}
+    newest_evidence: dict[tuple[str, str, str], str] = {}
+    for run in all_runs:
+        for case in run.cases:
+            evidence = _is_evidence(case)
+            for claim in _claims(case, run.model):
+                newest_covering.setdefault(claim, run.run_dir)
+                if evidence:
+                    newest_evidence.setdefault(claim, run.run_dir)
+    owner = {
+        claim: newest_evidence.get(claim, held) for claim, held in newest_covering.items()
+    }
 
     def _cell_for(
         table: dict[str, dict[str, Cell]], kind: str, key: str, model: str, run: Run
     ) -> Cell | None:
-        """The cell this run may write to, or None if a newer run owns it."""
-        claim = (kind, key, model)
-        held = owner.get(claim)
-        if held is None:
-            owner[claim] = run.run_dir
-            return table.setdefault(key, {}).setdefault(
-                model, Cell(run_dir=run.run_dir)
-            )
-        if held != run.run_dir:
-            # A newer run already covered this cell; mixing an older run's cases in
-            # would blend two states of the harness.
+        """The cell this run may write to, or None if another run owns it."""
+        if owner.get((kind, key, model)) != run.run_dir:
+            # Mixing another run's cases in would blend two states of the harness.
             return None
-        return table[key][model]
+        return table.setdefault(key, {}).setdefault(model, Cell(run_dir=run.run_dir))
 
     for model, run in latest.items():
         entry = registry.get(model)
@@ -418,6 +459,15 @@ def build_matrix(
             for tool, cells in sorted(tools.items())
         },
     }
+
+
+def _claims(case: dict, model: str) -> list[tuple[str, str, str]]:
+    """Every (kind, key, model) cell this case would be added to."""
+    return [
+        ("overall", "all", model),
+        ("domain", _case_domain(case), model),
+        *(("tool", tool, model) for tool in _case_tools(case)),
+    ]
 
 
 UNCLASSIFIED = "unclassified"
@@ -500,7 +550,9 @@ def matrix_path(lane: str = "live") -> Path:
 def save_matrix(matrix: dict[str, Any], path: Path | None = None) -> Path:
     path = path or matrix_path(str(matrix.get("env_mode") or "live"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(matrix, indent=2) + "\n")
+    # Atomic: the dashboard and the router read this file while a sweep rewrites
+    # it, and a torn write reads as "no matrix" (load_matrix swallows the error).
+    atomic_write_text(path, json.dumps(matrix, indent=2) + "\n")
     return path
 
 

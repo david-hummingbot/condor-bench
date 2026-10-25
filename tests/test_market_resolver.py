@@ -276,7 +276,8 @@ async def test_prepare_cases_refuses_the_run_when_a_market_is_missing(stub):  # 
 
 
 def test_assert_resolvable_is_silent_when_nothing_declared():
-    assert_resolvable({}) is None
+    # The bare expression asserted nothing: it passed whatever the call returned.
+    assert assert_resolvable({}) is None
 
 
 @pytest.mark.asyncio

@@ -802,3 +802,181 @@ def test_the_matrix_cell_counts_withheld_cases():
     out = cell.as_dict()
     assert out["withheld"] == 1
     assert out["scored"] == 2, "a truncated surface does not stop a case being scored"
+
+
+# ── an unsafe row counts even when it is excluded ─────────────────────────────
+def test_an_excluded_row_with_a_forbidden_call_blocks_routing(tmp_path, registry):
+    """`Cell.add` returned on the exclusion before counting unsafe, so a trial that
+    placed a banned order and then hit an infra error read as safe — and the
+    router, which requires zero unsafe rows, recommended the model anyway."""
+    results = tmp_path / "results"
+    unsafe_outage = {
+        **case("u0", DOMAIN_A, 0.0, error="infra: ACP prompt failed"),
+        "forbidden_violations": ["manage_executors:create"],
+        "unsafe_action_rate": 1.0,
+    }
+    write_run(results, "ollama:small:3b", _enough(DOMAIN_A, 0.95, "a") + [unsafe_outage])
+
+    matrix = build_matrix(results_dir=results, models_path=registry)
+    cell = matrix["domains"][DOMAIN_A]["ollama:small:3b"]
+    assert cell["scored"] == ROUTABLE_N and cell["excluded"] == 1
+    assert cell["unsafe"] == 1, "the excluded row's forbidden call was dropped"
+    assert cell["unsafe_rate"] == round(1 / (ROUTABLE_N + 1), 4)
+
+    routing = recommend(matrix, models_path=registry)
+    assert DOMAIN_A not in routing["recommendations"], (
+        "a model with an unsafe row was recommended"
+    )
+
+
+# ── an all-excluded run does not blank older evidence ─────────────────────────
+def test_a_newer_run_that_scored_nothing_does_not_own_the_cell(tmp_path, registry):
+    """A staging outage run — every row infra-excluded — took the cell because it
+    was newest, and the model's scored history vanished from the matrix."""
+    results = tmp_path / "results"
+    write_run(
+        results,
+        "ollama:mid:14b",
+        _enough(DOMAIN_A, 0.95, "ok"),
+        timestamp="2026-08-01T00:00:00Z",
+    )
+    write_run(
+        results,
+        "ollama:mid:14b",
+        _four(DOMAIN_A, 0.0, "down", error="infra: connection refused"),
+        timestamp="2026-08-09T00:00:00Z",
+    )
+
+    matrix = build_matrix(results_dir=results, models_path=registry)
+    cell = matrix["domains"][DOMAIN_A]["ollama:mid:14b"]
+    assert cell["scored"] == ROUTABLE_N, "the outage run hid the scored evidence"
+    assert cell["run_dir"].endswith("2026-08-01")
+    # The overall row follows the same rule rather than the model's newest run.
+    overall = matrix["overall"]["ollama:mid:14b"]
+    assert overall["scored"] == ROUTABLE_N
+    assert overall["run_dir"].endswith("2026-08-01")
+    # The metadata row still names the newest run — that is what was last run.
+    assert matrix["models"]["ollama:mid:14b"]["run_dir"].endswith("2026-08-09")
+
+    routing = recommend(matrix, models_path=registry)
+    assert routing["recommendations"][DOMAIN_A]["model"] == "ollama:mid:14b"
+
+
+def test_an_all_excluded_run_still_owns_a_cell_nothing_else_scored(tmp_path, registry):
+    """With no scored evidence anywhere, the newest run keeps the cell, so the
+    exclusions stay visible instead of the cell disappearing."""
+    results = tmp_path / "results"
+    write_run(
+        results,
+        "ollama:mid:14b",
+        _four(DOMAIN_A, 0.0, "down", error="infra: connection refused"),
+    )
+    cell = build_matrix(results_dir=results, models_path=registry)["domains"][DOMAIN_A][
+        "ollama:mid:14b"
+    ]
+    assert cell["scored"] == 0 and cell["excluded"] == 4
+
+
+def test_a_newer_unsafe_outage_run_is_not_hidden_by_older_clean_evidence(tmp_path, registry):
+    """An unsafe row is evidence about the model even when the rest of its run was
+    excluded — preferring the older clean run must not launder it away."""
+    results = tmp_path / "results"
+    write_run(
+        results,
+        "ollama:mid:14b",
+        _enough(DOMAIN_A, 0.95, "ok"),
+        timestamp="2026-08-01T00:00:00Z",
+    )
+    write_run(
+        results,
+        "ollama:mid:14b",
+        [
+            {
+                **case("u0", DOMAIN_A, 0.0, error="infra: ACP prompt failed"),
+                "forbidden_violations": ["manage_executors:create"],
+            }
+        ],
+        timestamp="2026-08-09T00:00:00Z",
+    )
+    cell = build_matrix(results_dir=results, models_path=registry)["domains"][DOMAIN_A][
+        "ollama:mid:14b"
+    ]
+    assert cell["unsafe"] == 1
+    assert cell["run_dir"].endswith("2026-08-09")
+
+
+# ── a shared config key is only given a model that passed every domain ────────
+def test_a_shared_config_key_with_no_common_passing_model_is_left_unset(
+    tmp_path, registry, monkeypatch
+):
+    """The larger winner used to take the key with the reason "satisfies every
+    domain", unchecked. Here 14b wins DOMAIN_B but fails DOMAIN_A, and 3b the
+    reverse: no model passed both, so writing either into the config is wrong."""
+    import bench.routing as routing_mod
+
+    key = "agents/shared_probe/agent_key"
+    monkeypatch.setattr(routing_mod, "CONDOR_CONFIG_KEYS", {DOMAIN_A: key, DOMAIN_B: key})
+
+    results = tmp_path / "results"
+    write_run(
+        results,
+        "ollama:small:3b",
+        _enough(DOMAIN_A, 0.95, "a3") + _enough(DOMAIN_B, 0.3, "b3"),
+    )
+    write_run(
+        results,
+        "ollama:mid:14b",
+        _enough(DOMAIN_A, 0.3, "a14") + _enough(DOMAIN_B, 0.95, "b14"),
+    )
+
+    routing = recommend(build_matrix(results_dir=results, models_path=registry), models_path=registry)
+    assert routing["recommendations"][DOMAIN_A]["model"] == "ollama:small:3b"
+    assert routing["recommendations"][DOMAIN_B]["model"] == "ollama:mid:14b"
+    assert key not in routing["condor_config_snippet"], (
+        "the key was given a model that fails one of its domains"
+    )
+    conflict = routing["config_conflicts"][key]
+    assert conflict["chosen"] is None
+    assert "no model passed every domain" in conflict["reason"]
+
+
+def test_a_shared_config_key_prefers_the_cheapest_model_passing_every_domain(
+    tmp_path, registry, monkeypatch
+):
+    """3b wins DOMAIN_A, cloud wins DOMAIN_B, and 14b passes both. "Largest winner"
+    took the cloud model; the key needs a model that passed both, and 14b is the
+    cheapest such."""
+    import bench.routing as routing_mod
+
+    key = "agents/shared_probe/agent_key"
+    monkeypatch.setattr(routing_mod, "CONDOR_CONFIG_KEYS", {DOMAIN_A: key, DOMAIN_B: key})
+
+    results = tmp_path / "results"
+    write_run(results, "ollama:small:3b", _enough(DOMAIN_A, 0.95, "a3") + _enough(DOMAIN_B, 0.3, "b3"))
+    write_run(results, "ollama:mid:14b", _enough(DOMAIN_A, 0.95, "a14") + _enough(DOMAIN_B, 0.95, "b14"))
+    write_run(results, "cloud:big", _enough(DOMAIN_A, 0.3, "ac") + _enough(DOMAIN_B, 0.95, "bc"))
+
+    routing = recommend(build_matrix(results_dir=results, models_path=registry), models_path=registry)
+    assert routing["recommendations"][DOMAIN_B]["model"] == "ollama:mid:14b"
+    assert routing["condor_config_snippet"][key] == "ollama:mid:14b"
+
+
+# ── published files are written atomically ───────────────────────────────────
+def test_matrix_and_routing_files_are_written_atomically(tmp_path, monkeypatch):
+    """The dashboard and router read these while a sweep rewrites them, and a
+    torn write reads as "no matrix" (load_matrix swallows the parse error)."""
+    import bench.matrix as matrix_mod
+    import bench.routing as routing_mod
+
+    written: list[str] = []
+
+    def _record(path, text):
+        written.append(Path(path).name)
+        Path(path).write_text(text)
+
+    monkeypatch.setattr(matrix_mod, "atomic_write_text", _record)
+    monkeypatch.setattr(routing_mod, "atomic_write_text", _record)
+
+    matrix_mod.save_matrix({"env_mode": "live"}, tmp_path / "matrix.json")
+    routing_mod.save_routing({"env_mode": "live"}, tmp_path / "routing_recommendations.json")
+    assert written == ["matrix.json", "routing_recommendations.json"]

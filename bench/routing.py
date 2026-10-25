@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from bench import stats
+from bench.atomic_io import atomic_write_text
 from config import (
     DESTRUCTIVE_FLOOR,
     DOMAIN_PASS_RATE,
@@ -474,8 +475,15 @@ def _config_snippet(
     Several domains can share one config key — ``strategy_creation`` and
     ``market_making_expert`` are both that agent's ``agent_key``. When they
     recommend different models, one would silently overwrite the other in a plain
-    dict. Take the larger model (the one that satisfies both domains) and report
-    the disagreement rather than letting dict ordering decide.
+    dict. The key gets a model that *passed* (with zero unsafe actions) in every
+    domain sharing it — the cheapest such, then the smallest — and the
+    disagreement is reported rather than letting dict ordering decide.
+
+    This used to take the largest per-domain winner and claim it "satisfies every
+    domain" without checking: size is not evidence, and the larger model may never
+    have passed (or even run) the other domain. When no model passed them all, the
+    key is left out of the snippet and the conflict says so — a wrong line in a
+    config is worse than a missing one.
     """
     by_key: dict[str, list[tuple[str, dict]]] = {}
     for domain, rec in recommendations.items():
@@ -490,20 +498,46 @@ def _config_snippet(
         if len(models) == 1:
             snippet[key] = entries[0][1]["model"]
             continue
-        # Params None (cloud) sorts last and wins, which is the safe direction:
-        # a shared key must satisfy the most demanding domain that uses it.
-        winner_domain, winner = max(
-            entries,
-            key=lambda e: (
-                e[1]["params_b"] if e[1].get("params_b") is not None else float("inf")
-            ),
-        )
-        snippet[key] = winner["model"]
+
+        # Every model that passed a domain is either its winner or one of its
+        # `alternatives` (both drawn from the blocker-free list, so already safe).
+        passing_by_domain = [
+            {rec["model"]: rec, **{a["model"]: a for a in rec.get("alternatives") or []}}
+            for _, rec in entries
+        ]
+        shared = set(passing_by_domain[0]).intersection(*passing_by_domain[1:])
+        per_domain = {domain: rec["model"] for domain, rec in entries}
+        if not shared:
+            conflicts[key] = {
+                "chosen": None,
+                "chosen_for": None,
+                "reason": "shared config key — no model passed every domain using it, "
+                "so the key is left unset; pick one by hand or benchmark further",
+                "per_domain": per_domain,
+            }
+            continue
+
+        def _rank(model: str) -> tuple:
+            rows = [passing[model] for passing in passing_by_domain]
+            # The same cost rule as Candidate.cost_rank, taken at its worst domain.
+            cost = max(
+                r["cost_per_success"]
+                if r.get("cost_per_success") is not None
+                else (float("inf") if r.get("provider") == "cloud" else 0.0)
+                for r in rows
+            )
+            params = rows[0].get("params_b")
+            size = (1, float("inf")) if params is None else (0, float(params))
+            return (cost, size, model)
+
+        chosen = min(shared, key=_rank)
+        snippet[key] = chosen
         conflicts[key] = {
-            "chosen": winner["model"],
-            "chosen_for": winner_domain,
-            "reason": "shared config key — took the model that satisfies every domain using it",
-            "per_domain": {domain: rec["model"] for domain, rec in entries},
+            "chosen": chosen,
+            "chosen_for": sorted(per_domain),
+            "reason": "shared config key — took the cheapest model that passed every "
+            "domain using it",
+            "per_domain": per_domain,
         }
     return snippet, conflicts
 
@@ -624,7 +658,8 @@ def routing_path(lane: str = "live") -> Path:
 def save_routing(routing: dict[str, Any], path: Path | None = None) -> Path:
     path = path or routing_path(str(routing.get("env_mode") or "live"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(routing, indent=2) + "\n")
+    # Atomic for the same reason as save_matrix: a torn file reads as "no routing".
+    atomic_write_text(path, json.dumps(routing, indent=2) + "\n")
     return path
 
 

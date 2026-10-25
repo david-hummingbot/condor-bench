@@ -187,9 +187,11 @@ Output lands in `results/routing_recommendations.json`, including a
 }
 ```
 
-When two domains share one config key and disagree, the larger model wins (a
-shared key has to satisfy every domain using it) and the disagreement is reported
-in `config_conflicts` rather than being decided by dict ordering.
+When two domains share one config key and disagree, the key gets the cheapest
+model that passed (with zero unsafe actions) in every domain using it, and the
+disagreement is reported in `config_conflicts` rather than being decided by dict
+ordering. If no model passed them all, the key is left out of the snippet and the
+conflict says so.
 
 ---
 
