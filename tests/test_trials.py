@@ -73,6 +73,39 @@ def test_three_trials_run_every_case_three_times(monkeypatch):
     assert set(responses) == {"c1", "c1__t2", "c1__t3", "c2", "c2__t2", "c2__t3"}
 
 
+def test_every_trial_gets_a_fresh_probe_journal(monkeypatch):
+    """Set up once per case, trial 1's journal write satisfied trial 2's read-back."""
+    import runner
+    import bench.client
+    import bench.market_warmup
+    import bench.probe_journal
+    import bench.scorer
+
+    order: list[str] = []
+
+    async def fake_run_case(case, model):
+        order.append("run")
+        return SimpleNamespace(latency_s=1.0, response="ok")
+
+    async def fake_score_case(case, result, baseline_latency, *, trial_idx=1):
+        return _card(case.id, trial_idx=trial_idx)
+
+    async def fake_warmup(case):
+        return SimpleNamespace(ok=True, notes=[])
+
+    monkeypatch.setattr(bench.client, "run_case", fake_run_case)
+    monkeypatch.setattr(bench.scorer, "score_case", fake_score_case)
+    monkeypatch.setattr(bench.market_warmup, "ensure_markets_for_case", fake_warmup)
+    monkeypatch.setattr(
+        bench.probe_journal, "ensure_probe_journal", lambda case: order.append("fresh")
+    )
+
+    cases = [SimpleNamespace(id="c_journal_roundtrip_001", type="consult", risk_level="read_only")]
+    asyncio.run(runner._run_cases(cases, "m", SimpleNamespace(load=lambda _: None), trials=2))
+    # Once at case setup, then before each trial's run.
+    assert order == ["fresh", "fresh", "run", "fresh", "run"]
+
+
 def test_a_warmup_failure_costs_every_trial(monkeypatch):
     import runner
     import bench.market_warmup

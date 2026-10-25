@@ -82,9 +82,11 @@ def baseline(
     from bench.dataset import load_all_cases
 
     m = model or BASELINE_MODEL
-    _enter_lane("live")
+    lane = _enter_lane("live")
     cases = load_all_cases()
-    store = BaselineStore()
+    # Stored per lane: a BENCH_ENV_MODE=mock baseline run used to overwrite the
+    # live references with mock timings.
+    store = BaselineStore(lane=lane)
     # Naming cases means you mean them: re-measuring a handful otherwise required
     # deleting their records, which also deletes the reference the per-case ceiling
     # scales from and drops them all to the floor.

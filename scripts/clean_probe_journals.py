@@ -8,9 +8,11 @@ call. Entries land on disk under::
 
     <condor>/agents/<slug>/sessions/session_N/journal.md
 
-Left alone they accumulate across every case, model and sweep. That is not just
+Left alone they accumulated across every case, model and sweep. That is not just
 untidy: ``trading_agent_journal_read`` returns them, so its responses grow until
-they crowd the judge's context and slow every journal case down.
+they crowd the judge's context and slow every journal case down. A run now resets
+each probe journal before every trial (``bench.probe_journal.ensure_probe_journal``,
+which also re-seeds what this script removes), so what is left is the last trial's.
 
 **Only bench's own probe agents are touched.** Any slug not starting with ``bench_``
 is refused, so this can never clear a real trading agent's history — that history is

@@ -206,6 +206,42 @@ async def test_failed_rules_fetch_is_not_cached_as_empty(stub):
     assert await reg.pairs("binance_perpetual_testnet") == ("BTC-USDT",)
 
 
+@pytest.mark.asyncio
+async def test_an_error_status_from_trading_rules_is_not_cached_as_empty(stub):
+    """A 500 is a failed fetch too; it used to be cached as "no pairs" for the run."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(500, json={"detail": "connector not ready"})
+        return httpx.Response(200, json={"BTC-USDT": {}})
+
+    stub(handler)
+    reg = _registry()
+    assert await reg.pairs("binance_perpetual_testnet") == ()
+    assert await reg.pairs("binance_perpetual_testnet") == ("BTC-USDT",)
+
+
+@pytest.mark.asyncio
+async def test_gateway_pairs_are_never_read_off_the_cex_endpoint(stub):
+    """`/connectors/meteora/trading-rules` is the CEX service answering about a DEX."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"SOL-USDC": {}})
+
+    stub(handler)
+    reg = _registry(gateway={"meteora": Connector("meteora", namespace=GATEWAY)}, gateway_ok=True)
+    assert await reg.pairs("meteora", namespace=GATEWAY) == ()
+    binding = await reg.resolve(
+        namespace=GATEWAY, needs_credentials=False, pair_candidates=["SOL-USDC"]
+    )
+    assert binding is None, "a gateway pair was 'confirmed' by the CEX endpoint"
+    assert seen == []
+
+
 # ── probing ────────────────────────────────────────────────────────────────────
 
 
@@ -229,6 +265,30 @@ async def test_probe_reads_credentials_per_account(stub):
     assert reg.credentialed("binance_perpetual_testnet")
     assert reg.supported("binance") and not reg.credentialed("binance")
     assert reg.account_for("binance_perpetual_testnet") == "master_account"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_account_is_a_registry_failure_not_no_keys(stub):
+    """Skipping a failed credentials fetch made its connectors look uncredentialed,
+    so every case needing them read as broken on this box."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/connectors/":
+            return httpx.Response(200, json=["binance_perpetual_testnet"])
+        if path == "/accounts/":
+            return httpx.Response(200, json=["master_account", "trader"])
+        if path == "/accounts/master_account/credentials":
+            return httpx.Response(200, json=[])
+        if path == "/accounts/trader/credentials":
+            return httpx.Response(503)
+        return httpx.Response(200, json=[])
+
+    stub(handler)
+    reg = await probe_registry()
+    assert not reg.ok
+    assert not reg.namespace_readable(CEX)
+    assert "trader" in reg.error and "503" in reg.error
 
 
 @pytest.mark.asyncio

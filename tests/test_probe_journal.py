@@ -46,10 +46,11 @@ def test_ensure_creates_the_strategy_dir(monkeypatch, tmp_path):
     assert probe_strategy_dir(case).is_dir()
 
 
-def test_ensure_is_idempotent_and_keeps_existing_entries(monkeypatch, tmp_path):
-    """A second run must not wipe the journal a case already wrote.
+def test_each_call_starts_a_fresh_journal(monkeypatch, tmp_path):
+    """Trial isolation: an entry a previous trial (or model) wrote must be gone.
 
-    Clearing them is `scripts/clean_probe_journals.py`'s job, on demand.
+    Kept across trials, trial 1's write satisfied trial 2's "read it back", so
+    `c_journal_roundtrip_001` could pass without the model writing anything.
     """
     _checkout(monkeypatch, tmp_path)
     case = _case()
@@ -57,9 +58,31 @@ def test_ensure_is_idempotent_and_keeps_existing_entries(monkeypatch, tmp_path):
     journal = probe_strategy_dir(case) / "sessions" / "session_1" / "journal.md"
     journal.parent.mkdir(parents=True)
     journal.write_text("# Journal\n- tick#1 held\n")
+    (probe_strategy_dir(case) / "learnings.md").write_text("- a previous trial's learning\n")
 
-    assert ensure_probe_journal(case) is None
-    assert "tick#1 held" in journal.read_text()
+    assert ensure_probe_journal(case)
+    assert probe_strategy_dir(case).is_dir()
+    assert not journal.exists()
+    assert not (probe_strategy_dir(case) / "learnings.md").exists()
+
+
+def test_a_read_case_is_reseeded_after_its_sessions_were_cleaned(monkeypatch, tmp_path):
+    """`clean_probe_journals.py` removes sessions/session_N but leaves the strategy
+    dir; the early return on "dir exists" then never seeded again, and the read
+    case read an empty journal for every model after."""
+    _checkout(monkeypatch, tmp_path)
+    seeded: list = []
+    monkeypatch.setattr(
+        probe_journal, "_seed_journal", lambda case, target: seeded.append(target) or "seeded"
+    )
+    case = _case(id="tool_journal_read_001", type="tool", agent_slug="bench_journal_probe",
+                 expected_tools=["trading_agent_journal_read"])
+    ensure_probe_journal(case)
+    # What the clean script leaves behind: the strategy dir, sessions emptied.
+    (probe_strategy_dir(case) / "sessions").mkdir(exist_ok=True)
+
+    assert "seeded" in ensure_probe_journal(case)
+    assert len(seeded) == 2, "the second call did not re-seed"
 
 
 def test_only_bench_probe_slugs_are_touched(monkeypatch, tmp_path):

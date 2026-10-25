@@ -576,11 +576,13 @@ class ACPClient:
             "params": {"sessionId": self._session_id, "prompt": [{"type": "text", "text": text}]},
             "id": req_id,
         }
-        self._process.stdin.write((json.dumps(msg) + "\n").encode())
-        await self._process.stdin.drain()
-
+        # Bench-side fix of an upstream bug: condor registered this future after
+        # drain(), so a fast reply read while drain() was suspended had no pending
+        # entry, was dropped, and the prompt hung to the case timeout.
         future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
         self._peer._pending[req_id] = future
+        self._process.stdin.write((json.dumps(msg) + "\n").encode())
+        await self._process.stdin.drain()
 
         def _on_response(fut: asyncio.Future) -> None:
             if self._current_req_id != req_id:

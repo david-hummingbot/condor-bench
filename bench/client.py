@@ -363,6 +363,12 @@ class PartialTrace:
 
     turns: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = field(default_factory=list)
 
+    # Read by bench.cleanup.created_resources: a call here with no response may
+    # have been in flight when the trial was cut off, not failed — so a state
+    # setter in that position is still reset. (A plain class attribute, not a
+    # dataclass field.)
+    cut_off = True
+
     @property
     def tool_calls(self) -> list[dict[str, Any]]:
         return [c for calls, _ in self.turns for c in calls]
