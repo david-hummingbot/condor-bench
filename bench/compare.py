@@ -232,6 +232,7 @@ def compare_summaries(
                 "pass_rate": m.get("pass_rate"),
                 "composite_avg": m.get("composite_avg"),
                 "latency_s_avg": m.get("latency_s_avg"),
+                "model_time_s_avg": m.get("model_time_s_avg"),
                 "cases_scored": m.get("cases_scored"),
                 "n": m.get("cases_scored") or m.get("cases_total"),
                 "condor": m.get("condor"),
@@ -296,6 +297,10 @@ def _build_deltas(
             ),
             "latency_s_avg_delta": _sub(
                 other.get("latency_s_avg"), base.get("latency_s_avg")
+            ),
+            # The model's share of latency_s; None when either side was not timed.
+            "model_time_s_avg_delta": _sub(
+                other.get("model_time_s_avg"), base.get("model_time_s_avg")
             ),
             "latency_n": {"baseline": base_n, "compare": other_n},
             "avg_total_tokens_delta": _usage_delta(base, other),

@@ -157,6 +157,7 @@ function SummaryMetrics({ s, weights }) {
           { label: 'Live validity', value: s.live_validity_avg },
           { label: 'Latency score', value: s.latency_score_avg },
           { label: 'Avg latency', value: null, text: fmtLatency(s.latency_s_avg) },
+          { label: 'Avg model time', value: null, text: s.model_time_s_avg == null ? '—' : fmtLatency(s.model_time_s_avg) },
           { label: 'Cases scored', value: null, text: String(s.cases_scored ?? '—') },
         ].map(m => (
           <div key={m.label} className="metric-card">

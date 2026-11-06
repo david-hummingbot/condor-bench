@@ -214,7 +214,7 @@ def test_cancelling_a_run_saves_the_cases_it_scored(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(bench.client, "run_case", fake_run_case)
     monkeypatch.setattr(bench.client, "case_input_text", lambda case: "q")
     monkeypatch.setattr(
-        bench.scorer, "score_case", lambda c, r, b, trial_idx=1: _done(FakeCard(c.id))
+        bench.scorer, "score_case", lambda c, r, b, trial_idx=1, **kw: _done(FakeCard(c.id))
     )
     monkeypatch.setattr(bench.reporter, "save_run", fake_save_run)
     monkeypatch.setattr(bench.mcp_provider, "target_banner", lambda: "test")

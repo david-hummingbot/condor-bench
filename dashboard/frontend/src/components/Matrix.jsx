@@ -251,6 +251,7 @@ function CellDetail({ hover }) {
         <Chip label="Avg cost" value={fmtCost(cell.avg_cost_usd)} />
         <Chip label="Avg latency" value={cell.avg_latency_s == null ? '—' : cell.avg_latency_s + 's'} />
         <Chip label="Median latency" value={cell.median_latency_s == null ? '—' : cell.median_latency_s + 's'} />
+        <Chip label="Model time / success" value={cell.model_time_per_success == null ? '—' : cell.model_time_per_success + 's'} />
         <Chip label="p95 latency" value={cell.p95_latency_s == null ? '—' : cell.p95_latency_s + 's'} />
       </div>
       {cell.destructive_failures?.length > 0 && (

@@ -48,7 +48,7 @@ def test_three_trials_run_every_case_three_times(monkeypatch):
         calls.append(case.id)
         return SimpleNamespace(latency_s=1.0, response=f"answer {len(calls)}")
 
-    async def fake_score_case(case, result, baseline_latency, *, trial_idx=1):
+    async def fake_score_case(case, result, baseline_latency, *, trial_idx=1, **kw):
         return _card(case.id, trial_idx=trial_idx)
 
     async def fake_warmup(case):
@@ -87,7 +87,7 @@ def test_every_trial_gets_a_fresh_probe_journal(monkeypatch):
         order.append("run")
         return SimpleNamespace(latency_s=1.0, response="ok")
 
-    async def fake_score_case(case, result, baseline_latency, *, trial_idx=1):
+    async def fake_score_case(case, result, baseline_latency, *, trial_idx=1, **kw):
         return _card(case.id, trial_idx=trial_idx)
 
     async def fake_warmup(case):
@@ -383,7 +383,7 @@ def _pipeline_stubs(monkeypatch, *, judge_s: float = 0.2, run_s: float = 0.05):
         log.append(f"ran {case.id}")
         return SimpleNamespace(latency_s=run_s, response=f"answer {case.id}")
 
-    async def fake_score_case(case, result, baseline_latency, *, trial_idx=1):
+    async def fake_score_case(case, result, baseline_latency, *, trial_idx=1, **kw):
         judging["now"] += 1
         judging["peak"] = max(judging["peak"], judging["now"])
         log.append(f"judge {case.id}")

@@ -52,7 +52,7 @@ def test_a_read_only_case_that_created_something_is_torn_down(monkeypatch):
     async def fake_run_case(case, model):
         return SimpleNamespace(latency_s=1.0, response="done")
 
-    async def fake_score_case(case, result, baseline, *, trial_idx=1):
+    async def fake_score_case(case, result, baseline, *, trial_idx=1, **kw):
         return ScoreCard(case_id=case.id, model=model_key, answer_quality=1.0, answer_reason="",
                          tool_accuracy=0.0, latency_score=1.0, composite=0.0, latency_s=1.0,
                          baseline_latency_s=1.0)

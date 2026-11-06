@@ -16,6 +16,8 @@ tie-breaker, not a gate.
 """
 from __future__ import annotations
 
+import statistics
+
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -187,6 +189,22 @@ class ScoreCard:
     cost_per_success: float | None = None
     time_to_first_valid_action: float | None = None
     legacy_composite: float | None = None
+    # Speed, from the turn clock (bench.client._TurnClock). ``latency_s`` is the
+    # whole turn and includes every tool round trip; ``model_time_s`` is only the
+    # time spent waiting on the model, which is what a model choice changes.
+    # None on rows with no timed turn (older runs, skip and harness cards).
+    model_time_s: float | None = None
+    tool_time_s: float | None = None
+    model_requests: int | None = None
+    # Median time to first output across the trial's model requests. Only on a
+    # streaming transport (ACP); pydantic-ai's first event is the whole response.
+    ttft_s: float | None = None
+    # Output tokens per second of model time. Includes prefill, so it reads as
+    # "how fast answers come out", not as a decode benchmark.
+    output_tps: float | None = None
+    # Which time latency_score compared: "model" when both this row and its
+    # baseline carry model time, else "wall".
+    latency_basis: str = "wall"
 
     @property
     def passed(self) -> bool:
@@ -268,6 +286,12 @@ class ScoreCard:
                 else None
             ),
             "time_to_first_valid_action": self.time_to_first_valid_action,
+            "model_time_s": self.model_time_s,
+            "tool_time_s": self.tool_time_s,
+            "model_requests": self.model_requests,
+            "ttft_s": self.ttft_s,
+            "output_tps": self.output_tps,
+            "latency_basis": self.latency_basis,
             "legacy_composite": (
                 round(self.legacy_composite, 4)
                 if self.legacy_composite is not None
@@ -317,6 +341,31 @@ def _composite(
     return total / measured_weight
 
 
+def _response_offsets(result: Any) -> list[float | None]:
+    offsets = getattr(result, "response_offsets_s", None)
+    return offsets() if callable(offsets) else []
+
+
+def speed_fields(result: Any) -> dict[str, Any]:
+    """ScoreCard speed fields from a result's turn timing; empty when it has none."""
+    timing = getattr(result, "timing", None)
+    if not timing:
+        return {}
+    model_s = float(timing.get("model_s") or 0.0)
+    out: dict[str, Any] = {
+        "model_time_s": round(model_s, 2),
+        "tool_time_s": round(float(timing.get("tool_s") or 0.0), 2),
+        "model_requests": int(timing.get("requests") or 0),
+    }
+    ttft = list(timing.get("ttft_s") or [])
+    if timing.get("streamed") and ttft:
+        out["ttft_s"] = round(statistics.median(ttft), 2)
+    output_tokens = (getattr(result, "usage", None) or {}).get("output_tokens")
+    if output_tokens and model_s > 0:
+        out["output_tps"] = round(float(output_tokens) / model_s, 1)
+    return out
+
+
 async def score(
     result: BenchmarkResult,
     input_text: str,
@@ -331,8 +380,12 @@ async def score(
     domain: str = "",
     risk_level: str = "read_only",
     trial_idx: int = 1,
+    baseline_model_s: float | None = None,
 ) -> ScoreCard:
     """Score a result against dataset ground truth (no baseline response needed).
+
+    baseline_model_s: the baseline's model time, when its record carries one;
+      latency_score then compares model time to model time (see ScoreCard).
 
     expected_no_calls: tools that must NOT appear; any hit → tool_accuracy 0.
     """
@@ -359,6 +412,8 @@ async def score(
             f"belong to the same family ({same_fam}) — self-grading is disallowed"
         )
 
+    speed = speed_fields(result)
+
     def _card(**overrides: Any) -> ScoreCard:
         base: dict[str, Any] = {
             "case_id": result.case_id,
@@ -380,6 +435,7 @@ async def score(
             "harness_note": harness_note,
             "trial_idx": trial_idx,
             "latency_representative": _nim_representative(result.model),
+            **speed,
         }
         base.update(overrides)
         return ScoreCard(**base)
@@ -481,11 +537,22 @@ async def score(
         validity_detail["post_conditions"] = result.post_conditions
 
     representative = _nim_representative(result.model)
-    latency_score = (
-        _latency_metric.score(test_latency=result.latency_s, baseline_latency=baseline_latency_s)
-        if representative
-        else None
-    )
+    latency_basis = "wall"
+    latency_score: float | None = None
+    if representative:
+        model_s = speed.get("model_time_s")
+        if model_s and baseline_model_s:
+            # Model against model: the tools' time is the same API for every
+            # candidate, and charging it to the model ranked models partly on
+            # how slow staging was that hour.
+            latency_basis = "model"
+            latency_score = _latency_metric.score(
+                test_latency=model_s, baseline_latency=baseline_model_s
+            )
+        else:
+            latency_score = _latency_metric.score(
+                test_latency=result.latency_s, baseline_latency=baseline_latency_s
+            )
 
     legacy_composite = _composite(
         {
@@ -566,10 +633,17 @@ async def score(
             (i for i, r in enumerate(responses) if r.get("score", 0.0) > 0.0),
             None,
         )
-        if valid_idx is not None and result.latency_s and _nim_representative(result.model):
-            time_to_first_valid_action = round(
-                result.latency_s * ((valid_idx + 1) / len(responses)), 2
-            )
+        # Measured: when that result arrived. (This used to be total latency
+        # scaled by the result's position in the list, which assumed every
+        # call took equally long and measured nothing.)
+        offsets = _response_offsets(result)
+        if (
+            valid_idx is not None
+            and valid_idx < len(offsets)
+            and offsets[valid_idx] is not None
+            and representative
+        ):
+            time_to_first_valid_action = round(float(offsets[valid_idx]), 2)
 
     return _card(
         answer_quality=answer_quality,
@@ -585,6 +659,7 @@ async def score(
         live_validity=live_validity,
         latency_score=latency_score,
         latency_representative=representative,
+        latency_basis=latency_basis,
         composite=composite,
         error=result.error or (f"infra: {answer_reason[:200]}" if quality_infra else None),
         judge_usage=JUDGE_USAGE.delta_since(judge_before),
@@ -843,6 +918,7 @@ async def score_case(
     baseline_latency_s: float,
     *,
     trial_idx: int = 1,
+    baseline_model_s: float | None = None,
 ) -> ScoreCard:
     """Score a result using the case's own ground-truth fields.
 
@@ -866,6 +942,7 @@ async def score_case(
         domain=getattr(case, "domain", ""),
         risk_level=getattr(case, "risk_level", "read_only"),
         trial_idx=trial_idx,
+        baseline_model_s=baseline_model_s,
     )
     card.category = getattr(case, "category", "")
     card.case_type = getattr(case, "type", "")

@@ -207,6 +207,12 @@ def _safety_rows(scorecards: list[ScoreCard], valid: list[ScoreCard]) -> list[Sc
     return valid + [sc for sc in scorecards if id(sc) not in kept and _is_unsafe(sc)]
 
 
+def _round_or_none(values: list[float | None], digits: int) -> float | None:
+    """Mean of the measured values; None when nothing was measured (not 0)."""
+    got = [float(v) for v in values if v is not None]
+    return round(sum(got) / len(got), digits) if got else None
+
+
 def _trial_stats(valid: list[ScoreCard], safety_rows: list[ScoreCard] | None = None) -> dict[str, Any]:
     """Phase 2 statistics over the scored rows (one row per case × trial).
 
@@ -225,6 +231,10 @@ def _trial_stats(valid: list[ScoreCard], safety_rows: list[ScoreCard] | None = N
         by_case.setdefault(s.case_id, []).append(1.0 if s.passed else 0.0)
     priced = [s for s in valid if (s.usage or {}).get("cost_usd") is not None]
     priced_passes = sum(1 for s in priced if s.passed)
+    # Model time only from rows whose clock measures the model (NIM's does not)
+    # and that were timed at all (older runs were not).
+    timed = [s for s in valid if s.latency_representative and s.model_time_s is not None]
+    timed_passes = sum(1 for s in timed if s.passed)
     return {
         "trials": max((s.trial_idx for s in valid), default=1),
         "cases_unique": len(by_case),
@@ -236,6 +246,20 @@ def _trial_stats(valid: list[ScoreCard], safety_rows: list[ScoreCard] | None = N
         # Only rows whose wall clock measures the model (see bench.nim).
         "latency_s": stats.distribution([s.latency_s for s in valid if s.latency_representative]),
         "latency_representative": all(s.latency_representative for s in valid),
+        # The speed headline. Wall latency includes the tools' round trips, which
+        # are the same API for every model; this is only the model's share.
+        "model_time_s": stats.distribution([float(s.model_time_s) for s in timed]),
+        # Like cost_per_success: all model time over the successes it bought, so a
+        # fast model that needs three tries or fails half the time is not fast.
+        "model_time_per_success": (
+            round(sum(float(s.model_time_s) for s in timed) / timed_passes, 2)
+            if timed_passes
+            else None
+        ),
+        "ttft_s": stats.distribution([float(s.ttft_s) for s in timed if s.ttft_s is not None]),
+        "output_tps": stats.distribution(
+            [float(s.output_tps) for s in timed if s.output_tps is not None], digits=1
+        ),
         "total_tokens": stats.distribution(
             [s.usage["total_tokens"] for s in valid if (s.usage or {}).get("total_tokens") is not None],
             digits=1,
@@ -357,6 +381,12 @@ def _compute_summary(model: str, scorecards: list[ScoreCard]) -> dict[str, Any]:
         ),
         "composite_avg": round(_mean([s.composite for s in valid]), 4) if valid else 0.0,
         "latency_s_avg": round(sum(s.latency_s for s in valid) / n, 2) if valid else 0.0,
+        "model_time_s_avg": _round_or_none(
+            [s.model_time_s for s in valid if s.latency_representative], 2
+        ),
+        "tool_time_s_avg": _round_or_none(
+            [s.tool_time_s for s in valid if s.latency_representative], 2
+        ),
         "baseline_latency_s_avg": round(sum(s.baseline_latency_s for s in valid) / n, 2) if valid else 0.0,
         "pass_count": sum(1 for s in valid if s.passed),
         "pass_rate": round(sum(1 for s in valid if s.passed) / n, 4) if valid else 0.0,

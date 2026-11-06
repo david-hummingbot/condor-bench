@@ -45,7 +45,7 @@ def _stub_run(monkeypatch, cases, *, crash_on=None):
             raise RuntimeError("bridge died")
         return SimpleNamespace(latency_s=1.0, response="ok")
 
-    async def fake_score(case, result, baseline, *, trial_idx=1):
+    async def fake_score(case, result, baseline, *, trial_idx=1, **kw):
         return _Card(case.id, trial_idx)
 
     def fake_save(model, scorecards, responses, run_id, *, prompts=None, extra_summary=None):
