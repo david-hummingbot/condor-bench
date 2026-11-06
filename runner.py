@@ -808,7 +808,9 @@ def sweep(
 @app.command()
 def matrix(
     models: Path = typer.Option(Path("datasets/models.json"), help="Model registry"),
-    axis: str = typer.Option("domains", help="Rows: domains | tools"),
+    axis: str = typer.Option(
+        "domains", help="Rows: domains | tools | tool_use (first-try correct, call by call)"
+    ),
     all_models: bool = typer.Option(
         False,
         "--all-models",
@@ -818,8 +820,8 @@ def matrix(
     """Aggregate saved runs into a model × domain/tool matrix."""
     from bench.matrix import build_matrix, save_matrix
 
-    if axis not in ("domains", "tools"):
-        console.print("[red]--axis must be 'domains' or 'tools'.[/red]")
+    if axis not in ("domains", "tools", "tool_use"):
+        console.print("[red]--axis must be 'domains', 'tools' or 'tool_use'.[/red]")
         raise typer.Exit(2)
 
     from config import env_mode
@@ -849,7 +851,11 @@ def matrix(
         )
         ordered = _ordered_models(data)
 
-    table = Table(title=f"Pass rate by {axis[:-1]}")
+    title = (
+        "First-try correct by tool" if axis == "tool_use" else f"Pass rate by {axis[:-1]}"
+    )
+    label = _tool_use_label if axis == "tool_use" else _cell_label
+    table = Table(title=title)
     table.add_column("Domain" if axis == "domains" else "Tool", no_wrap=True)
     for key in ordered:
         info = data["models"][key]
@@ -859,13 +865,21 @@ def matrix(
     for row_name, cells in data[axis].items():
         if not any(cells.get(k) for k in ordered):
             continue
-        table.add_row(row_name, *[_cell_label(cells.get(k)) for k in ordered])
+        table.add_row(row_name, *[label(cells.get(k)) for k in ordered])
     console.print(table)
-    console.print(
-        "[dim]cell = pass rate (scored cases). "
-        "'excl' = excluded infra failures / harness artifacts. "
-        "'!' = a destructive case below the floor.[/dim]"
-    )
+    if axis == "tool_use":
+        console.print(
+            "[dim]cell = of the cases that needed the tool, the share where the model "
+            "picked it, got its pinned arguments right and its first call worked "
+            "(cases). 'calls' = share of all its calls that worked, from any case. "
+            "Per-call detail is in the saved JSON.[/dim]"
+        )
+    else:
+        console.print(
+            "[dim]cell = pass rate (scored cases). "
+            "'excl' = excluded infra failures / harness artifacts. "
+            "'!' = a destructive case below the floor.[/dim]"
+        )
 
     if unranked and not all_models:
         console.print(
@@ -893,6 +907,23 @@ def _ordered_models(data: dict) -> list[str]:
         )
 
     return sorted(data["models"], key=sort_key)
+
+
+def _tool_use_label(cell: dict | None) -> str:
+    if not cell:
+        return "[dim]—[/dim]"
+    calls = (
+        f" [dim]calls {cell['call_success_rate']:.0%}/{cell['calls']}[/dim]"
+        if cell.get("calls")
+        else ""
+    )
+    unsafe = f" [red]unsafe {cell['unsafe']}[/red]" if cell.get("unsafe") else ""
+    rate = cell.get("first_try_rate")
+    if rate is None:
+        return (calls.strip() or "[dim]—[/dim]") + unsafe
+    status = cell.get("gate_status")
+    colour = {"passing": "green", "not_yet_passing": "yellow"}.get(status, "red")
+    return f"[{colour}]{rate:.0%}[/{colour}] [dim]({cell['expected']})[/dim]{calls}{unsafe}"
 
 
 def _cell_label(cell: dict | None) -> str:

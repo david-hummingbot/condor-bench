@@ -144,6 +144,9 @@ def validity_breakdown(
                 "error": _error_reason(output),
                 "empty": _is_empty(output),
                 "preview": _preview(output),
+                # Pairs the row with its call (bench.tool_use): a call with no
+                # row is a call that never returned.
+                "tool_call_id": record.get("tool_call_id") or None,
             }
         )
     return {

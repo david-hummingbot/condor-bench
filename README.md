@@ -407,6 +407,27 @@ domains are namespaced `tool:` because a capability bucket like "market data" is
 not something Condor can route to — those verdicts come out of the matrix's
 per-tool axis instead.
 
+### Tool calls, call by call
+
+The per-tool axis credits a case's whole verdict to every tool the case expected,
+which is the right question for routing ("can this model own work that needs this
+tool") and the wrong one for a tool: a case that needed four tools and failed on
+one marks all four failed, and a correct call inside an agent or tick case counts
+for nothing. The `tool_use` axis (`runner.py matrix --axis tool_use`, Matrix →
+Tool calls) reads every call instead, from every layer, out of evidence each saved
+case already carries:
+
+| Field | Meaning |
+|---|---|
+| `first_try_rate` | Of the cases that needed the tool, the share where the model picked it, got its pinned arguments right and its first call worked. The headline, with a Wilson interval |
+| `selection_rate` / `args_rate` / `call_success_rate` | Where it went wrong, in order. Calls in cases that did not ask for the tool count toward `call_success_rate` |
+| `repair_rate` | After a failed call, how often a later call to the same tool worked |
+| `wrong_keys` | The pinned arguments the model most often got wrong |
+
+A call with no recorded response counts as failed: on pydantic-ai a failed call
+returns to the model as a retry prompt and leaves no response in the trace. It is
+evidence, not a routing input — the router still reads the per-tool axis.
+
 ---
 
 ## Suites (Condor branch A/B)
