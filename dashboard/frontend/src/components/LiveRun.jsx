@@ -130,7 +130,9 @@ export default function LiveRun({ runId, onDone, onViewRuns, onNavigate }) {
       } else if (t === 'case_done') {
         setCompleted(evt.completed || 0)
         setTotal(evt.total || 0)
-        setCurrentCase(null)
+        // A trial's card arrives while the next trial is already running (the
+        // judge is pipelined), so clear only the trial this card belongs to.
+        setCurrentCase(cur => (cur && cur.id === evt.case_id && cur.trial === evt.trial ? null : cur))
         if (evt.scorecard) {
           setCases(prev => [
             {

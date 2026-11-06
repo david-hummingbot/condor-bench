@@ -392,3 +392,19 @@ def _tool_count(preload: str) -> int:
     import re
 
     return len(re.findall(r"mcp__[a-z-]+__[a-z_]+", preload))
+
+
+def test_vendored_helpers_resolve_every_name_they_use():
+    """An AST-extracted helper can call a symbol the extraction did not take.
+
+    ``render_risk_lines`` started formatting limits through ``quote_render`` and
+    the vendored copy imported fine, then raised NameError on the first tick
+    prompt — which a benchmark would record as a model failure, not a bench one.
+    So render it, for both a dollar and a token quote, every run.
+    """
+    from condor_compat.agents._upstream_helpers import render_risk_lines
+
+    usd = render_risk_lines({"quote_asset": "USDT", "max_drawdown_pct": 5.0})
+    sol = render_risk_lines({"quote_asset": "SOL", "max_drawdown_pct": -1})
+    assert any("$" in line for line in usd)
+    assert any("SOL" in line for line in sol)

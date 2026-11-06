@@ -62,6 +62,16 @@ async def verify(
     if not post_conditions:
         return []
 
+    from bench.cleanup import tool_sessions
+
+    # Every probe through one server per server, not a fresh boot per probe.
+    async with tool_sessions(agent_slug=agent_slug):
+        return await _probe_all(post_conditions, model=model, agent_slug=agent_slug)
+
+
+async def _probe_all(
+    post_conditions: dict[str, Any], *, model: str, agent_slug: str | None
+) -> list[dict[str, Any]]:
     from bench.cleanup import _call_tool
     from metrics.live_validity import _score_response
 

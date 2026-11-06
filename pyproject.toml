@@ -40,8 +40,6 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     # Data
-    "pandas>=2.0",
-    "plotly>=5.0",
     "python-dotenv>=1.0",
     # Reads the YAML frontmatter of condor's AGENT.md files for each agent's tool
     # grant. Was only transitively available before, which is the kind of thing
