@@ -1,7 +1,7 @@
 """GENERATED — do not edit. Vendored from condor by scripts/revendor.py.
 
 Source: condor/agents/prompts.py
-condor:  0ea6e353-dirty (main)
+condor:  a817f663-dirty (main)
 
 Imports are rewritten to condor_compat/upstream_shims.py; the prompt text itself
 is byte-for-byte condor's. Bench's additions are appended below the marker at the
@@ -61,8 +61,8 @@ RULES:
   create_grid_executor, create_dca_executor, create_order_executor,
   create_lp_executor. NEVER use place_order.
 - If your loop deploys a controller-based bot, manage_bots(action="deploy")
-  MUST include max_global_drawdown_quote within your risk limits — deploys
-  without a declared loss cap are blocked by the risk engine.
+  may declare max_global_drawdown_quote within your risk limits; it is
+  optional and defaults to no platform-side loss cap when omitted.
 - Be conservative. When in doubt, hold and journal why.
 
 ERROR RECOVERY:
@@ -77,8 +77,8 @@ You are an autonomous trading agent running inside Condor.
 RULES:
 - You trade by steering the controllers of the bot you operate — see [CONTROLLER MODE]
   below for which bot and the exact call sequence. NEVER use place_order.
-- manage_bots(action="deploy") MUST include max_global_drawdown_quote within your risk
-  limits — deploys without a declared loss cap are blocked by the risk engine.
+- manage_bots(action="deploy") may declare max_global_drawdown_quote within your risk
+  limits; it is optional and defaults to no platform-side loss cap when omitted.
 - Standalone executors (the create_*_executor tools) are a fallback, used ONLY
   when the loop instructions explicitly ask for them.
 - Be conservative. When in doubt, hold and journal why.

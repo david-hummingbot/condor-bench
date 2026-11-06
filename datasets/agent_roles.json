@@ -33,11 +33,6 @@
     "cannot make for you."
   ],
   "agents": {
-    "adaptive_grid_trader": {
-      "role": "strategy",
-      "base": "directional_trader",
-      "notes": "Grid trading, but the loop is directional: multi-timeframe analysis picks LONG/SHORT/TWO_SIDED and re-picks it as conditions move, so the grid is the execution shape rather than the job. Based on directional_trader over market_making_expert on grants too: its grant is a subset of the directional base (which declares tools: [] and inherits the whole surface), while market making misses several of its tools — trading_agent_journal_write and send_notification among them — and adds manage_bots and manage_controllers, which this agent is not granted."
-    },
     "condor": {
       "role": "expert",
       "domain": "general_consult",
@@ -46,7 +41,7 @@
     "dca_accumulator": {
       "role": "strategy",
       "base": "directional_trader",
-      "notes": "Laddered spot accumulation via dca_executor — level spacing, per-level size, budget, and re-laddering after a move. Directional rather than market-making: it is one-sided accumulation with a long bias, explicitly not grids or two-sided quoting. Grants agree with the job on the same reasoning as adaptive_grid_trader. Note this one is a *local* agent (.condor/agents/), not part of the roster condor ships, and its grant still names pre-d5eab53e tools (get_market_data, manage_executors) — so it is not evidence about the current surface."
+      "notes": "Laddered spot accumulation via dca_executor — level spacing, per-level size, budget, and re-laddering after a move. Directional rather than market-making: it is one-sided accumulation with a long bias, explicitly not grids or two-sided quoting. Grants agree with the job: a subset of the directional base. Note this one is a *local* agent (.condor/agents/), not part of the roster condor ships, and its grant still names pre-d5eab53e tools (get_market_data, manage_executors) — so it is not evidence about the current surface."
     },
     "directional_trader": {
       "role": "expert",
@@ -67,7 +62,7 @@
     "smart_money_flow": {
       "role": "strategy",
       "base": "directional_trader",
-      "notes": "Directional perp trading on Derive. Scoped to a subset of the directional base, on the same reasoning as adaptive_grid_trader."
+      "notes": "Directional perp trading on Derive. Its grant is a subset of the directional base (which declares tools: [] and inherits the whole surface)."
     },
     "solana_dex_lp_expert": {
       "role": "expert",

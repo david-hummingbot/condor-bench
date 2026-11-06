@@ -75,6 +75,7 @@ REWRITES = [
     ("from condor.agent_controllers import", "from condor_compat.upstream_shims import"),
     ("from .config import", "from condor_compat.agents._upstream_helpers import"),
     ("from .journal import", "from condor_compat.agents._upstream_helpers import"),
+    ("from .quote_render import", "from condor_compat.agents._upstream_helpers import"),
     ("from routines.base import", "from condor_compat.upstream_shims import"),
     ("from .agent import", "from condor_compat.upstream_shims import"),
     ("from .strategy import", "from condor_compat.upstream_shims import"),
@@ -187,6 +188,13 @@ PRELOAD_SYMBOLS = [
 # modules around them (journal.py writes files; config.py loads the agent store).
 HELPER_SYMBOLS = {
     ("condor", "agents", "config.py"): ["EXPERIMENT_MODES", "is_experiment_mode"],
+    # render_risk_lines formats every limit through quote_render (LP-2). A leaf
+    # module, so its symbols come across whole; listed before journal so the
+    # names exist by the time render_risk_lines is defined.
+    ("condor", "agents", "quote_render.py"): [
+        "DOLLAR_QUOTES", "_DOLLAR_DECIMALS", "_TOKEN_DECIMALS",
+        "normalize_quote", "is_dollar_quote", "format_quote",
+    ],
     ("condor", "agents", "journal.py"): ["render_risk_lines"],
 }
 
@@ -233,7 +241,7 @@ def generate(condor: Path) -> dict[Path, str]:
         for rel, names in HELPER_SYMBOLS.items()
     )
     out[ROOT / "condor_compat" / "agents" / "_upstream_helpers.py"] = (
-        HEADER.format(src="condor/agents/{config,journal}.py (helpers only)", rev=rev)
+        HEADER.format(src="condor/agents/{config,quote_render,journal}.py (helpers only)", rev=rev)
         + "from __future__ import annotations\n\nfrom typing import Any\n"
         + rewrite_imports(helpers)
     )

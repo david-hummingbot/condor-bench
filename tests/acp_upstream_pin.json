@@ -1,5 +1,5 @@
 {
-  "condor": "0ea6e353",
+  "condor": "a817f663-dirty",
   "files": {
     "condor/acp/client.py": {
       "ACPClient.__init__": "39e7badd8ee1",
