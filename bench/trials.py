@@ -210,7 +210,8 @@ class _Ran:
 
 
 async def _score_after(prior: asyncio.Future | None, case: Any, result: Any,
-                        baseline_latency: float, trial: int) -> Any:
+                        baseline_latency: float, trial: int,
+                        baseline_model_s: float | None = None) -> Any:
     """Score one trial, once the trial before it has been recorded.
 
     One judgement at a time: judge usage is attributed to a card as the change in
@@ -220,7 +221,9 @@ async def _score_after(prior: asyncio.Future | None, case: Any, result: Any,
 
     if prior is not None:
         await asyncio.wait([prior])  # its outcome is its own caller's to raise
-    return await score_case(case, result, baseline_latency, trial_idx=trial)
+    return await score_case(
+        case, result, baseline_latency, trial_idx=trial, baseline_model_s=baseline_model_s
+    )
 
 
 async def _execute(
@@ -287,7 +290,10 @@ async def _execute(
         # the mock lacks are bench's, not the model's, and the next reset clears them.
         gaps = mock_gaps() if lane == "mock" else None
         scoring = asyncio.ensure_future(
-            _score_after(after, case, result, baseline_latency, trial)
+            _score_after(
+                after, case, result, baseline_latency, trial,
+                getattr(baseline, "model_time_s", None) if baseline else None,
+            )
         )
         ran = _Ran(case, trial, model, scoring=scoring, response=result.response,
                    gaps=gaps, trace_link=trace_link)

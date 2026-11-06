@@ -587,6 +587,7 @@ async def _run_custom_prompt(run_id: str, req: "CustomPromptRequest") -> None:
                     baseline_latency,
                     expected_tool_params=req.expected_tool_params or None,
                     domain="custom_prompt",
+                    baseline_model_s=getattr(baseline, "model_time_s", None) if baseline else None,
                 )
                 sc.category = "custom-prompt"
                 sc.case_id = cp_case_id

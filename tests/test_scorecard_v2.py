@@ -79,8 +79,8 @@ async def test_scorecard_section5_metrics_computed():
                     {"tool": "get_markets", "args": {"pair": "BTC-USDT"}, "status": "success", "origin": "mcp"},
                 ],
                 tool_responses=[
-                    {"tool": "get_markets", "output": "error: missing pair", "status": "error", "origin": "mcp"},
-                    {"tool": "get_markets", "output": json_output, "status": "success", "origin": "mcp"},
+                    {"tool": "get_markets", "output": "error: missing pair", "status": "error", "origin": "mcp", "t_s": 0.4},
+                    {"tool": "get_markets", "output": json_output, "status": "success", "origin": "mcp", "t_s": 1.5},
                 ],
                 latency_s=2.0,
             )
@@ -105,7 +105,8 @@ async def test_scorecard_section5_metrics_computed():
     assert card.task_success is True
     assert card.tool_calls_per_success == 2.0
     assert card.cost_per_success == 0.005
-    assert card.time_to_first_valid_action is not None
+    # When the first valid result arrived, not a share of total latency.
+    assert card.time_to_first_valid_action == 1.5
 
     data = card.as_dict()
     assert "task_success" in data

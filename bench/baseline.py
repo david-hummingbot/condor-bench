@@ -131,12 +131,19 @@ class BaselineRecord:
     # The lane it was measured on. Records written before lanes existed carry
     # none and are live — every one of them was measured against staging.
     lane: str = "live"
+    # Time spent waiting on the model, tools excluded (bench.client._TurnClock).
+    # None on records written before it was measured: those still size the
+    # timeout, but latency_score falls back to wall time against them.
+    model_time_s: float | None = None
 
     def as_dict(self) -> dict:
         return {
             "case_id": self.case_id,
             "model": self.model,
             "latency_s": round(self.latency_s, 3),
+            "model_time_s": (
+                round(self.model_time_s, 3) if self.model_time_s is not None else None
+            ),
             "timestamp": self.timestamp,
             "fingerprint": self.fingerprint,
             "lane": self.lane,
@@ -200,6 +207,9 @@ class BaselineStore:
             timestamp=data.get("timestamp", ""),
             fingerprint=str(data.get("fingerprint", "")),
             lane=str(data.get("lane") or "live"),
+            model_time_s=(
+                float(data["model_time_s"]) if data.get("model_time_s") is not None else None
+            ),
         )
         # Belt and braces: a record that says it is from another lane is not this
         # lane's reference, wherever it happens to be on disk.
@@ -425,6 +435,7 @@ async def generate_baselines(
             case_id=result.case_id,
             model=model,
             latency_s=result.latency_s,
+            model_time_s=(getattr(result, "timing", None) or {}).get("model_s"),
             timestamp=ts,
             fingerprint=case_fingerprint(case),
             lane=lane,

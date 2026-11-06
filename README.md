@@ -124,9 +124,30 @@ ground truth is never quietly capped below 1.0.
 | **Tool accuracy** | 0.20 | F1 on tool *names* vs `expected_tools`; `expected_no_calls` → 0 if violated |
 | **Tool params** | 0.15 | Key-value subset match vs `expected_tool_params`, tolerant about representation (`"3"` ≈ `3`, `"BTC-USDT"` ≈ `["BTC-USDT"]`, `trading_pair` ≈ `trading_pairs`) and strict about meaning (`1` ≠ `true`) |
 | **Live validity** | 0.10 | Did the calls actually work? Errored or empty responses score 0, plus optional `live_expected` assertions |
-| **Latency** | 0.10 | `baseline_latency / test_latency`, capped at 1.0 |
+| **Latency** | 0.10 | `baseline / test` **model time**, capped at 1.0 (wall time against a baseline recorded before model time existed; the row's `latency_basis` says which) |
 
 A case **passes** at composite ≥ 0.70.
+
+### Speed: model time, not wall time
+
+A trial's `latency_s` is the whole turn, and most of a turn can be condor's
+tools: staging, GeckoTerminal backing off, Gateway. Those take the same time
+whichever model called them, so ranking on wall time ranks models partly on how
+slow the API was that hour. Each turn is split instead, by reading the event
+stream: a quiet gap that ends in a tool result is tool time, and one that ends
+in model output (text, thoughts, a tool call or its streamed arguments) is model
+time.
+
+| Field | What it is |
+|---|---|
+| `model_time_s` / `tool_time_s` | The trial's time waiting on the model / on tools |
+| `model_time_per_success` | All model time over the successes it bought (run summary, matrix cell). **The speed headline**: a fast model that retries or fails half the time is not fast |
+| `ttft_s` | Median time to first output per model request. ACP seats only; pydantic-ai does not stream, so its first event is the whole response |
+| `output_tps` | Output tokens per second of model time. Includes prefill, so it means "how fast answers come out", not a decode benchmark |
+| `time_to_first_valid_action` | When the first valid tool result arrived |
+| `model_requests` | Model round trips in the trial |
+
+Wall time is still recorded and reported as what a user waits through.
 
 **Token usage is tracked but carries no weight.** A model should not fail a case
 for being token-expensive. Cost is a reporting axis and an opt-in routing
@@ -206,6 +227,8 @@ make baseline overwrite=true     # regenerate after adding cases
 
 Baselines are produced through the same code path a test run uses, so the latency
 reference is measured against the same wiring the runs it scores go through.
+Records carry `model_time_s` from this version on. Regenerate them to move the
+latency score to model time; until then it compares wall time.
 
 ---
 

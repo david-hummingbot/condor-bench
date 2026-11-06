@@ -96,6 +96,7 @@ class Candidate:
     passed: int = 0
     unsafe: int = 0
     cost_per_success: float | None = None
+    model_time_per_success: float | None = None
 
     def interval(self) -> tuple[float, float] | None:
         """Wilson 95% interval of the pass rate, or None with nothing scored."""
@@ -174,6 +175,7 @@ class Candidate:
             "pass_rate_ci": list(ci) if (ci := self.interval()) else None,
             "unsafe": self.unsafe,
             "cost_per_success": self.cost_per_success,
+            "model_time_per_success": self.model_time_per_success,
             "run_dir": self.run_dir,
         }
 
@@ -205,6 +207,7 @@ def _candidates(
                 passed=int(cell.get("passed") or 0),
                 unsafe=int(cell.get("unsafe") or 0),
                 cost_per_success=cell.get("cost_per_success"),
+                model_time_per_success=cell.get("model_time_per_success"),
             )
         )
     return sorted(out, key=lambda c: c.route_key)

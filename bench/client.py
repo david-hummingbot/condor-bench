@@ -34,6 +34,7 @@ from condor_compat.acp.acp_client import ACPClient, is_acp_model, resolve_acp
 from condor_compat.acp.client import (
     PromptDone,
     TextChunk,
+    ThoughtChunk,
     ToolCallEvent,
     ToolCallUpdate,
     UsageEvent,
@@ -392,6 +393,75 @@ def recording_trace() -> Iterator[PartialTrace]:
         _PARTIAL_TRACE.reset(token)
 
 
+class _TurnClock:
+    """Splits one turn's wall time into the model's time and the tools' time.
+
+    ``latency_s`` is the whole turn, and that includes every tool round trip — a
+    slow staging API, GeckoTerminal backing off, a Gateway call — so it ranked
+    models partly on how slow the tools they called happened to be. Neither
+    transport reports per-request timing, so this reads it off the event stream:
+    each quiet gap is charged to whoever ended it. A gap that ends in a tool's
+    result was spent waiting on that tool; a gap that ends in model output (text,
+    a thought, a tool call or its streamed arguments) was spent waiting on the
+    model. Usage, heartbeats and bare status frames carry no signal and are
+    skipped, so their gaps merge into the next event's.
+
+    That holds for both transports, as recorded from their real streams:
+
+    * pydantic-ai does not stream. A request's text and tool calls all arrive
+      when its response completes, and the tool results arrive after the tools
+      ran, when the next request is being built. Gaps ending in output: the
+      request; gaps ending in results: the tools (parallel calls overlap, and
+      the gap counts them once).
+    * claude-agent-acp streams. A call is announced and its arguments arrive in
+      fragments while the model is still generating, so "announced → result"
+      would bill the tool for the model's typing; the gap that ends in the
+      result starts at the last fragment instead, which is when the call ran.
+
+    Time after the last signal (the bridge closing the prompt out) is neither
+    and goes to ``other_s``; ``model_s + tool_s + other_s`` is the turn.
+
+    A model request starts at the turn and after each batch of tool results;
+    its time to first output is the gap to the model's first event. On a
+    non-streaming transport that first event is the whole response, so
+    ``ttft_s`` is only meaningful when ``streamed`` is true.
+    """
+
+    def __init__(self, t0: float, *, streamed: bool) -> None:
+        self.t0 = t0
+        self.streamed = streamed
+        self._mark = t0
+        self.model_s = 0.0
+        self.tool_s = 0.0
+        self.ttft_s: list[float] = []
+        self._awaiting_first = True
+
+    def model(self, now: float) -> None:
+        gap = now - self._mark
+        if self._awaiting_first:
+            self.ttft_s.append(gap)
+            self._awaiting_first = False
+        self.model_s += gap
+        self._mark = now
+
+    def tool(self, now: float) -> None:
+        # A result closes the request that asked for it; the next model event
+        # opens another.
+        self.tool_s += now - self._mark
+        self._awaiting_first = True
+        self._mark = now
+
+    def summary(self, end: float) -> dict[str, Any]:
+        return {
+            "model_s": round(self.model_s, 3),
+            "tool_s": round(self.tool_s, 3),
+            "other_s": round(max(0.0, end - self._mark), 3),
+            "requests": len(self.ttft_s),
+            "ttft_s": [round(t, 3) for t in self.ttft_s],
+            "streamed": self.streamed,
+        }
+
+
 @dataclass
 class TurnResult:
     response: str
@@ -400,6 +470,8 @@ class TurnResult:
     error: str | None = None
     # Captured tool responses: [{"tool": name, "output": str, "tool_call_id": id}]
     tool_responses: list[dict[str, Any]] = field(default_factory=list)
+    # _TurnClock.summary(); None for a turn that never streamed (a failed start).
+    timing: dict[str, Any] | None = None
 
 
 @dataclass
@@ -439,6 +511,40 @@ class BenchmarkResult:
     @property
     def latency_s(self) -> float:
         return sum(t.latency_s for t in self.turns)
+
+    @property
+    def timing(self) -> dict[str, Any] | None:
+        """The turns' :class:`_TurnClock` summaries, summed; None when none was timed.
+
+        ``first_valid_s`` is filled by the scorer, which knows which result was valid.
+        """
+        timed = [t.timing for t in self.turns if t.timing]
+        if not timed:
+            return None
+        ttft = [x for tm in timed for x in tm["ttft_s"]]
+        return {
+            "model_s": round(sum(tm["model_s"] for tm in timed), 3),
+            "tool_s": round(sum(tm["tool_s"] for tm in timed), 3),
+            "other_s": round(sum(tm["other_s"] for tm in timed), 3),
+            "requests": sum(tm["requests"] for tm in timed),
+            "ttft_s": ttft,
+            "streamed": all(tm["streamed"] for tm in timed),
+        }
+
+    def response_offsets_s(self) -> list[float | None]:
+        """Seconds into the trial each MCP tool result arrived, in mcp_tool_responses order.
+
+        Turns follow one another, so a later turn's offsets carry the earlier turns'
+        durations. None for a record with no timestamp (older traces, fixtures).
+        """
+        out: list[float | None] = []
+        elapsed = 0.0
+        for turn in self.turns:
+            for r in turn.tool_responses:
+                if r.get("origin", "mcp") == "mcp":
+                    out.append(elapsed + r["t_s"] if r.get("t_s") is not None else None)
+            elapsed += turn.latency_s
+        return out
 
     def tool_names(self) -> list[str]:
         return [c["tool"] for c in self.tool_calls]
@@ -622,9 +728,14 @@ def _prompt_failure(event: PromptDone, text_chunks: list[str]) -> str | None:
 
 
 async def _stream_turn(
-    client: Any, prompt: str, usage_acc: dict[str, Any]
+    client: Any, prompt: str, usage_acc: dict[str, Any], *, streamed: bool = False
 ) -> TurnResult:
-    """Send one prompt, collect text + tool events + usage, return a TurnResult."""
+    """Send one prompt, collect text + tool events + usage, return a TurnResult.
+
+    ``streamed`` says whether the transport streams model output (ACP does,
+    pydantic-ai does not); it decides whether time to first output means
+    anything (see :class:`_TurnClock`).
+    """
     text_chunks: list[str] = []
     tool_calls: list[dict] = []
     tool_responses: list[dict] = []
@@ -640,11 +751,18 @@ async def _stream_turn(
     if (partial := _PARTIAL_TRACE.get()) is not None:
         partial.turns.append((tool_calls, tool_responses))
     t0 = time.monotonic()
+    clock = _TurnClock(t0, streamed=streamed)
     try:
         async for event in client.prompt_stream(prompt):
+            now = time.monotonic()
             if isinstance(event, TextChunk):
+                clock.model(now)
                 text_chunks.append(event.text)
+            elif isinstance(event, ThoughtChunk):
+                # Not part of the answer, but the model producing it.
+                clock.model(now)
             elif isinstance(event, ToolCallEvent):
+                clock.model(now)
                 call_names[event.tool_call_id] = event.title
                 # Only index a call that has an id: several id-less calls would all
                 # map to "" and a later update would complete the wrong one.
@@ -681,6 +799,10 @@ async def _stream_turn(
                 # exactly one argument, and `tool_params` scored the rest as
                 # `actual: null`. Merge instead, later keys winning, which also
                 # survives a bridge that re-sends the whole set each frame.
+                if event.output is not None:
+                    clock.tool(now)
+                elif event.input:
+                    clock.model(now)  # an argument fragment, still being generated
                 if event.input and event.tool_call_id in call_index:
                     call = tool_calls[call_index[event.tool_call_id]]
                     if isinstance(event.input, dict):
@@ -709,6 +831,8 @@ async def _stream_turn(
                         if idx is not None
                         else call_origin(name)
                     ),
+                    # Seconds into the turn the result arrived.
+                    "t_s": round(now - t0, 3),
                 }
                 # One call can report its result more than once — claude-agent-acp
                 # sends the structured response under its vendor extension first and
@@ -734,12 +858,14 @@ async def _stream_turn(
                 error = _prompt_failure(event, text_chunks)
     except Exception as exc:
         error = str(exc)
+    end = time.monotonic()
     return TurnResult(
         response="".join(text_chunks),
         tool_calls=tool_calls,
-        latency_s=time.monotonic() - t0,
+        latency_s=end - t0,
         error=error,
         tool_responses=tool_responses,
+        timing=clock.summary(end),
     )
 
 
@@ -977,13 +1103,13 @@ async def run_consult(
             first_prompt = _build_consult_prompt(
                 question, instructions, agent_key=model, agent_slug=agent_slug
             )
-            turn = await _stream_turn(client, first_prompt, usage_acc)
+            turn = await _stream_turn(client, first_prompt, usage_acc, streamed=is_acp)
             all_turns.append(turn)
             if turn.error:
                 outer_error = turn.error
             else:
                 for follow_up in (extra_turns or []):
-                    turn = await _stream_turn(client, follow_up, usage_acc)
+                    turn = await _stream_turn(client, follow_up, usage_acc, streamed=is_acp)
                     all_turns.append(turn)
                     if turn.error:
                         outer_error = turn.error
@@ -994,7 +1120,7 @@ async def run_consult(
                     called = [c["tool"] for t in all_turns for c in t.tool_calls]
                     missing = _missing_required_tools(called, required_tools)
                     if missing and _asks_confirmation(all_turns[-1].response):
-                        turn = await _stream_turn(client, _AUTO_CONFIRM_MSG, usage_acc)
+                        turn = await _stream_turn(client, _AUTO_CONFIRM_MSG, usage_acc, streamed=is_acp)
                         all_turns.append(turn)
                         if turn.error:
                             outer_error = turn.error
@@ -1067,7 +1193,7 @@ async def run_tick(
 
         await client.start()
         try:
-            turn = await _stream_turn(client, prompt, usage_acc)
+            turn = await _stream_turn(client, prompt, usage_acc, streamed=is_acp)
             all_turns.append(turn)
             if turn.error:
                 outer_error = turn.error

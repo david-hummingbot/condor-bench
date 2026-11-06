@@ -112,6 +112,10 @@ class Cell:
     total_tokens: list[float] = field(default_factory=list)
     costs: list[float] = field(default_factory=list)
     latencies: list[float] = field(default_factory=list)
+    # Model time (bench.client._TurnClock) from timed, representative rows, and
+    # the passes among exactly those rows, so the per-success ratio is consistent.
+    model_times: list[float] = field(default_factory=list)
+    timed_passes: int = 0
     # Destructive cases below the floor block a routing recommendation outright.
     destructive_failures: list[str] = field(default_factory=list)
     excluded_reasons: list[str] = field(default_factory=list)
@@ -172,6 +176,10 @@ class Cell:
         # A NIM row's wall clock measures the hosted endpoint, not the model.
         if case.get("latency_s") is not None and case.get("latency_representative", True):
             self.latencies.append(float(case["latency_s"]))
+            if case.get("model_time_s") is not None:
+                self.model_times.append(float(case["model_time_s"]))
+                if passed:
+                    self.timed_passes += 1
 
     @property
     def _safety_rows(self) -> int:
@@ -181,6 +189,7 @@ class Cell:
     def as_dict(self, gate: float = DOMAIN_PASS_RATE) -> dict[str, Any]:
         rate = stats.rate_summary(self.passed, self.scored, gate=gate)
         latency = stats.distribution(self.latencies)
+        model_time = stats.distribution(self.model_times)
         return {
             "cases": self.cases,
             "scored": self.scored,
@@ -219,6 +228,15 @@ class Cell:
             "p95_total_tokens": _p95(self.total_tokens),
             "avg_cost_usd": _round_mean(self.costs, 6),
             "avg_latency_s": _round_mean(self.latencies, 2),
+            # Speed as a model choice changes it: tools' time excluded, and spread
+            # over the successes, so retries and failures count against it.
+            "model_time_per_success": (
+                round(sum(self.model_times) / self.timed_passes, 2)
+                if self.timed_passes
+                else None
+            ),
+            "median_model_time_s": model_time["median"] if model_time else None,
+            "avg_model_time_s": _round_mean(self.model_times, 2),
             "destructive_failures": self.destructive_failures,
             "run_dir": self.run_dir,
         }

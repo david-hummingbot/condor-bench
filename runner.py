@@ -495,6 +495,8 @@ def _console_events():
             else f"[red]{card.composite:.2f}[/red]"
         )
         extra = f", {card.usage['total_tokens']:,} tok" if card.usage.get("total_tokens") else ""
+        if card.model_time_s is not None:
+            extra = f", model {card.model_time_s:.1f}s + tools {card.tool_time_s or 0:.1f}s" + extra
         console.print(f"→ {status} ({card.latency_s:.1f}s{extra})")
         if card.harness_artifact:
             console.print(f"      [yellow]harness: {card.harness_artifact}[/yellow]")
@@ -1134,6 +1136,23 @@ def _print_summary(scorecards, model: str, pass_threshold: float) -> None:
         )
     else:
         console.print("  Latency:        n/a [dim](hosted endpoint — wall clock not representative)[/dim]")
+    timed = [s for s in valid if s.latency_representative and s.model_time_s is not None]
+    if timed:
+        mt = [float(s.model_time_s) for s in timed]
+        timed_passes = sum(1 for s in timed if s.passed)
+        per_success = f"{sum(mt) / timed_passes:.1f}s" if timed_passes else "n/a (no passes)"
+        console.print(
+            f"  Model time:     median {median(mt) or 0:.1f}s, p95 {percentile_95(mt) or 0:.1f}s, "
+            f"per success {per_success} [dim](tools excluded)[/dim]"
+        )
+        ttft = [float(s.ttft_s) for s in timed if s.ttft_s is not None]
+        tps = [float(s.output_tps) for s in timed if s.output_tps is not None]
+        if ttft or tps:
+            console.print(
+                "  "
+                + (f"TTFT median {median(ttft) or 0:.2f}s" if ttft else "TTFT n/a (not streamed)")
+                + (f", output {median(tps) or 0:.0f} tok/s" if tps else "")
+            )
     from bench import stats
 
     passes = sum(1 for s in valid if s.passed)
