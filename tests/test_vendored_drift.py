@@ -439,3 +439,37 @@ def test_probe_journals_are_provisioned_where_condor_resolves_them(tmp_path, mon
         "condor does not resolve the journal bench provisioned"
     )
     assert session_dir is not None, "the session has to exist too (CORR-654)"
+
+
+def test_library_ticks_show_the_skills_list_production_shows():
+    """Production ticks pass ``SkillStore(slug).list_index()``; library ticks passed "".
+
+    The list is never empty in production (the shared skill library is in it), so
+    every library tick prompt was missing a section production always has.
+    """
+    import sys
+
+    repo = _condor_repo()
+    if repo is None:
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from condor.memory import SkillStore
+
+    from bench.client import build_tick_prompt_for_case
+
+    case = _tick_case()
+    index = SkillStore(case.agent_slug or "bench").list_index()
+    assert index, "condor lists no skills for a fresh agent — this test guards nothing"
+    prompt = build_tick_prompt_for_case(case, _PYDANTIC_KEYS[0])
+    assert index in prompt
+
+
+def test_a_case_that_pins_its_skills_list_keeps_it():
+    from dataclasses import replace
+
+    from bench.client import build_tick_prompt_for_case
+
+    case = replace(_tick_case(), skills_index="- [pinned_only] the case's own list")
+    prompt = build_tick_prompt_for_case(case, _PYDANTIC_KEYS[0])
+    assert "- [pinned_only] the case's own list" in prompt

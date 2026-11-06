@@ -1278,10 +1278,26 @@ def build_tick_prompt_for_case(case: Any, model: str) -> str:
         recent_decisions=case.recent_decisions, risk_state=case.risk_state,
         tick_number=case.tick_number, agent_id=tick_agent_id(case),
         cached_routines_section="", user_memory="",
-        # Library ticks pin none; a hub agent's tick carries the index production
-        # builds for it (bench.hub_agents.skills_index).
-        skills_index=getattr(case, "skills_index", "") or "",
+        skills_index=tick_skills_index(case, slug),
     )
+
+
+def tick_skills_index(case: Any, slug: str) -> str:
+    """The skills list a production tick shows this agent.
+
+    Production passes ``SkillStore(slug).list_index()`` on every tick, and it is
+    never empty: it lists the shared skill library (~6.5 KB) even for an agent with
+    no skills of its own. Library ticks used to pass "", so every tick prompt was
+    shorter than production's, and a model never had playbooks to reach for.
+    Asked of condor fresh each tick, like production, since an agent can write a
+    skill mid-session. A case that pins its own index (hub agents do) keeps it.
+    """
+    pinned = getattr(case, "skills_index", "") or ""
+    if pinned:
+        return pinned
+    from bench.hub_agents import skills_index  # noqa: PLC0415 — keeps the import light
+
+    return skills_index(slug)
 
 
 async def run_case(case: Any, model: str) -> BenchmarkResult:
