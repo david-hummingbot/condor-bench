@@ -377,7 +377,9 @@ resolves to a **routing domain**. Every risk level runs — the level drives the
 destructive score floor, not whether the case is allowed; isolation comes from
 pointing at a test-connector-only API. Teardown runs after any trial that created
 something, whatever the case's level — a read-only case is exactly where a model
-that falls for a prompt injection creates something nobody planned for. Layer 2
+that falls for a prompt injection creates something nobody planned for. Teardown
+finishes before the next trial starts, so trials never share staging; only the
+judge's call, which reads the finished trace, runs alongside the next trial. Layer 2
 domains are namespaced `tool:` because a capability bucket like "market data" is
 not something Condor can route to — those verdicts come out of the matrix's
 per-tool axis instead.

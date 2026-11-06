@@ -23,9 +23,11 @@ import logging
 import os
 import re
 import shutil
+from contextlib import AsyncExitStack, asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from metrics.tool_accuracy import normalize_tool_name
 
@@ -520,6 +522,20 @@ async def teardown(
     if not reversible:
         return report
 
+    # One server per server for every undo, not one per call.
+    async with tool_sessions(agent_slug=agent_slug, tick=tick):
+        await _undo_in_reverse(reversible, report, model=model, agent_slug=agent_slug, tick=tick)
+    return report
+
+
+async def _undo_in_reverse(
+    reversible: list[CreatedResource],
+    report: CleanupReport,
+    *,
+    model: str,
+    agent_slug: str | None,
+    tick: bool,
+) -> None:
     # Reverse order: the last thing created is the thing nothing else depends on.
     #
     # `agent_condor_builder_002` creates an agent and then a strategy under it, and
@@ -579,8 +595,6 @@ async def teardown(
             )
             report.failed.append({**resource.as_dict(), "error": str(exc)})
 
-    return report
-
 
 def _undo_args(resource: CreatedResource, undo_action: str) -> dict[str, Any]:
     if resource.tool in _STATE_SETTERS:
@@ -623,35 +637,117 @@ async def _call_tool(
 
     Teardown must not depend on a model choosing to cooperate — especially not the
     small model whose failure to clean up is the reason cleanup exists.
+
+    Inside :func:`tool_sessions` for the same wiring, the call reuses that batch's
+    server; otherwise it boots a server for this one call.
     """
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
+    target = _server_for_tool(tool)
+    pool = _TOOL_SESSIONS.get()
+    if pool is not None and pool.wiring == (agent_slug, tick):
+        return await pool.call(target, tool, args)
+    async with ToolSessions(agent_slug=agent_slug, tick=tick) as one_shot:
+        return await one_shot.call(target, tool, args)
+
+
+def _server_params(target: str, *, agent_slug: str | None, tick: bool) -> Any:
+    from mcp import StdioServerParameters
 
     from bench.mcp_provider import build_mcp_configs
 
     configs = build_mcp_configs(agent_slug=agent_slug, tick=tick)
-    target = _server_for_tool(tool)
     config = next((c for c in configs if c.get("name") == target), None)
     if config is None:
         raise RuntimeError(f"no MCP server '{target}' in the live config set")
-
-    import os
 
     env = dict(os.environ)
     for entry in config.get("env", []) or []:
         if isinstance(entry, dict):
             env[str(entry["name"])] = str(entry["value"])
 
-    params = StdioServerParameters(
+    return StdioServerParameters(
         command=config["command"],
         args=config.get("args", []),
         cwd=config.get("cwd"),
         env=env,
     )
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+
+
+class ToolSessions:
+    """Direct MCP tool calls for one batch, one server process per server.
+
+    Booting condor's server costs 1–2s (``uv run`` plus its imports), and
+    teardown and post-condition probing each used to pay it on *every* call — a
+    builder case with two creates and a probe booted three servers back to back.
+    A batch now boots each server it actually needs once, on first use.
+
+    The wiring is unchanged — same agent_slug, same seat, same env — so a call
+    lands in exactly the stores a fresh server would have reached. A call that
+    raises (a transport failure, not a tool refusal, which comes back as a
+    result) retires that server: the next call boots a fresh one rather than
+    inheriting a broken pipe, which is the isolation one-server-per-call gave.
+
+    Sessions live on one AsyncExitStack and close together, last-opened first:
+    the stdio transports hold anyio task groups, which must exit in LIFO order
+    in the task that entered them.
+    """
+
+    def __init__(self, *, agent_slug: str | None, tick: bool = False) -> None:
+        self.wiring = (agent_slug, tick)
+        self._stack = AsyncExitStack()
+        self._live: dict[str, Any] = {}
+
+    async def __aenter__(self) -> "ToolSessions":
+        await self._stack.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        self._live.clear()
+        try:
+            await self._stack.__aexit__(*exc)
+        except Exception as close_exc:  # noqa: BLE001
+            # Shutting a server down is not a result. teardown and verify promise
+            # never to raise, and with one server per call a failed shutdown sat
+            # inside that call's own except; it must not escape the batch either.
+            # The body's own exception, if any, still propagates.
+            log.warning("closing MCP tool sessions failed: %s", close_exc)
+        return False
+
+    async def _session(self, target: str) -> Any:
+        session = self._live.get(target)
+        if session is not None:
+            return session
+        from mcp import ClientSession
+        from mcp.client.stdio import stdio_client
+
+        agent_slug, tick = self.wiring
+        params = _server_params(target, agent_slug=agent_slug, tick=tick)
+        read, write = await self._stack.enter_async_context(stdio_client(params))
+        session = await self._stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        self._live[target] = session
+        return session
+
+    async def call(self, target: str, tool: str, args: dict[str, Any]) -> Any:
+        session = await self._session(target)
+        try:
             return await session.call_tool(tool, args)
+        except Exception:
+            self._live.pop(target, None)
+            raise
+
+
+_TOOL_SESSIONS: ContextVar[ToolSessions | None] = ContextVar("bench_tool_sessions", default=None)
+
+
+@asynccontextmanager
+async def tool_sessions(*, agent_slug: str | None, tick: bool = False) -> AsyncIterator[ToolSessions]:
+    """Route every :func:`_call_tool` with this wiring, in this task, through one batch."""
+    async with ToolSessions(agent_slug=agent_slug, tick=tick) as pool:
+        token = _TOOL_SESSIONS.set(pool)
+        try:
+            yield pool
+        finally:
+            _TOOL_SESSIONS.reset(token)
 
 
 _HUMMINGBOT_TOOLS = {

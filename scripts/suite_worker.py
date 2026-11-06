@@ -175,13 +175,17 @@ def _progress_events(cases: list, model: str, trials: int, *, already: int):
 
     total = already + len(cases) * trials
     done = already
+    # Not done + 1: a trial's card is reported while the next one runs.
+    started = already
 
     def send(event: dict) -> None:
         print(PROGRESS_PREFIX + json.dumps(event, default=str), flush=True)
 
     async def trial_started(case, trial, n):
+        nonlocal started
+        started += 1
         send({"type": "case_started", "model": model, "case_id": case.id, "trial": trial,
-              "trials": n, "case_type": case.type, "case_number": done + 1, "total": total,
+              "trials": n, "case_type": case.type, "case_number": started, "total": total,
               "question": case_input_text(case)})
 
     async def trial_done(case, trial, card, response, error):

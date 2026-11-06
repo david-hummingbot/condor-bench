@@ -320,6 +320,10 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
         })
 
         done_count = 0
+        # Counted separately from done_count: a trial's card is reported while the
+        # next trial runs (bench.trials pipelines the judge), so "done + 1" would
+        # number the running trial one short.
+        started_count = 0
         for model_cfg in req.models:
             model_key = model_cfg.model_key
             norm_key = _normalize_model_key(model_key)
@@ -378,6 +382,8 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                 await _await_resume(run_id, state)
 
             async def trial_started(case, trial, n):
+                nonlocal started_count
+                started_count += 1
                 state["current_case"] = case.id
                 await _emit(run_id, {
                     "type": "case_started",
@@ -388,7 +394,7 @@ async def _run_benchmark(run_id: str, req: "RunRequest") -> None:
                     "case_type": case.type,
                     "domain": case.domain,
                     "risk_level": case.risk_level,
-                    "case_number": done_count + 1,
+                    "case_number": started_count,
                     "total": total,
                     "question": case_input_text(case),
                 })

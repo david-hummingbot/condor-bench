@@ -365,3 +365,107 @@ def test_paired_deltas_skip_harness_artifacts():
     out = paired_deltas(base, other)
     assert out["composite"]["n"] == 0
     assert out["unpaired"] == 1
+
+
+# ── Pipelined scoring ──────────────────────────────────────────────────────────
+def _pipeline_stubs(monkeypatch, *, judge_s: float = 0.2, run_s: float = 0.05):
+    import bench.client
+    import bench.market_warmup
+    import bench.probe_journal
+    import bench.scorer
+
+    log: list[str] = []
+    judging = {"now": 0, "peak": 0}
+
+    async def fake_run_case(case, model):
+        log.append(f"run {case.id}")
+        await asyncio.sleep(run_s)
+        log.append(f"ran {case.id}")
+        return SimpleNamespace(latency_s=run_s, response=f"answer {case.id}")
+
+    async def fake_score_case(case, result, baseline_latency, *, trial_idx=1):
+        judging["now"] += 1
+        judging["peak"] = max(judging["peak"], judging["now"])
+        log.append(f"judge {case.id}")
+        await asyncio.sleep(judge_s)
+        judging["now"] -= 1
+        log.append(f"judged {case.id}")
+        return _card(case.id, trial_idx=trial_idx)
+
+    async def fake_warmup(case):
+        return SimpleNamespace(ok=True, notes=[])
+
+    monkeypatch.setattr(bench.client, "run_case", fake_run_case)
+    monkeypatch.setattr(bench.scorer, "score_case", fake_score_case)
+    monkeypatch.setattr(bench.market_warmup, "ensure_markets_for_case", fake_warmup)
+    monkeypatch.setattr(bench.probe_journal, "ensure_probe_journal", lambda case: None)
+    return log, judging
+
+
+def test_the_judge_runs_alongside_the_next_trial_not_in_front_of_it(monkeypatch):
+    """A trial's judgement needs only its trace, so the next trial does not wait for it."""
+    from bench.trials import TrialEvents, run_cases
+
+    log, judging = _pipeline_stubs(monkeypatch)
+    done: list[str] = []
+
+    async def trial_done(case, trial, card, response, error):
+        done.append(case.id)
+
+    cases = [SimpleNamespace(id=f"c{i}", type="consult", risk_level="read_only") for i in (1, 2, 3)]
+    cards, responses = asyncio.run(run_cases(
+        cases, "m", SimpleNamespace(load=lambda _: None),
+        events=TrialEvents(trial_done=trial_done),
+    ))
+
+    assert log.index("run c2") < log.index("judged c1"), "trial 2 waited for trial 1's judge"
+    assert judging["peak"] == 1, "two judgements in flight would bill each other's usage"
+    assert [c.case_id for c in cards] == ["c1", "c2", "c3"], "cards land in run order"
+    assert done == ["c1", "c2", "c3"]
+    assert responses == {"c1": "answer c1", "c2": "answer c2", "c3": "answer c3"}
+
+
+def test_a_run_never_overlaps_another_run(monkeypatch):
+    """Only the judge overlaps. Two trials on staging at once would share its state."""
+    from bench.trials import run_cases
+
+    log, _ = _pipeline_stubs(monkeypatch, judge_s=0.01, run_s=0.05)
+    cases = [SimpleNamespace(id=f"c{i}", type="consult", risk_level="read_only") for i in (1, 2, 3)]
+    asyncio.run(run_cases(cases, "m", SimpleNamespace(load=lambda _: None)))
+
+    runs = [e for e in log if e.startswith(("run ", "ran "))]
+    assert runs == ["run c1", "ran c1", "run c2", "ran c2", "run c3", "ran c3"]
+
+
+def test_a_cancel_keeps_the_last_finished_trials_card(monkeypatch):
+    """Cancelled while trial 2 runs, trial 1 has finished and is mid-judgement.
+    Its card is the most expensive thing in the run to lose, so it lands."""
+    from bench.trials import run_cases
+
+    log, _ = _pipeline_stubs(monkeypatch, judge_s=0.2, run_s=5.0)
+    cases = [SimpleNamespace(id=f"c{i}", type="consult", risk_level="read_only") for i in (1, 2)]
+    cards: list = []
+
+    async def go():
+        import bench.client
+
+        first = asyncio.Event()
+        real = bench.client.run_case
+
+        async def run_case(case, model):
+            if case.id == "c2":
+                first.set()
+            return await real(case, model) if case.id == "c2" else SimpleNamespace(
+                latency_s=0.0, response="answer c1")
+
+        monkeypatch.setattr(bench.client, "run_case", run_case)
+        task = asyncio.create_task(
+            run_cases(cases, "m", SimpleNamespace(load=lambda _: None), scorecards=cards)
+        )
+        await first.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert [c.case_id for c in cards] == ["c1"]

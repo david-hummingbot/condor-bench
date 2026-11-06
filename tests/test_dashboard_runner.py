@@ -154,7 +154,7 @@ def test_the_lane_is_restored_after_a_run(monkeypatch):
     import bench.trials
 
     monkeypatch.setattr(bench.trials, "seed_mock", lambda *a, **k: None)
-    monkeypatch.setattr(bench.trials, "flag_mock_gaps", lambda card: None)
+    monkeypatch.setattr(bench.trials, "mock_gaps", lambda: [])
     _stub_run(monkeypatch, [_case("a")])
     state = _run({"env_mode": "mock"})
     assert state["status"] == "completed", state

@@ -11,7 +11,7 @@ DASHBOARD_HOST ?= 127.0.0.1
 # ── Setup ──────────────────────────────────────────────────────────────────────
 
 install:
-	uv sync
+	uv sync --extra dev
 
 # Full unit test suite (fast — no model calls).
 test-suite:

@@ -156,18 +156,22 @@ def seed_mock(faults: list | None = None, attempts: int = 2) -> str | None:
     return f"mock could not be reset to its fixture after {attempts} attempts ({last})"
 
 
-def flag_mock_gaps(card: Any) -> None:
+def mock_gaps() -> list[str]:
+    """Endpoints the mock answered 501 for since its last reset; empty if it cannot say."""
+    from bench.lanes import mock_state
+
+    try:
+        return list(mock_state().get("unhandled") or [])
+    except Exception:  # noqa: BLE001 — a dead mock is caught by the next reset
+        return []
+
+
+def apply_mock_gaps(card: Any, gaps: list[str]) -> None:
     """A trial that hit an endpoint the mock does not implement measured the mock.
 
     The model got a 501 for a call that would have worked on a real API, so the row
     is a harness artifact — excluded and named — not a model failure.
     """
-    from bench.lanes import mock_state
-
-    try:
-        gaps = mock_state().get("unhandled") or []
-    except Exception:  # noqa: BLE001 — a dead mock is caught by the next reset
-        return
     # A forbidden call is the model's whatever else the mock lacked: excluding it
     # as a harness artifact would launder an unsafe action out of the unsafe rate.
     if gaps and not card.harness_artifact and not card.forbidden_violations:
@@ -178,33 +182,75 @@ def flag_mock_gaps(card: Any) -> None:
         )
 
 
-async def run_trial(
+def flag_mock_gaps(card: Any) -> None:
+    """Read the mock's gaps now and apply them to *card*."""
+    apply_mock_gaps(card, mock_gaps())
+
+
+#: How long a cancelled or failed run waits for the last finished trial's judgement
+#: to land. The trial ran to the end — usually the costliest thing in the run — so
+#: it is worth a short wait; a judge stuck past this is dropped as before.
+REPORT_GRACE_S = 60.0
+
+
+@dataclass
+class _Ran:
+    """A trial whose run and teardown are over. Its card may still be in scoring."""
+
+    case: Any
+    trial: int
+    model: str
+    scoring: asyncio.Future | None = None  # resolves to the scored card
+    card: Any = None  # the card, when nothing was left to score
+    response: str = ""
+    error: str | None = None
+    report: Any = None  # teardown's report, if teardown ran
+    gaps: list[str] | None = None
+    trace_link: dict | None = None
+
+
+async def _score_after(prior: asyncio.Future | None, case: Any, result: Any,
+                        baseline_latency: float, trial: int) -> Any:
+    """Score one trial, once the trial before it has been recorded.
+
+    One judgement at a time: judge usage is attributed to a card as the change in
+    a running total across its judgement, so two in flight would bill each other.
+    """
+    from bench.scorer import score_case
+
+    if prior is not None:
+        await asyncio.wait([prior])  # its outcome is its own caller's to raise
+    return await score_case(case, result, baseline_latency, trial_idx=trial)
+
+
+async def _execute(
     case: Any,
     model: str,
     store: Any,
     trial: int,
-    scorecards: list,
-    responses: dict,
-    events: TrialEvents | None = None,
-) -> Any:
-    """One trial of one case: seed, run, score, record, tear down. Returns the card.
+    events: TrialEvents,
+    *,
+    after: asyncio.Future | None = None,
+) -> _Ran:
+    """Seed, run and tear down one trial, and start scoring it.
 
-    Never raises for a failed trial — a timeout, a crash or an unseedable mock each
-    become a recorded harness card — except ``asyncio.CancelledError``, which the
-    caller needs in order to stop.
+    Returns as soon as staging is clean, so the next trial can start while this
+    one is still being judged — the judge reads only the trace, never staging.
+    Never raises for a failed trial (timeouts, crashes and an unseedable mock each
+    become a harness card), except ``asyncio.CancelledError``.
+
+    ``after`` is the previous trial's recording, which this trial's scoring waits
+    for (see :func:`_score_after`).
     """
     from bench.client import recording_trace, run_case
     from bench.probe_journal import ensure_probe_journal
-    from bench.reporter import trial_key
-    from bench.scorer import harness_card, score_case, timeout_card, with_trial
+    from bench.scorer import harness_card, timeout_card, with_trial
     from bench.traces import case_span
     from config import case_timeout_s
 
-    events = events or TrialEvents()
     lane = current_lane()
-    response = ""
-    error: str | None = None
     partial = None
+    scoring: asyncio.Future | None = None
     # The teardown of the trial's full result, once started. A cancel or a late
     # exception after this point must not undo the same resources a second time.
     undo: asyncio.Future | None = None
@@ -223,9 +269,7 @@ async def run_trial(
         reason = seed_mock(getattr(case, "mock_faults", None) or [])
         if reason:
             card = harness_card(case, model, reason, trial_idx=trial)
-            scorecards.append(card)
-            await events._fire("trial_done", case, trial, card, "", reason)
-            return card
+            return _Ran(case, trial, model, card=card, error=reason)
     try:
         # Every trial gets a fresh probe journal. Kept across trials, trial 1's
         # write satisfied trial 2's "read it back" (and an earlier model's entries
@@ -239,24 +283,23 @@ async def run_trial(
                 recording_trace() as partial:
             result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
         baseline_latency = baseline.latency_s if baseline else result.latency_s
-        card = await score_case(case, result, baseline_latency, trial_idx=trial)
-        card.trace_id, card.trace_url = trace_link["trace_id"], trace_link["trace_url"]
-        if lane == "mock":
-            flag_mock_gaps(card)
-        response = result.response
-        scorecards.append(card)
-        responses[trial_key(case.id, trial)] = response
-        await events._fire("trial_done", case, trial, card, response, None)
-
+        # Read the mock's gaps before teardown: undo calls that reach an endpoint
+        # the mock lacks are bench's, not the model's, and the next reset clears them.
+        gaps = mock_gaps() if lane == "mock" else None
+        scoring = asyncio.ensure_future(
+            _score_after(after, case, result, baseline_latency, trial)
+        )
+        ran = _Ran(case, trial, model, scoring=scoring, response=result.response,
+                   gaps=gaps, trace_link=trace_link)
         # Undo what the trial created, whatever its score — an aborted half-created
         # resource still needs removing (see needs_undo for why the trace counts).
         if needs_undo(case, result):
             undo = start_undo(result)
-            report = await finish_despite_cancel(undo)
-            if report is not None:
-                await events._fire("cleanup", case, trial, report)
-        return card
+            ran.report = await finish_despite_cancel(undo)
+        return ran
     except asyncio.CancelledError:
+        if scoring is not None:
+            scoring.cancel()
         # A cancelled run (the dashboard's Cancel, a server shutdown, a suite
         # worker stopped by its runner) still owes staging the undo: an order
         # placed before the cancel otherwise stays open and blocks the next
@@ -275,28 +318,93 @@ async def run_trial(
         card = with_trial(timeout_card(case, model, limit, base_s), trial)
         error = f"timed out after {limit:.0f}s — recorded as a harness artifact"
     except Exception as exc:
+        if scoring is not None:
+            scoring.cancel()
         # Recorded, not dropped: a vanished trial makes thin evidence look complete.
         card = harness_card(
             case, model, f"harness error: {type(exc).__name__}: {exc}", trial_idx=trial
         )
         error = f"{exc} — recorded as a harness artifact"
-    scorecards.append(card)
     # A trial cut off mid-way may already have created something — a timed-out
     # `budgeted_buy` left its market order's executor running, and the next run's
-    # pre-flight refused to start. Undo what its trace got as far as recording,
-    # started before anything that can be cancelled so a cancel cannot skip it.
-    owned = undo is None and needs_undo(case, partial)
-    if owned:
-        undo = start_undo(partial)
+    # pre-flight refused to start. Undo what its trace got as far as recording.
     report = None
-    try:
-        await events._fire("trial_done", case, trial, card, response, error)
-    finally:
-        if owned:
-            report = await finish_despite_cancel(undo)
-    if report is not None:
-        await events._fire("cleanup", case, trial, report)
+    if undo is None and needs_undo(case, partial):
+        report = await finish_despite_cancel(start_undo(partial))
+    return _Ran(case, trial, model, card=card, error=error, report=report)
+
+
+async def _record(
+    ran: _Ran,
+    prior: asyncio.Future | None,
+    scorecards: list,
+    responses: dict,
+    events: TrialEvents,
+) -> Any:
+    """Wait for *ran*'s card, append it after *prior*'s, and report it. Returns the card."""
+    from bench.reporter import trial_key
+    from bench.scorer import harness_card
+
+    if prior is not None:
+        await prior  # cards land in run order
+    card, response, error = ran.card, ran.response, ran.error
+    if ran.scoring is not None:
+        try:
+            card = await ran.scoring
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            card = harness_card(
+                ran.case, ran.model, f"harness error: {type(exc).__name__}: {exc}",
+                trial_idx=ran.trial,
+            )
+            response, error = "", f"{exc} — recorded as a harness artifact"
+        else:
+            if ran.trace_link is not None:
+                card.trace_id = ran.trace_link["trace_id"]
+                card.trace_url = ran.trace_link["trace_url"]
+            if ran.gaps is not None:
+                apply_mock_gaps(card, ran.gaps)
+            responses[trial_key(ran.case.id, ran.trial)] = response
+    else:
+        response = ""
+    scorecards.append(card)
+    await events._fire("trial_done", ran.case, ran.trial, card, response, error)
+    if ran.report is not None:
+        await events._fire("cleanup", ran.case, ran.trial, ran.report)
     return card
+
+
+async def run_trial(
+    case: Any,
+    model: str,
+    store: Any,
+    trial: int,
+    scorecards: list,
+    responses: dict,
+    events: TrialEvents | None = None,
+) -> Any:
+    """One trial of one case: seed, run, tear down, score, record. Returns the card.
+
+    Never raises for a failed trial — a timeout, a crash or an unseedable mock each
+    become a recorded harness card — except ``asyncio.CancelledError``, which the
+    caller needs in order to stop.
+    """
+    events = events or TrialEvents()
+    ran = await _execute(case, model, store, trial, events)
+    return await _record(ran, None, scorecards, responses, events)
+
+
+async def _land(pending: asyncio.Future | None) -> None:
+    """Give the last trial's recording a bounded window to finish, through cancels."""
+    if pending is None or pending.done():
+        return
+    try:
+        await finish_despite_cancel(
+            asyncio.ensure_future(asyncio.wait_for(pending, REPORT_GRACE_S))
+        )
+    except BaseException:  # noqa: BLE001 — the caller is already unwinding
+        pass
 
 
 async def run_cases(
@@ -315,6 +423,12 @@ async def run_cases(
     before this is called), so trial groups pair across runs. Warmup is checked
     once per case: a failure costs every trial, and each trial gets its own skip
     card so the run's row count stays cases × trials.
+
+    Scoring is pipelined one deep. Each trial's run and teardown finish before the
+    next trial starts, so trials never share staging; the judge call — a remote
+    request that reads only the finished trace — runs alongside the next trial
+    instead of in front of it. Cards are still recorded and reported in run order,
+    one judgement at a time.
     """
     from bench.market_warmup import ensure_markets_for_case, warmup_failure_card
     from bench.probe_journal import ensure_probe_journal
@@ -324,6 +438,14 @@ async def run_cases(
     events = events or TrialEvents()
     scorecards = scorecards if scorecards is not None else []
     responses = responses if responses is not None else {}
+    last: asyncio.Future | None = None
+
+    async def settle() -> None:
+        nonlocal last
+        if last is not None:
+            pending, last = last, None
+            await pending
+
     try:
         for case in cases:
             try:
@@ -333,6 +455,7 @@ async def run_cases(
                 raise
             except Exception as exc:  # noqa: BLE001
                 # Setup failing is a harness fact about every trial of the case.
+                await settle()
                 reason = f"harness error before the run: {type(exc).__name__}: {exc}"
                 for t in range(1, trials + 1):
                     await events._fire("before_trial", case, t, trials)
@@ -341,6 +464,7 @@ async def run_cases(
                     await events._fire("trial_done", case, t, card, "", reason)
                 continue
             if not warmup.ok:
+                await settle()
                 card = warmup_failure_card(case, model, warmup)
                 for t in range(1, trials + 1):
                     await events._fire("before_trial", case, t, trials)
@@ -353,7 +477,14 @@ async def run_cases(
             for trial in range(1, trials + 1):
                 await events._fire("before_trial", case, trial, trials)
                 await events._fire("trial_started", case, trial, trials)
-                await run_trial(case, model, store, trial, scorecards, responses, events)
+                ran = await _execute(case, model, store, trial, events, after=last)
+                last = asyncio.ensure_future(
+                    _record(ran, last, scorecards, responses, events)
+                )
+        await settle()
+    except BaseException:
+        await _land(last)
+        raise
     finally:
         flush()
     return scorecards, responses
