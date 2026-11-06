@@ -84,6 +84,25 @@ def condor_path() -> Path | None:
     return candidate.resolve() if (candidate / "mcp_servers").is_dir() else None
 
 
+def condor_local_agents_root(repo: Path | None = None) -> Path | None:
+    """condor's local agent layer, resolved the way ``condor.paths`` resolves it.
+
+    ``$CONDOR_AGENTS_ROOT``, else ``$CONDOR_RUNTIME_ROOT/agents``, else
+    ``<checkout>/.condor/agents``. Everything condor writes for an agent lands
+    here — journals included (FEAT-115) — and it is where an agent bench installs
+    for a run lives. The MCP subprocesses inherit the same environment, so they
+    resolve the same directory. None without a checkout.
+    """
+    override = os.environ.get("CONDOR_AGENTS_ROOT", "").strip()
+    if override:
+        return Path(override).expanduser()
+    repo = repo or condor_path()
+    if repo is None:
+        return None
+    runtime = os.environ.get("CONDOR_RUNTIME_ROOT", "").strip()
+    return (Path(runtime).expanduser() if runtime else repo / ".condor") / "agents"
+
+
 def _git(repo: Path, *args: str) -> str | None:
     """Run a git command in ``repo``, or None if it fails."""
     import subprocess
@@ -247,7 +266,9 @@ def summary_counts_for_matrix(summary: dict) -> bool:
         return False
     if summary.get("include_in_matrix") is True:
         return True
-    if run_type in ("suite", "custom_prompt", "custom", "custom-prompt"):
+    # A hub agent's run is about that agent: its cases are generated, carry no
+    # reference answer, and its domain is a bench_hub_ install, not a config key.
+    if run_type in ("suite", "custom_prompt", "custom", "custom-prompt", "hub_agent"):
         return False
     if summary.get("suite_id"):
         return False

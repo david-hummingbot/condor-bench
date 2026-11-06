@@ -430,6 +430,55 @@ evidence, not a routing input — the router still reads the per-tool axis.
 
 ---
 
+## Benchmarking one agent (Botcamp hub or a bundle)
+
+The case library answers "which model for this routing domain". A hub user asks
+something narrower: which model can run **this** agent. `runner.py hub` reads the
+agent itself and answers that.
+
+```bash
+uv run python runner.py hub hub:churn                      # estimate only, no runs
+uv run python runner.py hub hub:churn --show-cases         # what would run
+uv run python runner.py hub hub:churn -m ollama:qwen3:14b -m claude-code:sonnet
+uv run python runner.py hub ./my-agent.condor-agent.json -m openrouter:x/y
+uv run python runner.py hub ../condor/.condor/agents/my_agent -m openrouter:x/y
+```
+
+A source is `hub:<slug>[@version]` (fetched with condor's Botcamp sign-in, or
+`BENCH_HUB_TOKEN`, and verified against the hub's digest), a bundle file (condor's
+`.condor-agent.json` or a hub zip), or an agent directory.
+
+**Estimate first, for free.** The matrix's call-by-call tool scores (`tool_use`),
+over the tools this agent is granted, weighted by how often its files name each.
+*Coverage* is the share of that weight with any evidence. A low coverage means run
+it.
+
+**Then run it.** The agent is installed into condor's local layer as
+`bench_hub_<slug>` (git-ignored, removed afterwards), and the cases come from what
+it ships:
+
+| Case | From | Checked without a reference answer |
+|---|---|---|
+| skill | each skill, when its grant can read skills | it opened that skill (`manage_skill` read, by name); capital actions forbidden |
+| state check | one per agent | capital actions forbidden; judge and API validity |
+| loop | each loop: its playbook, `default_config`, limits and skills index, first tick | `dry_run`, capital actions forbidden; `--execute` runs it for real with teardown |
+
+Nothing invents a reference answer. Each case is scored on the judge, whether
+its calls worked, model time, and forbidden capital actions (a hard gate, as
+everywhere). Cases get the harness maximum ceiling (`--timeout` to change it),
+since they have no baseline. Runs are saved with `run_type: hub_agent` and stay
+out of the matrix and router.
+
+What bench will not do, and says so in the run's findings:
+- **Run the agent's code.** Routines and controllers are `.py` that would execute
+  inside condor, and bench grants no execution consent. Anything they would
+  pre-compute for a tick is absent, and the tick fetches with its tools instead.
+- **Test a skill the agent cannot open.** Condor enforces the `tools:` grant on
+  every seat, so an agent that ships skills but no `manage_skill` cannot read
+  them on a real install. That is reported as a finding about the agent.
+
+---
+
 ## Suites (Condor branch A/B)
 
 The **Suites** tab is the primary UI for durable, comparable benchmarks. Create

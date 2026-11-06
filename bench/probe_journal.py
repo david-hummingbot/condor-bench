@@ -45,9 +45,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from config import condor_path
+from config import condor_local_agents_root, condor_path
 
 BENCH_PREFIX = "bench_"
+
+# condor.agents.strategy.LOOPS_DIRNAME and condor.agents.journal's first
+# SESSION_DIRNAMES entry: where a strategy lives and where its sessions go.
+LOOPS_DIRNAME = "loops"
+SESSIONS_DIRNAME = "sessions"
 
 # Placeholder a case uses instead of spelling out the composite agent_id.
 AGENT_ID_TOKEN = "{agent_id}"
@@ -162,7 +167,16 @@ def probe_strategy_dir(case: Any) -> Path | None:
     repo = condor_path()
     if repo is None:
         return None
-    return repo / "agents" / slug / "strategies" / case_id
+    root = condor_local_agents_root(repo)
+    # Where condor resolves "{slug}.{case_id}_N" from: the *local* agent layer
+    # (journals are this install's, FEAT-115) under ``loops/`` — what
+    # ``condor.agents.sessions_index.strategy_dir_for_run_key`` composes. Bench
+    # provisioned ``<checkout>/agents/<slug>/strategies/<case_id>`` from before
+    # both moves, so it reset and seeded a directory condor no longer reads:
+    # writes landed in a stale local journal that never reset between trials,
+    # and read cases read that instead of the seed. tests/test_vendored_drift.py
+    # holds this to condor's own resolver.
+    return root / slug / LOOPS_DIRNAME / case_id
 
 
 def _journal_manager_cls():
@@ -205,7 +219,7 @@ def _seed_journal(case: Any, strategy_dir: Path) -> str | None:
         return None
     try:
         JournalManager = _journal_manager_cls()
-        session_dir = strategy_dir / "sessions" / f"session_{PROBE_SESSION}"
+        session_dir = strategy_dir / SESSIONS_DIRNAME / f"session_{PROBE_SESSION}"
         jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=strategy_dir)
         for (tick, action, reasoning), stamp in zip(_SEED_DECISIONS, _SEED_TIMESTAMPS):
             jm.append_action(tick, action, reasoning)
@@ -255,7 +269,10 @@ def ensure_probe_journal(case: Any) -> str | None:
         if not target.resolve().is_relative_to(agent_dir.resolve()):
             return f"refused to reset probe journal {target} — outside {agent_dir.name}"
         shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
+    # The session too, not just the strategy: condor refuses to materialise a
+    # session that is not on disk (CORR-654), so without it a write case's
+    # journal still answered "no journal available for this agent".
+    (target / SESSIONS_DIRNAME / f"session_{PROBE_SESSION}").mkdir(parents=True, exist_ok=True)
     note = f"provisioned probe journal {target.parent.parent.name}/{target.name}"
     if should_seed(case):
         seeded = _seed_journal(case, target)

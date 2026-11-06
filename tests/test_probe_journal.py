@@ -16,12 +16,18 @@ def _case(**over):
 
 def _checkout(monkeypatch, tmp_path):
     (tmp_path / "agents").mkdir()
+    monkeypatch.delenv("CONDOR_AGENTS_ROOT", raising=False)
+    monkeypatch.delenv("CONDOR_RUNTIME_ROOT", raising=False)
     monkeypatch.setattr(probe_journal, "condor_path", lambda: tmp_path)
     return tmp_path
 
 
 def test_the_dir_matches_what_condor_resolves(monkeypatch, tmp_path):
-    """condor splits `{slug}.{strategy}_{n}` to agents/<slug>/strategies/<strategy>.
+    """condor splits `{slug}.{strategy}_{n}` to <local root>/<slug>/loops/<strategy>.
+
+    The local layer, not the shipped tree (FEAT-115), and ``loops/`` (it was
+    ``strategies/``). tests/test_vendored_drift.py checks this against condor's
+    own resolver.
 
     `bench.client.tick_agent_id` builds the id as `f"{slug}.{case.id}_1"`, so the
     strategy directory is named for the case id. Get this wrong and the write
@@ -29,7 +35,7 @@ def test_the_dir_matches_what_condor_resolves(monkeypatch, tmp_path):
     """
     repo = _checkout(monkeypatch, tmp_path)
     assert probe_strategy_dir(_case()) == (
-        repo / "agents" / "bench_tick_risk_blocked" / "strategies" / "t003"
+        repo / ".condor" / "agents" / "bench_tick_risk_blocked" / "loops" / "t003"
     )
 
 
@@ -56,7 +62,7 @@ def test_each_call_starts_a_fresh_journal(monkeypatch, tmp_path):
     case = _case()
     ensure_probe_journal(case)
     journal = probe_strategy_dir(case) / "sessions" / "session_1" / "journal.md"
-    journal.parent.mkdir(parents=True)
+    journal.parent.mkdir(parents=True, exist_ok=True)
     journal.write_text("# Journal\n- tick#1 held\n")
     (probe_strategy_dir(case) / "learnings.md").write_text("- a previous trial's learning\n")
 
@@ -267,25 +273,17 @@ def test_a_read_case_is_seeded_where_read_recent_looks(tmp_path, monkeypatch):
     if repo is None or not (repo / "condor" / "agents" / "journal.py").is_file():
         pytest.skip("no condor checkout — seeding needs condor's JournalManager")
 
-    # Provision into a throwaway strategy id under the real checkout, then remove
-    # it: the seed's format has to come from condor's own writer.
-    import shutil
-
+    # condor's own writer, into a throwaway agents root: the seed's format has to
+    # come from condor, and nothing under the real checkout is touched.
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
     case = _read_case(id="bench_probe_seed_selftest")
     target = probe_strategy_dir(case)
-    try:
-        note = ensure_probe_journal(case)
-        assert "seeded" in note, note
-        session = target / "sessions" / "session_1"
-        assert list((session / "snapshots").glob("snapshot_*.md")), "no snapshots"
-        assert (session / "journal.md").is_file()
-        assert (target / "learnings.md").is_file()
-    finally:
-        if target and target.is_dir():
-            shutil.rmtree(target)
-            parent = target.parent
-            if parent.is_dir() and not any(parent.iterdir()):
-                shutil.rmtree(parent.parent)
+    note = ensure_probe_journal(case)
+    assert "seeded" in note, note
+    session = target / "sessions" / "session_1"
+    assert list((session / "snapshots").glob("snapshot_*.md")), "no snapshots"
+    assert (session / "journal.md").is_file()
+    assert (target / "learnings.md").is_file()
 
 
 # ── The shipped dataset ────────────────────────────────────────────────────────

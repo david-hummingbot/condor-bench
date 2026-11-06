@@ -1421,6 +1421,116 @@ def promote(
         raise typer.Exit(1)
 
 
+@app.command()
+def hub(
+    source: str = typer.Argument(
+        ..., help="hub:<slug>[@version], a bundle file (.condor-agent.json or hub zip), or an agent directory"
+    ),
+    model: list[str] = typer.Option(
+        [], "--model", "-m", help="Model to run the agent's cases on (repeatable). None: estimate only"
+    ),
+    trials: int = typer.Option(1, help="Runs per case"),
+    execute: bool = typer.Option(
+        False, "--execute",
+        help="Run the agent's loops for real (loop mode, teardown after). Default: dry_run, capital actions forbidden",
+    ),
+    show_cases: bool = typer.Option(False, "--show-cases", help="Print the generated cases and stop"),
+    timeout: Optional[float] = typer.Option(
+        None, help="Per-case ceiling in seconds (default: the harness maximum; these cases have no baseline)"
+    ),
+) -> None:
+    """Benchmark one agent — from the Botcamp hub or a bundle — on any model."""
+    import uuid
+
+    from bench.hub_agents import (
+        HubError, estimate, generate_cases, install, load_agent, surface_tools, uninstall,
+    )
+    from bench.matrix import build_matrix
+    from config import env_mode
+
+    try:
+        bundle = load_agent(source)
+    except (HubError, OSError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    grant = ", ".join(bundle.tools) or "full surface (no tools: grant)"
+    console.print(f"[bold]{bundle.name or bundle.slug}[/bold] v{bundle.version}  [dim]{bundle.source}[/dim]")
+    console.print(f"  tools:  {grant}")
+    console.print(f"  skills: {', '.join(bundle.skills) or '—'}   loops: {', '.join(bundle.loops) or '—'}")
+    for finding in bundle.findings():
+        console.print(f"  [yellow]![/yellow] {finding}")
+
+    # Estimate first: free, from the call-by-call tool scores saved runs carry.
+    estimates = estimate(bundle, build_matrix(lane=env_mode("live")), surface_tools())
+    if estimates:
+        table = Table(title="Estimate from existing tool evidence (no runs)")
+        table.add_column("Model")
+        table.add_column("First-try", justify="right")
+        table.add_column("Coverage", justify="right")
+        table.add_column("Weakest of its tools")
+        for e in estimates:
+            table.add_row(
+                e.model,
+                "—" if e.score is None else f"{e.score:.0%}",
+                f"{e.coverage:.0%}",
+                ", ".join(f"{t} {r:.0%}" for t, r in e.weakest) or "—",
+            )
+        console.print(table)
+        console.print(
+            "[dim]First-try = the matrix's tool_use first-try rate over this agent's tools, "
+            "weighted by how often its files name each. Coverage = the share of that weight "
+            "with any evidence; a low one means run it.[/dim]"
+        )
+    else:
+        console.print("[dim]No tool evidence in the matrix yet — `runner.py matrix` after a test run.[/dim]")
+
+    if not model and not show_cases:
+        return
+
+    slug = install(bundle)
+    try:
+        cases = generate_cases(bundle, slug, execute=execute, timeout_s=timeout)
+        if show_cases:
+            for c in cases:
+                ask = c.scenario_name if c.type == "tick" else c.question
+                console.print(f"  [cyan]{c.id}[/cyan] ({c.type}, {c.risk_level})\n    {ask[:160]}")
+            return
+        from bench.baseline import BaselineStore
+        from bench.manifest import build_manifest
+        from bench.reporter import save_run
+        from bench.staging_health import StagingUnhealthy, assert_ready
+        from config import PASS_THRESHOLD
+
+        _enter_lane("live")
+        try:
+            assert_ready()
+        except StagingUnhealthy as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        store = BaselineStore()
+        prompts = {c.id: (c.scenario_name if c.type == "tick" else c.question) for c in cases}
+        for key in model:
+            run_id = uuid.uuid4().hex[:8]
+            console.print(
+                f"\nRunning [bold]{bundle.slug}[/bold] on [bold]{key}[/bold]: "
+                f"{len(cases)} case(s) × {trials}"
+            )
+            scorecards, responses = asyncio.run(_run_cases(cases, key, store, trials))
+            pin = build_manifest(
+                run_type="hub_agent", case_ids=[c.id for c in cases], models=[key],
+                shared_loaded=True, trials=trials, cases=cases,
+            )
+            # Kept out of the matrix and router (config.summary_counts_for_matrix).
+            pin["run_type"] = "hub_agent"
+            pin["hub_agent"] = {**bundle.as_dict(), "installed_as": slug, "execute": execute}
+            run_dir = save_run(key, scorecards, responses, run_id, prompts=prompts, extra_summary=pin)
+            console.print(f"[bold]Run saved:[/bold] {run_dir}")
+            _print_summary(scorecards, key, PASS_THRESHOLD)
+    finally:
+        uninstall(slug)
+
+
 @app.command("nim-smoke")
 def nim_smoke(
     models: Optional[str] = typer.Argument(
