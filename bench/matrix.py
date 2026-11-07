@@ -465,7 +465,7 @@ def build_matrix(
 
             excluded = _exclusion_reason(case) is not None
             for outcome in case_outcomes(case, expected=_case_tools(case)):
-                if owner.get(("tool_use", outcome.tool, model)) != run.run_dir:
+                if _tool_use_owner(owner, outcome.tool, model) != run.run_dir:
                     continue
                 use_cell = tool_use.setdefault(outcome.tool, {}).setdefault(
                     model, ToolUseCell(run_dir=run.run_dir)
@@ -506,14 +506,25 @@ def _claims(case: dict, model: str) -> list[tuple[str, str, str]]:
         ("overall", "all", model),
         ("domain", _case_domain(case), model),
         *(("tool", tool, model) for tool in _case_tools(case)),
-        *(("tool_use", tool, model) for tool in _tools_touched(case)),
+        *(("tool_use", tool, model) for tool in _case_tools(case)),
+        *(("tool_use_called", tool, model) for tool in _tools_called(case)),
     ]
 
 
-def _tools_touched(case: dict) -> list[str]:
-    """Tools the case expected or the model called — what bench.tool_use reads."""
-    called = {normalize_tool_name(str(t)) for t in case.get("tool_calls") or []}
-    return sorted(set(_case_tools(case)) | called)
+def _tools_called(case: dict) -> list[str]:
+    """Tools the model called in this case, expected or not."""
+    return sorted({normalize_tool_name(str(t)) for t in case.get("tool_calls") or []})
+
+
+def _tool_use_owner(owner: dict, tool: str, model: str) -> str | None:
+    """The run that owns a ``tool_use`` cell.
+
+    The newest run that *expected* the tool, else the newest that only called it.
+    Claiming on any call let a run that touched a tool once, unprompted (a tick
+    reaching for get_market_data), take the cell from an older run of ten cases
+    that asked for it — blanking first-try correct for that tool.
+    """
+    return owner.get(("tool_use", tool, model)) or owner.get(("tool_use_called", tool, model))
 
 
 UNCLASSIFIED = "unclassified"

@@ -191,3 +191,69 @@ def test_the_trial_runner_honours_a_cases_own_ceiling(monkeypatch):
     cards: list = []
     asyncio.run(run_trial(case, "m", SimpleNamespace(load=lambda _: None), 1, cards, {}))
     assert cards[0].harness_artifact and "0s" in cards[0].harness_artifact
+
+
+def test_a_home_another_live_run_installed_is_left_alone(tmp_path, monkeypatch):
+    """Two `runner.py hub` runs of one agent: the second must not delete the
+    files the first is running on, and neither's teardown removes the other's."""
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
+    bundle = hub.parse_zip(_zip(), slug="test_trader")
+    slug = hub.install(bundle)
+    marker = tmp_path / slug / hub._MARKER
+    other = {**json.loads(marker.read_text()), "pid": 4242}
+    marker.write_text(json.dumps(other))
+
+    monkeypatch.setattr(hub, "_pid_alive", lambda pid: True)
+    with pytest.raises(hub.HubError, match="another run"):
+        hub.install(bundle)
+    assert hub.uninstall(slug) is False and (tmp_path / slug / "AGENT.md").is_file()
+
+    monkeypatch.setattr(hub, "_pid_alive", lambda pid: False)
+    assert hub.install(bundle) == slug, "a dead run's home is reclaimed"
+    assert hub.uninstall(slug) is True
+
+
+def test_a_prefixed_manage_skill_grant_still_reads_skills():
+    md = AGENT_MD.replace("manage_skill", "mcp__condor__manage_skill")
+    bundle = hub.parse_zip(_zip({**FILES, "AGENT.md": md}), slug="t")
+    assert bundle.reads_skills
+    assert not any("manage_skill" in f for f in bundle.findings())
+    assert any(c.category == "hub_skill" for c in hub.generate_cases(bundle, "bench_hub_t"))
+    assert "manage_skill" in hub.tool_weights(bundle, [])
+
+
+@pytest.mark.parametrize("doc", [
+    {"files": ["AGENT.md"]},
+    {"files": {"AGENT.md": "x"}},
+    {"version": "v2"},
+    {"agent": "test_trader"},
+])
+def test_a_malformed_bundle_is_a_hub_error(doc):
+    base = json.loads(_json_bundle())
+    with pytest.raises(hub.HubError):
+        hub.parse_bundle(json.dumps({**base, **doc}))
+
+
+def test_a_case_ceiling_is_held_to_the_harness_maximum():
+    from config import CASE_TIMEOUT_MAX_S, CASE_TIMEOUT_MIN_S, case_ceiling_s
+
+    assert case_ceiling_s(7200, None) == CASE_TIMEOUT_MAX_S
+    assert case_ceiling_s(300, None) == 300
+    assert case_ceiling_s(0, None) == CASE_TIMEOUT_MIN_S
+    assert case_ceiling_s(None, None) == CASE_TIMEOUT_MIN_S
+
+
+def test_an_unavailable_skills_index_warns(monkeypatch, tmp_path):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_condor(name, *a, **kw):
+        if name.startswith("condor.memory"):
+            raise ImportError("no condor here")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(hub, "condor_path", lambda: tmp_path)
+    monkeypatch.setattr(builtins, "__import__", no_condor)
+    with pytest.warns(RuntimeWarning, match="skills index is unavailable"):
+        assert hub.skills_index("bench_x") == ""

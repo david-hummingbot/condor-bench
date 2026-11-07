@@ -37,8 +37,14 @@ from metrics.tool_accuracy import normalize_tool_name
 
 
 def _ok(row: dict[str, Any]) -> bool:
-    """A recorded response that worked: no error, and it scored above zero."""
-    return not row.get("error") and float(row.get("score") or 0.0) > 0.0
+    """A recorded response that worked: the API answered without an error.
+
+    Not the validity ``score``: that is zero for an empty result (``nonempty``
+    defaults on) and for a failed case assertion, and an empty executor list on
+    an idle account is a call that worked. Whether the data was what the case
+    wanted is the case's verdict, not this tool's execution.
+    """
+    return not row.get("error")
 
 
 def _args_ok(detail: dict[str, Any] | None) -> bool | None:

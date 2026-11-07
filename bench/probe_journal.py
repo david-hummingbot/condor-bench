@@ -2,7 +2,7 @@
 
 condor resolves a journal from the agent_id the model passes:
 ``resolve_agent_dirs`` splits ``"{agent_slug}.{strategy_slug}_{n}"`` into
-``agents/{agent_slug}/strategies/{strategy_slug}/sessions/session_{n}`` and
+``<local agents root>/{agent_slug}/loops/{strategy_slug}/sessions/session_{n}`` and
 returns ``(None, None)`` when the *strategy* directory is not there
 (``condor/agents/journal.py``). Every ``trading_agent_journal_write`` then answers
 ``{"error": "no journal available for this agent"}`` however the model behaved.

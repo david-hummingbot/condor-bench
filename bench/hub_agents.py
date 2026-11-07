@@ -44,6 +44,7 @@ import os
 import re
 import shutil
 import stat
+import warnings
 import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
@@ -135,7 +136,7 @@ class AgentBundle:
         """Whether the agent can open its skills: condor enforces the grant on
         every seat (``toolsets.seat_mutes``), so without ``manage_skill`` in it
         the playbooks the tick prompt lists are out of reach."""
-        return not self.tools or "manage_skill" in self.tools
+        return not self.tools or "manage_skill" in {_grant_name(t) for t in self.tools}
 
     @property
     def code_files(self) -> list[str]:
@@ -177,8 +178,11 @@ def parse_bundle(data: bytes | str, *, source: str = "") -> AgentBundle:
         raise HubError(f"not a bundle (not JSON): {exc}") from None
     if not isinstance(doc, dict) or doc.get("kind") != BUNDLE_KIND:
         raise HubError(f"not a {BUNDLE_KIND} document")
+    entries = doc.get("files") or []
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        raise HubError("bundle 'files' must be a list of {path, text, sha256} objects")
     files: dict[str, str] = {}
-    for entry in doc.get("files") or []:
+    for entry in entries:
         path, text = str(entry.get("path", "")), str(entry.get("text", ""))
         _safe_rel(path)
         if hashlib.sha256(text.encode()).hexdigest() != str(entry.get("sha256", "")).lower():
@@ -187,13 +191,18 @@ def parse_bundle(data: bytes | str, *, source: str = "") -> AgentBundle:
     if "AGENT.md" not in files:
         raise HubError("bundle carries no AGENT.md")
     agent = doc.get("agent") or {}
+    if not isinstance(agent, dict):
+        raise HubError("bundle 'agent' must be an object")
+    version = doc.get("version") or 1
+    if isinstance(version, bool) or not str(version).isdigit():
+        raise HubError(f"bundle version must be a whole number, not {version!r}")
     return AgentBundle(
         slug=str(agent.get("slug") or "agent"),
         name=str(agent.get("name") or ""),
         description=str(agent.get("description") or ""),
         when_to_consult=str(agent.get("when_to_consult") or ""),
         files=files,
-        version=int(doc.get("version") or 1),
+        version=int(version),
         digest=hashlib.sha256(raw).hexdigest(),
         source=source,
     )
@@ -365,31 +374,73 @@ def install(bundle: AgentBundle) -> str:
     """Write the bundle's text files under a ``bench_hub_`` home. Returns the slug.
 
     ``.py`` files are not written (see the module docstring). An existing home of
-    the same slug is replaced only if bench wrote it.
+    the same slug is replaced only if bench wrote it and the run that wrote it is
+    gone: the marker records that run's pid, so a second ``runner.py hub`` of the
+    same agent refuses rather than deleting the files the first is running on.
     """
     slug = install_slug(bundle)
     home = local_agents_root() / slug
+    holder = _holder_pid(home)
+    if holder is not None and holder != os.getpid() and _pid_alive(holder):
+        raise HubError(
+            f"{slug} is installed by another run still in progress (pid {holder}) — "
+            "wait for it, or benchmark the models in one `runner.py hub -m A -m B`"
+        )
     uninstall(slug)
-    if home.exists():
-        raise HubError(f"{home} exists and was not written by bench — refusing to touch it")
+    try:
+        home.mkdir(parents=True)
+    except FileExistsError:
+        raise HubError(
+            f"{home} exists and was not written by bench (or another run just took "
+            "it) — refusing to touch it"
+        ) from None
+    # The marker first, so the home is claimed before any file lands in it.
+    (home / _MARKER).write_text(json.dumps({**bundle.as_dict(), "pid": os.getpid()}, indent=2))
     for rel, text in bundle.files.items():
         if rel.endswith(".py"):
             continue
         target = home / _safe_rel(rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
-    (home / _MARKER).write_text(json.dumps(bundle.as_dict(), indent=2))
     return slug
 
 
 def uninstall(slug: str) -> bool:
-    """Remove a home bench installed. Anything else is left alone."""
+    """Remove a home bench installed, unless another live run holds it.
+
+    Anything bench did not write is left alone, and so is a home a different,
+    still-running process installed — its cases are using those files.
+    """
     if not slug.startswith(INSTALL_PREFIX):
         return False
     home = local_agents_root() / slug
     if not (home / _MARKER).is_file():
         return False
+    holder = _holder_pid(home)
+    if holder is not None and holder != os.getpid() and _pid_alive(holder):
+        return False
     shutil.rmtree(home)
+    return True
+
+
+def _holder_pid(home: Path) -> int | None:
+    """The pid recorded by the run that installed *home*, if any."""
+    try:
+        pid = json.loads((home / _MARKER).read_text()).get("pid")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return pid if isinstance(pid, int) and pid > 0 else None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, owned by someone else
+        return True
+    except OSError:
+        return False
     return True
 
 
@@ -412,7 +463,8 @@ def generate_cases(
     from bench.dataset import AgentCase, TickCase
     from config import CASE_TIMEOUT_MAX_S
 
-    timeout_s = timeout_s or CASE_TIMEOUT_MAX_S
+    # Held to the harness maximum again at run time (config.case_ceiling_s).
+    timeout_s = CASE_TIMEOUT_MAX_S if timeout_s is None else min(timeout_s, CASE_TIMEOUT_MAX_S)
 
     base = f"hub_{slug[len(INSTALL_PREFIX):]}"
     task = {"category": "hub_agent", "split": "dev", "source": bundle.source,
@@ -502,7 +554,15 @@ def skills_index(slug: str) -> str:
         from condor.memory import SkillStore  # noqa: PLC0415
 
         return SkillStore(slug).list_index()
-    except Exception:
+    except Exception as exc:
+        # Still "" so a run goes on, but never silently: an empty index is the
+        # prompt production never sends, and every tick in the run is shorter for it.
+        warnings.warn(
+            f"condor's skills index is unavailable ({type(exc).__name__}: {exc}) — "
+            "tick prompts carry no [AVAILABLE SKILLS] list, unlike production",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return ""
 
 
@@ -546,11 +606,9 @@ def tool_weights(bundle: AgentBundle, surface: list[str]) -> dict[str, float]:
     tools it actually uses. A granted tool its files never name still counts
     once — the agent can call it.
     """
-    from metrics.tool_accuracy import normalize_tool_name
-
     text = "\n".join(t for p, t in bundle.files.items() if not p.endswith(".py"))
     mentions = Counter(re.findall(r"\b([a-z][a-z0-9_]{2,})\b", text))
-    granted = {normalize_tool_name(t) for t in bundle.tools}
+    granted = {_grant_name(t) for t in bundle.tools}
     pool = granted or set(surface)
     weights = {t: float(mentions.get(t, 0)) for t in pool}
     if granted:
@@ -596,6 +654,14 @@ def surface_tools() -> list[str]:
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
+def _grant_name(tool: Any) -> str:
+    """A ``tools:`` entry as condor reads it: the bare tool name, whatever the
+    prefix (``canonical_tool_name(t).rsplit("__", 1)[-1]`` in condor.agents.agent)."""
+    from metrics.tool_accuracy import normalize_tool_name
+
+    return normalize_tool_name(str(tool).strip()).rsplit("__", 1)[-1]
+
+
 def _frontmatter(text: str) -> dict[str, Any]:
     if not text.startswith("---"):
         return {}

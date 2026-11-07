@@ -1233,7 +1233,7 @@ def tick_agent_id(case: Any) -> str:
     as an expected call and could never earn its live validity.
 
     The id being well-formed is necessary but not sufficient: the strategy directory has
-    to exist too (``agents/{slug}/strategies/{case_id}/sessions/session_1``). Until the
+    to exist too (``<local agents root>/{slug}/loops/{case_id}/sessions/session_1``). Until the
     probe agents are provisioned the write still fails — but now with a resolvable id, so
     the failure is about provisioning rather than about a malformed string, and
     :func:`bench.scorer._detect_harness_artifact` can name it.

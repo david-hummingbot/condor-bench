@@ -1446,7 +1446,14 @@ def hub(
         HubError, estimate, generate_cases, install, load_agent, surface_tools, uninstall,
     )
     from bench.matrix import build_matrix
-    from config import env_mode
+    from config import CASE_TIMEOUT_MAX_S, env_mode
+
+    if timeout is not None and not 0 < timeout <= CASE_TIMEOUT_MAX_S:
+        console.print(
+            f"[red]--timeout must be above 0 and at most {CASE_TIMEOUT_MAX_S:.0f}s "
+            "(the harness maximum).[/red]"
+        )
+        raise typer.Exit(2)
 
     try:
         bundle = load_agent(source)
@@ -1488,7 +1495,11 @@ def hub(
     if not model and not show_cases:
         return
 
-    slug = install(bundle)
+    try:
+        slug = install(bundle)
+    except HubError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
     try:
         cases = generate_cases(bundle, slug, execute=execute, timeout_s=timeout)
         if show_cases:
@@ -1516,14 +1527,18 @@ def hub(
                 f"\nRunning [bold]{bundle.slug}[/bold] on [bold]{key}[/bold]: "
                 f"{len(cases)} case(s) × {trials}"
             )
+            # As `test` does: an ACP model must not start from its last run's notes.
+            memory_reset = _reset_acp_memory(key, run_id)
             scorecards, responses = asyncio.run(_run_cases(cases, key, store, trials))
             pin = build_manifest(
                 run_type="hub_agent", case_ids=[c.id for c in cases], models=[key],
                 shared_loaded=True, trials=trials, cases=cases,
             )
-            # Kept out of the matrix and router (config.summary_counts_for_matrix).
-            pin["run_type"] = "hub_agent"
+            # run_type=hub_agent keeps it out of the matrix and router
+            # (config.summary_counts_for_matrix).
             pin["hub_agent"] = {**bundle.as_dict(), "installed_as": slug, "execute": execute}
+            if memory_reset is not None:
+                pin["agent_memory_reset"] = memory_reset.as_dict()
             run_dir = save_run(key, scorecards, responses, run_id, prompts=prompts, extra_summary=pin)
             console.print(f"[bold]Run saved:[/bold] {run_dir}")
             _print_summary(scorecards, key, PASS_THRESHOLD)

@@ -497,6 +497,19 @@ CASE_TIMEOUT_MIN_S = 240.0
 CASE_TIMEOUT_MAX_S = 600.0
 
 
+def case_ceiling_s(case_timeout_s_: float | None, baseline_latency_s: float | None) -> float:
+    """A case's wall-clock ceiling: its own, when it sets one, else the baseline-sized one.
+
+    A case's own ceiling (generated hub cases have no baseline to size from) is
+    held to the same maximum, so no case can keep a hung session on the lane for
+    longer than any library case could. Zero or less is not a ceiling and falls
+    back to the baseline-sized one.
+    """
+    if case_timeout_s_ is not None and case_timeout_s_ > 0:
+        return min(CASE_TIMEOUT_MAX_S, float(case_timeout_s_))
+    return case_timeout_s(baseline_latency_s)
+
+
 def case_timeout_s(baseline_latency_s: float | None) -> float:
     """Wall-clock ceiling for one case, from its own baseline.
 

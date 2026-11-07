@@ -124,3 +124,48 @@ def test_the_matrix_carries_a_tool_use_axis(tmp_path, monkeypatch):
     cell = data["tool_use"]["get_prices"]["ollama:m:3b"]
     assert cell["expected"] == 1, "the infra row is not evidence"
     assert cell["first_try_rate"] == 1.0
+
+
+def test_an_empty_answer_is_a_call_that_worked():
+    """Live validity scores an empty result 0 (``nonempty`` defaults on); an empty
+    executor list on an idle account is still a call the API answered."""
+    empty = {"tool": "list_executors", "score": 0.0, "error": None, "empty": True}
+    o = _by_tool(_case(["list_executors"], ["list_executors"], [empty]))["list_executors"]
+    assert o.responses == [True] and o.first_try_correct is True
+
+
+def _write_run(root, name, stamp, cases):
+    import json
+
+    run = root / name
+    (run / "cases").mkdir(parents=True)
+    (run / "summary.json").write_text(json.dumps({
+        "model": "ollama:m:3b", "timestamp": stamp,
+        "manifest": {"env_mode": "live"}, "source": "cli",
+    }))
+    for case in cases:
+        (run / "cases" / f"{case['case_id']}.json").write_text(json.dumps(case))
+
+
+def test_an_unprompted_call_in_a_newer_run_does_not_take_the_cell(tmp_path, monkeypatch):
+    import bench.matrix as matrix
+
+    _write_run(tmp_path, "r1_tools", "2026-11-06T00:00:00Z", [
+        _case(["get_prices"], ["get_prices"], [_resp("get_prices")], case_id=f"t{i}",
+              composite=0.9, passed=True, domain="tool:market_data")
+        for i in range(3)
+    ])
+    _write_run(tmp_path, "r2_tick", "2026-11-07T00:00:00Z", [
+        _case(["get_portfolio_overview"], ["get_portfolio_overview", "get_prices"],
+              [_resp("get_portfolio_overview"), _resp("get_prices")], case_id="k",
+              composite=0.9, passed=True, domain="tick:x"),
+    ])
+    monkeypatch.setattr(matrix, "_dataset_expected_tools", lambda: {})
+    monkeypatch.setattr(matrix, "_dataset_domains", lambda: {})
+
+    data = matrix.build_matrix(results_dir=tmp_path, models_path=tmp_path / "none.json")
+    cell = data["tool_use"]["get_prices"]["ollama:m:3b"]
+    assert cell["run_dir"].endswith("r1_tools"), "the run that asked for the tool owns it"
+    assert (cell["expected"], cell["first_try_rate"]) == (3, 1.0)
+    # A tool only ever called unprompted still gets a cell from that run.
+    assert data["tool_use"]["get_portfolio_overview"]["ollama:m:3b"]["expected"] == 1

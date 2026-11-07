@@ -4,9 +4,13 @@
 Why this is a script and not part of ``bench.cleanup.teardown``: there is no MCP
 delete. ``trading_agent_journal_write`` takes no ``action`` argument and condor
 exposes no journal delete or clear tool, so a per-case teardown has nothing to
-call. Entries land on disk under::
+call. Entries land on disk under condor's local agent layer
+(``config.condor_local_agents_root``, ``<condor>/.condor/agents`` by default)::
 
-    <condor>/agents/<slug>/sessions/session_N/journal.md
+    <local agents root>/<slug>/loops/<case_id>/sessions/session_N/journal.md
+
+and, from before condor moved journals there (FEAT-115), under the checkout's
+``agents/<slug>/{sessions,strategies/*/sessions}`` — both are still swept.
 
 Left alone they accumulated across every case, model and sweep. That is not just
 untidy: ``trading_agent_journal_read`` returns them, so its responses grow until
@@ -47,28 +51,40 @@ except ImportError:  # pragma: no cover
 BENCH_PREFIX = "bench_"
 
 
+def agent_roots(repo: Path) -> list[Path]:
+    """Where bench's probe agents can live: condor's local layer, then the legacy
+    in-checkout ``agents/`` where journals went before FEAT-115."""
+    from config import condor_local_agents_root
+
+    roots = [condor_local_agents_root(repo), repo / "agents"]
+    return [r for i, r in enumerate(roots) if r is not None and r not in roots[:i]]
+
+
 def probe_agent_dirs(repo: Path) -> list[Path]:
     """Agent directories owned by bench, i.e. slugs prefixed ``bench_``."""
-    agents = repo / "agents"
-    if not agents.is_dir():
-        return []
     return sorted(
-        d for d in agents.iterdir() if d.is_dir() and d.name.startswith(BENCH_PREFIX)
+        d
+        for agents in agent_roots(repo)
+        if agents.is_dir()
+        for d in agents.iterdir()
+        if d.is_dir() and d.name.startswith(BENCH_PREFIX)
     )
 
 
 def journal_targets(agent_dir: Path) -> list[Path]:
     """Session directories under an agent that hold a journal.
 
-    Both layouts condor resolves: the legacy flat ``<agent>/sessions/`` and the
-    per-strategy ``<agent>/strategies/<slug>/sessions/`` that tick probes use.
-    Missing the latter would let exactly the journals bench now provisions grow
-    forever, which is what this script exists to prevent.
+    Every layout condor has resolved: the flat ``<agent>/sessions/``, the
+    per-strategy ``<agent>/loops/<slug>/sessions/`` that tick probes use now
+    (``bench.probe_journal.probe_strategy_dir``), and the ``strategies/`` it was
+    called before. Missing the current one would let exactly the journals bench
+    provisions grow forever, which is what this script exists to prevent.
     """
     roots = [agent_dir / "sessions"]
-    strategies = agent_dir / "strategies"
-    if strategies.is_dir():
-        roots.extend(d / "sessions" for d in sorted(strategies.iterdir()) if d.is_dir())
+    for parent in ("loops", "strategies"):
+        strategies = agent_dir / parent
+        if strategies.is_dir():
+            roots.extend(d / "sessions" for d in sorted(strategies.iterdir()) if d.is_dir())
     return sorted(
         d
         for sessions in roots
@@ -97,7 +113,8 @@ def main() -> int:
 
     dirs = probe_agent_dirs(repo)
     if not dirs:
-        print(f"no bench probe agents under {repo / 'agents'} — nothing to clean")
+        where = " or ".join(str(r) for r in agent_roots(repo))
+        print(f"no bench probe agents under {where} — nothing to clean")
         return 0
 
     total_sessions = 0
