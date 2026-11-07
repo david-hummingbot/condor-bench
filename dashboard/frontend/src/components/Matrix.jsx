@@ -14,6 +14,15 @@ const COLOR_BY = [
   { id: 'cost_per_success', label: 'Cost / success', fmt: fmtCost, higherIsBetter: false },
 ]
 
+// The "Tool calls" axis (bench/tool_use.py) is per call, not per case verdict, so
+// it colours by its own rates, each with the count it rests on.
+const TOOL_USE_METRICS = [
+  { id: 'first_try_rate', label: 'First-try correct', fmt: fmtPct, higherIsBetter: true, n: 'expected', ci: 'first_try_ci' },
+  { id: 'selection_rate', label: 'Picked when needed', fmt: fmtPct, higherIsBetter: true, n: 'expected' },
+  { id: 'args_rate', label: 'Arguments right', fmt: fmtPct, higherIsBetter: true, n: 'args_checked' },
+  { id: 'call_success_rate', label: 'Calls worked', fmt: fmtPct, higherIsBetter: true, n: 'calls' },
+]
+
 const GATE_LABEL = {
   passing: 'passing — the 95% interval clears the gate',
   not_yet_passing: 'not yet passing — the 95% interval straddles the gate; more trials could settle it',
@@ -25,6 +34,7 @@ const fmtCi = ci => (ci ? `${fmtPct(ci[0])}–${fmtPct(ci[1])}` : '—')
 const AXIS_OPTS = [
   { id: 'domains', label: 'Routing domains' },
   { id: 'tools', label: 'Per tool' },
+  { id: 'tool_use', label: 'Tool calls' },
 ]
 
 export default function Matrix() {
@@ -50,7 +60,8 @@ export default function Matrix() {
 
   useEffect(() => { load() }, [load])
 
-  const metric = COLOR_BY.find(c => c.id === colorBy) || COLOR_BY[0]
+  const metrics = axis === 'tool_use' ? TOOL_USE_METRICS : COLOR_BY
+  const metric = metrics.find(c => c.id === colorBy) || metrics[0]
   const models = matrix ? orderedModels(matrix) : []
   const rowsSource = matrix?.[axis] || {}
   // Layer 2 buckets live on the domains axis but aren't routing targets, so they
@@ -72,7 +83,7 @@ export default function Matrix() {
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="matrix-controls">
           <Control label="Rows" opts={AXIS_OPTS} value={axis} onChange={setAxis} />
-          <Control label="Colour by" opts={COLOR_BY} value={colorBy} onChange={setColorBy} />
+          <Control label="Colour by" opts={metrics} value={metric.id} onChange={setColorBy} />
           <button className="btn sm" onClick={load} disabled={loading} style={{ marginLeft: 'auto' }}>
             {loading ? '…' : '↻ Rebuild'}
           </button>
@@ -82,6 +93,15 @@ export default function Matrix() {
           The small number is how many cases were scored — a cell resting on two cases is
           weaker evidence than one resting on eight. Infra failures and harness artifacts are
           excluded, not scored zero.
+          {axis === 'tool_use' && (
+            <>
+              {' '}<strong>Tool calls</strong> reads every call, from every layer: a case that
+              needed the tool counts once toward <em>first-try correct</em> (picked, pinned
+              arguments right, first call worked), and every call counts toward <em>calls
+              worked</em> — including calls in cases that did not ask for the tool. The
+              small number is the count the colour rests on.
+            </>
+          )}
           {axis === 'tools' && (
             <>
               {' '}Per-tool rows are judged by the Router on a <strong>lower bar than
@@ -100,7 +120,7 @@ export default function Matrix() {
       {!error && matrix && (
         <>
           <MatrixTable
-            title={axis === 'tools' ? 'Model × tool' : 'Model × routing domain'}
+            title={axis === 'tool_use' ? 'Model × tool, call by call' : axis === 'tools' ? 'Model × tool' : 'Model × routing domain'}
             rows={routingRows}
             cells={rowsSource}
             models={models}
@@ -193,6 +213,9 @@ function MatrixTable({ title, subtitle, rows, cells, models, modelInfo, metric, 
                     const blocked = cell?.destructive_failures?.length > 0
                     const unsafe = cell?.unsafe > 0
                     const straddles = cell?.gate_status === 'not_yet_passing'
+                    const n = cell ? (metric.n ? cell[metric.n] : cell.scored) : 0
+                    const ci = cell ? cell[metric.ci || 'pass_rate_ci'] : null
+                    const gated = metric.id === 'pass_rate' || metric.id === 'first_try_rate'
                     return (
                       <td
                         key={m}
@@ -201,12 +224,12 @@ function MatrixTable({ title, subtitle, rows, cells, models, modelInfo, metric, 
                         onMouseEnter={() => cell && onHover({ row: labelFor ? labelFor(row) : row, model: m, cell })}
                         onMouseLeave={() => onHover(null)}
                       >
-                        {cell && cell.scored > 0 ? (
+                        {cell && n > 0 ? (
                           <>
-                            <span className="matrix-value" title={cell.pass_rate_ci ? `95% CI ${fmtCi(cell.pass_rate_ci)} · ${GATE_LABEL[cell.gate_status] || ''}` : undefined}>
-                              {metric.fmt(value)}{straddles && metric.id === 'pass_rate' ? '?' : ''}
+                            <span className="matrix-value" title={ci && gated ? `95% CI ${fmtCi(ci)} · ${GATE_LABEL[cell.gate_status] || ''}` : undefined}>
+                              {metric.fmt(value)}{straddles && gated ? '?' : ''}
                             </span>
-                            <span className="matrix-n">{cell.scored}</span>
+                            <span className="matrix-n">{n}</span>
                             {blocked && <span className="matrix-flag" title="a destructive case scored below the floor — blocks a routing recommendation">!</span>}
                             {unsafe && <span className="matrix-flag" title={`${cell.unsafe} unsafe action(s) — the router requires zero`}>⛔</span>}
                           </>
@@ -230,8 +253,36 @@ function MatrixTable({ title, subtitle, rows, cells, models, modelInfo, metric, 
   )
 }
 
+function ToolUseDetail({ row, model, cell }) {
+  return (
+    <div className="card">
+      <div className="card-title">{row} × {model}</div>
+      <div className="score-chips">
+        <Chip label="First-try correct" value={`${fmtPct(cell.first_try_rate)} of ${cell.expected}`} />
+        <Chip label="95% CI" value={fmtCi(cell.first_try_ci)} />
+        {cell.gate_status && <Chip label="Gate" value={cell.gate_status.replace(/_/g, ' ')} />}
+        <Chip label="Picked when needed" value={fmtPct(cell.selection_rate)} />
+        <Chip label="Arguments right" value={cell.args_checked ? `${fmtPct(cell.args_rate)} of ${cell.args_checked}` : '—'} />
+        <Chip label="Calls worked" value={cell.calls ? `${fmtPct(cell.call_success_rate)} of ${cell.calls}` : '—'} />
+        <Chip label="Repaired after a failure" value={fmtPct(cell.repair_rate)} />
+        <Chip label="Calls it wasn't asked for" value={String(cell.unprompted_calls || 0)} />
+        <Chip label="Unsafe" value={String(cell.unsafe || 0)} />
+      </div>
+      {cell.wrong_keys?.length > 0 && (
+        <div className="case-detail-text" style={{ marginTop: 12 }}>
+          Arguments most often wrong: {cell.wrong_keys.join(', ')}
+        </div>
+      )}
+      {cell.run_dir && (
+        <div className="run-meta" style={{ marginTop: 12 }}>from run {cell.run_dir}</div>
+      )}
+    </div>
+  )
+}
+
 function CellDetail({ hover }) {
   const { row, model, cell } = hover
+  if ('first_try_rate' in cell) return <ToolUseDetail row={row} model={model} cell={cell} />
   return (
     <div className="card">
       <div className="card-title">{row} × {model}</div>

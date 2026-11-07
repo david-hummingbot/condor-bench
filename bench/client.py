@@ -43,7 +43,7 @@ from condor_compat.acp.client import (
 
 from bench.mcp_provider import build_mcp_configs, wiring_metadata
 from bench.tool_digest import DEFAULT_DIGEST_CHARS, annotate_epochs, digest_tool_output
-from config import condor_path
+from config import condor_local_agents_root, condor_path
 
 # ── Inference config ───────────────────────────────────────────────────────────
 @dataclass(frozen=True)
@@ -210,17 +210,8 @@ def load_assistant_prompt(slug: str | None) -> str:
     """
     if not slug:
         return _AGENT_INSTRUCTIONS
-    repo = condor_path()
-    if repo is None:
-        return _AGENT_INSTRUCTIONS
-    for candidate in (
-        repo / "agents" / slug / "AGENT.md",
-        repo / "assistants" / slug / "AGENT.md",
-        repo / "assistants" / f"{slug}.md",
-    ):
-        if candidate.is_file():
-            return _strip_frontmatter(candidate.read_text())
-    return _AGENT_INSTRUCTIONS
+    path = _agent_md(slug)
+    return _strip_frontmatter(path.read_text()) if path else _AGENT_INSTRUCTIONS
 
 
 def assistant_prompt_source(slug: str | None) -> str:
@@ -230,14 +221,13 @@ def assistant_prompt_source(slug: str | None) -> str:
     repo = condor_path()
     if repo is None:
         return "fallback:vendored (no condor checkout — prompt is NOT the agent's)"
-    for candidate in (
-        repo / "agents" / slug / "AGENT.md",
-        repo / "assistants" / slug / "AGENT.md",
-        repo / "assistants" / f"{slug}.md",
-    ):
-        if candidate.is_file():
-            return f"condor:{candidate.relative_to(repo)}"
-    return f"fallback:vendored (no prompt found for '{slug}')"
+    path = _agent_md(slug)
+    if path is None:
+        return f"fallback:vendored (no prompt found for '{slug}')"
+    try:
+        return f"condor:{path.relative_to(repo)}"
+    except ValueError:  # a CONDOR_AGENTS_ROOT outside the checkout
+        return f"condor:{path}"
 
 
 def _agent_md(slug: str) -> Path | None:
@@ -249,6 +239,9 @@ def _agent_md(slug: str) -> Path | None:
         repo / "agents" / slug / "AGENT.md",
         repo / "assistants" / slug / "AGENT.md",
         repo / "assistants" / f"{slug}.md",
+        # condor's local layer, last so a shipped agent reads exactly as before:
+        # where an agent installed for a run lives (bench.hub_agents).
+        (condor_local_agents_root(repo) or repo / ".condor" / "agents") / slug / "AGENT.md",
     ):
         if candidate.is_file():
             return candidate
@@ -1240,7 +1233,7 @@ def tick_agent_id(case: Any) -> str:
     as an expected call and could never earn its live validity.
 
     The id being well-formed is necessary but not sufficient: the strategy directory has
-    to exist too (``agents/{slug}/strategies/{case_id}/sessions/session_1``). Until the
+    to exist too (``<local agents root>/{slug}/loops/{case_id}/sessions/session_1``). Until the
     probe agents are provisioned the write still fails — but now with a resolvable id, so
     the failure is about provisioning rather than about a malformed string, and
     :func:`bench.scorer._detect_harness_artifact` can name it.
@@ -1284,8 +1277,27 @@ def build_tick_prompt_for_case(case: Any, model: str) -> str:
         core_data=case.core_data, learnings=case.learnings, summary=case.summary,
         recent_decisions=case.recent_decisions, risk_state=case.risk_state,
         tick_number=case.tick_number, agent_id=tick_agent_id(case),
-        cached_routines_section="", user_memory="", skills_index="",
+        cached_routines_section="", user_memory="",
+        skills_index=tick_skills_index(case, slug),
     )
+
+
+def tick_skills_index(case: Any, slug: str) -> str:
+    """The skills list a production tick shows this agent.
+
+    Production passes ``SkillStore(slug).list_index()`` on every tick, and it is
+    never empty: it lists the shared skill library (~6.5 KB) even for an agent with
+    no skills of its own. Library ticks used to pass "", so every tick prompt was
+    shorter than production's, and a model never had playbooks to reach for.
+    Asked of condor fresh each tick, like production, since an agent can write a
+    skill mid-session. A case that pins its own index (hub agents do) keeps it.
+    """
+    pinned = getattr(case, "skills_index", "") or ""
+    if pinned:
+        return pinned
+    from bench.hub_agents import skills_index  # noqa: PLC0415 — keeps the import light
+
+    return skills_index(slug)
 
 
 async def run_case(case: Any, model: str) -> BenchmarkResult:

@@ -890,7 +890,7 @@ def _detect_harness_artifact(
             return (
                 "the journal for this case's probe agent does not exist on the condor "
                 "checkout, so the write could not succeed however the model behaved — "
-                "provision agents/<slug>/strategies/<case_id>/sessions/session_1"
+                "provision <local agents root>/<slug>/loops/<case_id>/sessions/session_1"
             )
 
     # A case cannot fail on a tool it was never shown. The model-size cap trims
