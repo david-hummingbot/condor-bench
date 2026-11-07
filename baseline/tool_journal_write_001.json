@@ -1,7 +1,0 @@
-{
-  "case_id": "tool_journal_write_001",
-  "model": "claude-code:sonnet",
-  "latency_s": 20.629,
-  "timestamp": "2026-10-20T06:45:47.000625+00:00",
-  "fingerprint": "a96617157e44"
-}
