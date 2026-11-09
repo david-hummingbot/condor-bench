@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_list_executors_running_001",
+  "model": "claude-code:sonnet",
+  "latency_s": 7.041,
+  "model_time_s": 5.839,
+  "timestamp": "2026-11-08T22:06:43.997746+00:00",
+  "fingerprint": "2e3b4eb2410b",
+  "lane": "live"
+}

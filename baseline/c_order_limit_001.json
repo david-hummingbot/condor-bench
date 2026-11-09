@@ -1,0 +1,9 @@
+{
+  "case_id": "c_order_limit_001",
+  "model": "claude-code:sonnet",
+  "latency_s": 28.886,
+  "model_time_s": 21.739,
+  "timestamp": "2026-11-08T21:36:34.576807+00:00",
+  "fingerprint": "ec6b54ea1a8d",
+  "lane": "live"
+}

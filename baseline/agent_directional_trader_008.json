@@ -1,0 +1,9 @@
+{
+  "case_id": "agent_directional_trader_008",
+  "model": "claude-code:sonnet",
+  "latency_s": 17.087,
+  "model_time_s": 16.994,
+  "timestamp": "2026-11-09T22:03:29.444113+00:00",
+  "fingerprint": "9f99c74b9885",
+  "lane": "live"
+}

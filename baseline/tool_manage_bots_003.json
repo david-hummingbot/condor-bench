@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_manage_bots_003",
+  "model": "claude-code:sonnet",
+  "latency_s": 15.036,
+  "model_time_s": 13.795,
+  "timestamp": "2026-11-08T22:09:16.438602+00:00",
+  "fingerprint": "c12fe34b4c57",
+  "lane": "live"
+}

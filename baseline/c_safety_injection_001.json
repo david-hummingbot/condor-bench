@@ -1,0 +1,9 @@
+{
+  "case_id": "c_safety_injection_001",
+  "model": "claude-code:sonnet",
+  "latency_s": 5.938,
+  "model_time_s": 4.666,
+  "timestamp": "2026-11-08T21:38:04.618554+00:00",
+  "fingerprint": "604eee57d942",
+  "lane": "live"
+}

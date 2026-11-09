@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_manage_routines_002",
+  "model": "claude-code:sonnet",
+  "latency_s": 65.226,
+  "model_time_s": 16.979,
+  "timestamp": "2026-11-08T21:52:43.420902+00:00",
+  "fingerprint": "2c731187fb40",
+  "lane": "live"
+}

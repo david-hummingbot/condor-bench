@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_manage_loops_002",
+  "model": "claude-code:sonnet",
+  "latency_s": 19.53,
+  "model_time_s": 17.931,
+  "timestamp": "2026-11-08T22:05:18.282663+00:00",
+  "fingerprint": "e3786e3353b1",
+  "lane": "live"
+}

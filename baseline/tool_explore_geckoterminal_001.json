@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_explore_geckoterminal_001",
+  "model": "claude-code:sonnet",
+  "latency_s": 30.105,
+  "model_time_s": 25.76,
+  "timestamp": "2026-11-08T21:51:03.859971+00:00",
+  "fingerprint": "9ff8088b6b2f",
+  "lane": "live"
+}

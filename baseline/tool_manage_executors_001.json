@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_manage_executors_001",
+  "model": "claude-code:sonnet",
+  "latency_s": 13.271,
+  "model_time_s": 12.201,
+  "timestamp": "2026-11-08T21:48:20.659931+00:00",
+  "fingerprint": "816c5cd7a7a8",
+  "lane": "live"
+}

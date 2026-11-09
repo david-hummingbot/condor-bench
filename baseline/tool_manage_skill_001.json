@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_manage_skill_001",
+  "model": "claude-code:sonnet",
+  "latency_s": 22.853,
+  "model_time_s": 21.775,
+  "timestamp": "2026-11-08T21:53:07.370637+00:00",
+  "fingerprint": "410c74a279bc",
+  "lane": "live"
+}

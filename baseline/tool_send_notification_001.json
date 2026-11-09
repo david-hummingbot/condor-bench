@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_send_notification_001",
+  "model": "claude-code:sonnet",
+  "latency_s": 23.442,
+  "model_time_s": 5.47,
+  "timestamp": "2026-11-08T21:56:33.954508+00:00",
+  "fingerprint": "60f63a8ffae4",
+  "lane": "live"
+}

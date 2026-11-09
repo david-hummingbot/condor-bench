@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_journal_write_001",
+  "model": "claude-code:sonnet",
+  "latency_s": 33.809,
+  "model_time_s": 32.527,
+  "timestamp": "2026-11-08T21:57:08.866573+00:00",
+  "fingerprint": "a96617157e44",
+  "lane": "live"
+}

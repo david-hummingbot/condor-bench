@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_consult_002",
+  "model": "claude-code:sonnet",
+  "latency_s": 57.762,
+  "model_time_s": 24.726,
+  "timestamp": "2026-11-08T21:58:48.274784+00:00",
+  "fingerprint": "9d08d7618c27",
+  "lane": "live"
+}

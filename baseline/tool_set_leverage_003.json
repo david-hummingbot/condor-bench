@@ -1,0 +1,9 @@
+{
+  "case_id": "tool_set_leverage_003",
+  "model": "claude-code:sonnet",
+  "latency_s": 61.068,
+  "model_time_s": 58.275,
+  "timestamp": "2026-11-08T22:04:22.345900+00:00",
+  "fingerprint": "684a37959a23",
+  "lane": "live"
+}

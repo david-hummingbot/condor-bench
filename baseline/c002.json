@@ -1,0 +1,9 @@
+{
+  "case_id": "c002",
+  "model": "claude-code:sonnet",
+  "latency_s": 6.503,
+  "model_time_s": 5.153,
+  "timestamp": "2026-11-08T21:26:26.936713+00:00",
+  "fingerprint": "fa7ef5d329e6",
+  "lane": "live"
+}
