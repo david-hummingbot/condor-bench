@@ -744,3 +744,29 @@ def test_journal_cleaner_finds_journals_where_ticks_now_write_them(tmp_path, mon
 
     assert [d.name for d in probe_agent_dirs(tmp_path)] == ["bench_tick_normal"]
     assert journal_targets(agent) == [session]
+
+
+def test_a_judge_reply_with_an_unescaped_quote_keeps_its_score():
+    """"Expecting ',' delimiter" left 4 of 16 hub runs unjudged; the score was there."""
+    from metrics.answer_quality import _parse
+
+    raw = '{"score": 0.82, "reason": "Reads the playbook but calls the routine "missing" when it was not invoked."}'
+    score, reason = _parse(raw)
+    assert score == 0.82
+    assert reason.startswith("Reads the playbook") and '"missing"' in reason
+
+
+def test_a_salvaged_null_score_is_still_unscored():
+    from metrics.answer_quality import _parse
+
+    score, _ = _parse('{"score": null, "reason": "cannot tell "why""}')
+    assert score is None
+
+
+def test_a_reply_with_no_score_at_all_is_still_a_judge_error():
+    import pytest
+
+    from metrics.answer_quality import _parse
+
+    with pytest.raises(ValueError):
+        _parse('{"reason": "no "score" given"}')

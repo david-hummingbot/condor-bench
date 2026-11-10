@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -100,9 +101,32 @@ class _ScoreResult(BaseModel):
     reason: str
 
 
+_SCORE_FIELD = re.compile(r'"score"\s*:\s*("?)(-?\d+(?:\.\d+)?|null|none)\1', re.I)
+_REASON_FIELD = re.compile(r'"reason"\s*:\s*"(.*)"\s*}?\s*$', re.S)
+
+
+def _salvage(text: str) -> dict[str, Any]:
+    """Read score and reason out of JSON the judge did not escape.
+
+    The judge writes its one-sentence reason freehand, and a reason that quotes
+    the model (`calls it "missing"`) breaks the JSON. Four of sixteen hub runs
+    went unjudged on "Expecting ',' delimiter" at character 400-500, inside the
+    reason: the score had been given and was thrown away with it. The score is a
+    bare number, so it survives; the reason is everything up to the closing quote.
+    """
+    found = _SCORE_FIELD.search(text)
+    if not found:
+        raise ValueError(f"judge reply has no score: {text[:160]!r}")
+    reason = _REASON_FIELD.search(text)
+    return {"score": found.group(2), "reason": reason.group(1) if reason else ""}
+
+
 def _parse(raw: str) -> tuple[float | None, str]:
     text = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = _salvage(text)
     raw_score = data.get("score")
     if raw_score is None or str(raw_score).strip().lower() in ("null", "none", "unknown", "n/a"):
         return None, str(data.get("reason", "unknown"))
