@@ -1361,6 +1361,11 @@ def case_input_text(case: Any) -> str:
         return getattr(case, "question", "")
 
     parts = [f"[TICK {getattr(case, 'tick_number', 1)}] {case.scenario_name}"]
+    # First, so a long strategy cannot push it past the cap: what the harness
+    # could not provide, and what fair behaviour looks like without it.
+    limits = (getattr(case, "task", None) or {}).get("known_limitations") or []
+    if limits:
+        parts.append("HARNESS LIMITATION (not the agent's doing): " + " ".join(map(str, limits)))
     strategy = str(getattr(case, "strategy_instructions", "") or "").strip()
     if strategy:
         parts.append(f"STRATEGY: {strategy}")

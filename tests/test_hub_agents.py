@@ -257,3 +257,36 @@ def test_an_unavailable_skills_index_warns(monkeypatch, tmp_path):
     monkeypatch.setattr(builtins, "__import__", no_condor)
     with pytest.warns(RuntimeWarning, match="skills index is unavailable"):
         assert hub.skills_index("bench_x") == ""
+
+
+def test_a_loop_that_runs_uninstalled_routines_tells_the_judge(monkeypatch):
+    """regime-switch-lp's tick had to run regime_decision, which bench never installs.
+
+    deepseek spent 34 calls hunting for it and scored 0.15 on a case no model could
+    pass. The judge now knows the routine was unavailable and what fair looks like.
+    """
+    from bench.client import case_input_text
+
+    monkeypatch.setattr(hub, "skills_index", lambda slug: "")
+    loop = LOOP.replace("Each tick: get_prices, then decide.",
+                        "Each tick run the `fetch` routine, then decide. Fetching is not fetch_all.")
+    bundle = hub.parse_zip(_zip({**FILES, "loops/test_loop/loop.md": loop,
+                                 "routines/unused.py": "x = 1\n",
+                                 "controllers/fetch/fetch.py": "x = 1\n"}), slug="test_trader")
+    assert bundle.routines_named_in(loop) == ["fetch"]
+    assert any("loop test_loop calls routine(s) fetch" in f for f in bundle.findings())
+
+    tick = [c for c in hub.generate_cases(bundle, "bench_hub_test_trader")
+            if c.category == "hub_loop"][0]
+    assert "fetch" in tick.task["known_limitations"][0]
+    shown = case_input_text(tick)
+    assert "HARNESS LIMITATION" in shown and shown.index("HARNESS") < shown.index("STRATEGY")
+
+
+def test_a_loop_that_needs_no_routine_carries_no_limitation(monkeypatch):
+    monkeypatch.setattr(hub, "skills_index", lambda slug: "")
+    bundle = hub.parse_zip(_zip(), slug="test_trader")
+    tick = [c for c in hub.generate_cases(bundle, "bench_hub_test_trader")
+            if c.category == "hub_loop"][0]
+    assert "known_limitations" not in tick.task
+    assert not any("calls routine" in f for f in bundle.findings())
