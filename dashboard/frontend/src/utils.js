@@ -26,6 +26,10 @@ export function fmtTime(ts) {
 export function buildLeaderboard(runs) {
   const latest = {}
   for (const r of runs) {
+    // A hub-agent run scores a model on one agent's few cases, not the library.
+    // As "latest run per model" it would replace that model's library run and
+    // rank it on four cases; those runs are compared on the Agents page instead.
+    if (r.run_type === 'hub_agent') continue
     const key = r.model || r.run_dir
     if (!latest[key] || (r.timestamp || 0) > (latest[key].timestamp || 0)) {
       latest[key] = r

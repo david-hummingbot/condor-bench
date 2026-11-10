@@ -47,6 +47,7 @@ export const resumeRun = (id) =>
 
 export const listRuns = () => fetch('/api/runs').then(handle)
 export const getRun = (dir) => fetch(`/api/runs/${dir}`).then(handle)
+export const getHubAgents = () => fetch('/api/hub-agents').then(handle)
 export const streamUrl = (id) => `/api/runs/${id}/stream`
 
 export const getStaging = () => fetch('/api/staging').then(handle)

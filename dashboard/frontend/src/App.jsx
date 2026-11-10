@@ -10,6 +10,7 @@ import Suites from './components/Suites.jsx'
 import CompareCondor from './components/CompareCondor.jsx'
 import Settings from './components/Settings.jsx'
 import Overview from './components/Overview.jsx'
+import Agents from './components/Agents.jsx'
 import { listRuns } from './api.js'
 import './styles.css'
 
@@ -48,6 +49,7 @@ const SECTIONS = [
     label: 'Results',
     pages: [
       { id: 'runs', label: 'Runs' },
+      { id: 'agents', label: 'Agents' },
       { id: 'leaderboard', label: 'Leaderboard' },
       { id: 'matrix', label: 'Matrix' },
       { id: 'router', label: 'Router' },
@@ -58,17 +60,21 @@ const SECTIONS = [
 
 const DEFAULT_ROUTE = { section: 'overview', page: null }
 // Wide data views need more than the reading-width canvas.
-const WIDE_PAGES = new Set(['results/matrix', 'results/router', 'results/runs', 'live'])
+const WIDE_PAGES = new Set(['results/matrix', 'results/router', 'results/runs', 'results/agents', 'live'])
 
 function parseHash() {
   const raw = (window.location.hash || '').replace(/^#\/?/, '')
-  const [section, page] = raw.split('/')
+  const [section, page, ...rest] = raw.split('/')
   if (section === 'live') return { section: 'live', page: null }
   const match = SECTIONS.find((s) => s.id === section)
   if (!match) return DEFAULT_ROUTE
   if (!match.pages) return { section: match.id, page: null }
   const pageMatch = match.pages.find((p) => p.id === page)
-  return { section: match.id, page: (pageMatch || match.pages[0]).id }
+  // A third segment names one item on the page (a run dir, an agent slug), so a
+  // link from one results page can land on a specific row of another.
+  let item = null
+  try { item = rest.length ? decodeURIComponent(rest.join('/')) : null } catch { item = null }
+  return { section: match.id, page: (pageMatch || match.pages[0]).id, item: pageMatch ? item : null }
 }
 
 /** Hash routing so a reload, a bookmark, or a shared link lands where it should. */
@@ -270,8 +276,9 @@ export default function App() {
           />
         )}
         {key === 'results/runs' && (
-          <Runs runs={runs} onRefresh={refreshRuns} onNavigate={navigate} config={config} />
+          <Runs runs={runs} onRefresh={refreshRuns} onNavigate={navigate} config={config} focus={route.item} />
         )}
+        {key === 'results/agents' && <Agents onNavigate={navigate} focus={route.item} />}
         {key === 'results/leaderboard' && (
           <Leaderboard runs={runs} onNavigate={navigate} config={config} />
         )}
