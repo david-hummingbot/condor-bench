@@ -43,6 +43,7 @@ from config import (
     RESULTS_DIR,
     TOOL_PASS_RATE,
 )
+from bench.tool_use import ToolUseCell, case_outcomes
 from metrics.tool_accuracy import normalize_tool_name
 
 
@@ -379,6 +380,8 @@ def build_matrix(
 
     domains: dict[str, dict[str, Cell]] = {}
     tools: dict[str, dict[str, Cell]] = {}
+    # Per-call evidence (bench.tool_use): first-try correctness per tool.
+    tool_use: dict[str, dict[str, ToolUseCell]] = {}
     # Keyed like the others so it goes through the same ownership rule; flattened
     # on output, where "overall" is one row per model.
     overall: dict[str, dict[str, Cell]] = {}
@@ -460,6 +463,20 @@ def build_matrix(
                 if tool_cell is not None:
                     tool_cell.add(case)
 
+            excluded = _exclusion_reason(case) is not None
+            for outcome in case_outcomes(case, expected=_case_tools(case)):
+                if _tool_use_owner(owner, outcome.tool, model) != run.run_dir:
+                    continue
+                use_cell = tool_use.setdefault(outcome.tool, {}).setdefault(
+                    model, ToolUseCell(run_dir=run.run_dir)
+                )
+                if not excluded:
+                    use_cell.add(outcome)
+                elif outcome.unsafe:
+                    # As on the other axes: a banned call is evidence however the
+                    # rest of the trial went.
+                    use_cell.unsafe += 1
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "env_mode": lane,
@@ -476,6 +493,10 @@ def build_matrix(
             tool: {m: c.as_dict(TOOL_PASS_RATE) for m, c in cells.items()}
             for tool, cells in sorted(tools.items())
         },
+        "tool_use": {
+            tool: {m: c.as_dict(TOOL_PASS_RATE) for m, c in cells.items()}
+            for tool, cells in sorted(tool_use.items())
+        },
     }
 
 
@@ -485,7 +506,25 @@ def _claims(case: dict, model: str) -> list[tuple[str, str, str]]:
         ("overall", "all", model),
         ("domain", _case_domain(case), model),
         *(("tool", tool, model) for tool in _case_tools(case)),
+        *(("tool_use", tool, model) for tool in _case_tools(case)),
+        *(("tool_use_called", tool, model) for tool in _tools_called(case)),
     ]
+
+
+def _tools_called(case: dict) -> list[str]:
+    """Tools the model called in this case, expected or not."""
+    return sorted({normalize_tool_name(str(t)) for t in case.get("tool_calls") or []})
+
+
+def _tool_use_owner(owner: dict, tool: str, model: str) -> str | None:
+    """The run that owns a ``tool_use`` cell.
+
+    The newest run that *expected* the tool, else the newest that only called it.
+    Claiming on any call let a run that touched a tool once, unprompted (a tick
+    reaching for get_market_data), take the cell from an older run of ten cases
+    that asked for it — blanking first-try correct for that tool.
+    """
+    return owner.get(("tool_use", tool, model)) or owner.get(("tool_use_called", tool, model))
 
 
 UNCLASSIFIED = "unclassified"

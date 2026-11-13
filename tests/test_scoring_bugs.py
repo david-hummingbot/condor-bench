@@ -460,6 +460,33 @@ def test_a_missing_probe_journal_is_attributed_to_the_harness():
     assert _detect_harness_artifact(working, ["trading_agent_journal_write"]) is None
 
 
+def test_a_fresh_agent_reading_its_own_missing_journal_is_evidence_not_harness():
+    """A freshly installed hub agent has no journal; condor saying so is the truth.
+
+    `bench_hub_churn` read its journal by its own slug in a state check, got "no
+    journal available", and the row was flagged and dropped — 2 of 16 hub runs.
+    Only a journal bench provisions (`<bench_ slug>.<case>_<n>`) is bench's to owe.
+    """
+    from types import SimpleNamespace
+
+    from bench.scorer import _detect_harness_artifact
+
+    wiring = {"api_url": "http://localhost:8000", "assistant_prompt": "ok"}
+
+    def run(agent_id):
+        return SimpleNamespace(
+            wiring=wiring,
+            tool_calls=[{"tool": "trading_agent_journal_read", "tool_call_id": "c1",
+                         "args": {"agent_id": agent_id}}],
+            tool_responses=[{"tool": "trading_agent_journal_read", "tool_call_id": "c1",
+                             "output": '{"content": "(no journal available for this agent)"}'}],
+        )
+
+    assert _detect_harness_artifact(run("bench_hub_churn"), []) is None
+    owed = _detect_harness_artifact(run("bench_hub_churn.hub_churn__loop_x_1"), [])
+    assert owed and "does not exist" in owed
+
+
 # ── 11. Nested payloads were counted, not shown ────────────────────────────────
 def test_the_payload_inside_a_nested_object_reaches_the_judge():
     """`agent_condor_routine_004`: a real 96-pair scan read as fabrication.

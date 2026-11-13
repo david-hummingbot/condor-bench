@@ -837,6 +837,14 @@ def _detect_harness_note(result: BenchmarkResult) -> str | None:
     )
 
 
+def _is_probe_journal_id(agent_id: Any) -> bool:
+    """Whether *agent_id* names a journal bench provisions (see probe_journal)."""
+    from bench.probe_journal import BENCH_PREFIX
+
+    slug, dot, rest = str(agent_id or "").partition(".")
+    return bool(dot) and slug.startswith(BENCH_PREFIX) and "_" in rest
+
+
 def _detect_harness_artifact(
     result: BenchmarkResult, expected_tools: list[str] | None = None
 ) -> str | None:
@@ -881,16 +889,31 @@ def _detect_harness_artifact(
     # `trading_agent_journal_write` as an expected call, and every one of them scored
     # live_validity 0.0 on that — then lost answer_quality again for "silently ignoring
     # the failed journal write". Both deductions were the fixture's absence.
+    #
+    # Only a journal bench owed, though: one it provisions, which is named
+    # `<bench_ slug>.<case>_<n>` (bench.probe_journal.probe_agent_id). A hub agent
+    # asked about its account read its own journal as `bench_hub_churn`, and a
+    # freshly installed agent that has never run a loop has none — condor says so
+    # in production too. Flagging that true answer dropped the row from the
+    # results (2 of 16 hub runs) for evidence that was fine.
+    args_by_id = {
+        c.get("tool_call_id"): c.get("args") or {}
+        for c in (result.tool_calls if isinstance(getattr(result, "tool_calls", None), list) else [])
+        if isinstance(c, dict) and c.get("tool_call_id")
+    }
     for record in getattr(result, "tool_responses", []) or []:
         tool = normalize_tool_name(str(record.get("tool", "")))
         if not tool.startswith("trading_agent_journal"):
+            continue
+        args = args_by_id.get(record.get("tool_call_id"))
+        if args is not None and not _is_probe_journal_id(args.get("agent_id")):
             continue
         text = str(record.get("output") or "")
         if "no journal available for this agent" in text.lower():
             return (
                 "the journal for this case's probe agent does not exist on the condor "
                 "checkout, so the write could not succeed however the model behaved — "
-                "provision agents/<slug>/strategies/<case_id>/sessions/session_1"
+                "provision <local agents root>/<slug>/loops/<case_id>/sessions/session_1"
             )
 
     # A case cannot fail on a tool it was never shown. The model-size cap trims

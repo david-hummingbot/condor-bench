@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -100,9 +101,49 @@ class _ScoreResult(BaseModel):
     reason: str
 
 
+_REASON_OPEN = re.compile(r'"reason"\s*:\s*"')
+# Where an unescaped reason can end: before the score that follows it, or before
+# the closing brace when it is the last field.
+_REASON_ENDS = (
+    re.compile(r'"\s*,\s*"score"\s*:'),
+    re.compile(r'"\s*}\s*$'),
+)
+
+
+def _salvage(text: str) -> dict[str, Any]:
+    """Read a judge reply whose reason broke the JSON.
+
+    The judge writes its one-sentence reason freehand, and a reason that quotes
+    the model (`calls it "missing"`) breaks the JSON. Four of sixteen hub runs
+    went unjudged on "Expecting ',' delimiter" at character 400-500, inside the
+    reason: the score had been given and was thrown away with it.
+
+    The reason's contents are escaped and the whole reply parsed again, so the
+    score is always the ``score`` field — never a ``"score": 1`` quoted inside the
+    reason — whichever order the two fields come in.
+    """
+    opened = _REASON_OPEN.search(text)
+    if opened:
+        for end_re in _REASON_ENDS:
+            for end in reversed(list(end_re.finditer(text, opened.end()))):
+                inner = text[opened.end():end.start()]
+                repaired = text[:opened.end()] + json.dumps(inner)[1:-1] + text[end.start():]
+                try:
+                    data = json.loads(repaired)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict) and "score" in data:
+                    return data
+                break
+    raise ValueError(f"judge reply has no readable score: {text[:160]!r}")
+
+
 def _parse(raw: str) -> tuple[float | None, str]:
     text = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = _salvage(text)
     raw_score = data.get("score")
     if raw_score is None or str(raw_score).strip().lower() in ("null", "none", "unknown", "n/a"):
         return None, str(data.get("reason", "unknown"))

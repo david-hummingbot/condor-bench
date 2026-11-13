@@ -1,7 +1,9 @@
 {
   "case_id": "tool_manage_servers_001",
   "model": "claude-code:sonnet",
-  "latency_s": 22.851,
-  "timestamp": "2026-10-20T06:41:30.631031+00:00",
-  "fingerprint": "6d9614ca4c9a"
+  "latency_s": 6.389,
+  "model_time_s": 5.124,
+  "timestamp": "2026-11-08T21:53:40.300091+00:00",
+  "fingerprint": "6d9614ca4c9a",
+  "lane": "live"
 }

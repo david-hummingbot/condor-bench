@@ -1,7 +1,9 @@
 {
   "case_id": "tool_get_user_context_002",
   "model": "claude-code:sonnet",
-  "latency_s": 25.066,
-  "timestamp": "2026-10-20T06:56:41.875604+00:00",
-  "fingerprint": "b2e1743e3e59"
+  "latency_s": 23.485,
+  "model_time_s": 18.464,
+  "timestamp": "2026-11-08T22:02:32.528429+00:00",
+  "fingerprint": "b2e1743e3e59",
+  "lane": "live"
 }

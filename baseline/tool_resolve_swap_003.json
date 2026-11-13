@@ -1,7 +1,9 @@
 {
   "case_id": "tool_resolve_swap_003",
   "model": "claude-code:sonnet",
-  "latency_s": 12.078,
-  "timestamp": "2026-10-20T07:06:21.570184+00:00",
-  "fingerprint": "6495187a4522"
+  "latency_s": 44.775,
+  "model_time_s": 42.099,
+  "timestamp": "2026-11-08T22:11:34.373110+00:00",
+  "fingerprint": "6495187a4522",
+  "lane": "live"
 }

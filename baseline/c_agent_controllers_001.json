@@ -1,7 +1,9 @@
 {
   "case_id": "c_agent_controllers_001",
   "model": "claude-code:sonnet",
-  "latency_s": 18.152,
-  "timestamp": "2026-10-20T06:23:30.821007+00:00",
-  "fingerprint": "541e52c40eab"
+  "latency_s": 13.483,
+  "model_time_s": 11.889,
+  "timestamp": "2026-11-08T21:39:12.284121+00:00",
+  "fingerprint": "541e52c40eab",
+  "lane": "live"
 }

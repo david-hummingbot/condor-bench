@@ -141,9 +141,11 @@ def test_every_case_has_a_baseline():
     import pytest
 
     from bench.baseline import BaselineStore
+    from bench.dataset import runs_on_lane
 
-    case_ids = [c.id for c in load_all_cases()]
     store = BaselineStore()
+    # A mock-only case has no live reference to take: the live run skips it.
+    case_ids = [c.id for c in load_all_cases() if runs_on_lane(c, store.lane)]
     missing = store.missing(case_ids)
     if len(missing) == len(case_ids):
         pytest.skip("no baselines recorded — run `make baseline`")

@@ -808,7 +808,9 @@ def sweep(
 @app.command()
 def matrix(
     models: Path = typer.Option(Path("datasets/models.json"), help="Model registry"),
-    axis: str = typer.Option("domains", help="Rows: domains | tools"),
+    axis: str = typer.Option(
+        "domains", help="Rows: domains | tools | tool_use (first-try correct, call by call)"
+    ),
     all_models: bool = typer.Option(
         False,
         "--all-models",
@@ -818,8 +820,8 @@ def matrix(
     """Aggregate saved runs into a model × domain/tool matrix."""
     from bench.matrix import build_matrix, save_matrix
 
-    if axis not in ("domains", "tools"):
-        console.print("[red]--axis must be 'domains' or 'tools'.[/red]")
+    if axis not in ("domains", "tools", "tool_use"):
+        console.print("[red]--axis must be 'domains', 'tools' or 'tool_use'.[/red]")
         raise typer.Exit(2)
 
     from config import env_mode
@@ -849,7 +851,11 @@ def matrix(
         )
         ordered = _ordered_models(data)
 
-    table = Table(title=f"Pass rate by {axis[:-1]}")
+    title = (
+        "First-try correct by tool" if axis == "tool_use" else f"Pass rate by {axis[:-1]}"
+    )
+    label = _tool_use_label if axis == "tool_use" else _cell_label
+    table = Table(title=title)
     table.add_column("Domain" if axis == "domains" else "Tool", no_wrap=True)
     for key in ordered:
         info = data["models"][key]
@@ -859,13 +865,21 @@ def matrix(
     for row_name, cells in data[axis].items():
         if not any(cells.get(k) for k in ordered):
             continue
-        table.add_row(row_name, *[_cell_label(cells.get(k)) for k in ordered])
+        table.add_row(row_name, *[label(cells.get(k)) for k in ordered])
     console.print(table)
-    console.print(
-        "[dim]cell = pass rate (scored cases). "
-        "'excl' = excluded infra failures / harness artifacts. "
-        "'!' = a destructive case below the floor.[/dim]"
-    )
+    if axis == "tool_use":
+        console.print(
+            "[dim]cell = of the cases that needed the tool, the share where the model "
+            "picked it, got its pinned arguments right and its first call worked "
+            "(cases). 'calls' = share of all its calls that worked, from any case. "
+            "Per-call detail is in the saved JSON.[/dim]"
+        )
+    else:
+        console.print(
+            "[dim]cell = pass rate (scored cases). "
+            "'excl' = excluded infra failures / harness artifacts. "
+            "'!' = a destructive case below the floor.[/dim]"
+        )
 
     if unranked and not all_models:
         console.print(
@@ -893,6 +907,23 @@ def _ordered_models(data: dict) -> list[str]:
         )
 
     return sorted(data["models"], key=sort_key)
+
+
+def _tool_use_label(cell: dict | None) -> str:
+    if not cell:
+        return "[dim]—[/dim]"
+    calls = (
+        f" [dim]calls {cell['call_success_rate']:.0%}/{cell['calls']}[/dim]"
+        if cell.get("calls")
+        else ""
+    )
+    unsafe = f" [red]unsafe {cell['unsafe']}[/red]" if cell.get("unsafe") else ""
+    rate = cell.get("first_try_rate")
+    if rate is None:
+        return (calls.strip() or "[dim]—[/dim]") + unsafe
+    status = cell.get("gate_status")
+    colour = {"passing": "green", "not_yet_passing": "yellow"}.get(status, "red")
+    return f"[{colour}]{rate:.0%}[/{colour}] [dim]({cell['expected']})[/dim]{calls}{unsafe}"
 
 
 def _cell_label(cell: dict | None) -> str:
@@ -1388,6 +1419,131 @@ def promote(
     console.print(f"\n[bold]Report saved:[/bold] {path}")
     if not report["claims_live_promotion"]:
         raise typer.Exit(1)
+
+
+@app.command()
+def hub(
+    source: str = typer.Argument(
+        ..., help="hub:<slug>[@version], a bundle file (.condor-agent.json or hub zip), or an agent directory"
+    ),
+    model: list[str] = typer.Option(
+        [], "--model", "-m", help="Model to run the agent's cases on (repeatable). None: estimate only"
+    ),
+    trials: int = typer.Option(1, help="Runs per case"),
+    execute: bool = typer.Option(
+        False, "--execute",
+        help="Run the agent's loops for real (loop mode, teardown after). Default: dry_run, capital actions forbidden",
+    ),
+    show_cases: bool = typer.Option(False, "--show-cases", help="Print the generated cases and stop"),
+    timeout: Optional[float] = typer.Option(
+        None, help="Per-case ceiling in seconds (default: the harness maximum; these cases have no baseline)"
+    ),
+) -> None:
+    """Benchmark one agent — from the Botcamp hub or a bundle — on any model."""
+    import uuid
+
+    from bench.hub_agents import (
+        HubError, estimate, generate_cases, install, load_agent, surface_tools, uninstall,
+    )
+    from bench.matrix import build_matrix
+    from config import CASE_TIMEOUT_MAX_S, env_mode
+
+    if timeout is not None and not 0 < timeout <= CASE_TIMEOUT_MAX_S:
+        console.print(
+            f"[red]--timeout must be above 0 and at most {CASE_TIMEOUT_MAX_S:.0f}s "
+            "(the harness maximum).[/red]"
+        )
+        raise typer.Exit(2)
+
+    try:
+        bundle = load_agent(source)
+    except (HubError, OSError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    grant = ", ".join(bundle.tools) or "full surface (no tools: grant)"
+    console.print(f"[bold]{bundle.name or bundle.slug}[/bold] v{bundle.version}  [dim]{bundle.source}[/dim]")
+    console.print(f"  tools:  {grant}")
+    console.print(f"  skills: {', '.join(bundle.skills) or '—'}   loops: {', '.join(bundle.loops) or '—'}")
+    for finding in bundle.findings():
+        console.print(f"  [yellow]![/yellow] {finding}")
+
+    # Estimate first: free, from the call-by-call tool scores saved runs carry.
+    estimates = estimate(bundle, build_matrix(lane=env_mode("live")), surface_tools())
+    if estimates:
+        table = Table(title="Estimate from existing tool evidence (no runs)")
+        table.add_column("Model")
+        table.add_column("First-try", justify="right")
+        table.add_column("Coverage", justify="right")
+        table.add_column("Weakest of its tools")
+        for e in estimates:
+            table.add_row(
+                e.model,
+                "—" if e.score is None else f"{e.score:.0%}",
+                f"{e.coverage:.0%}",
+                ", ".join(f"{t} {r:.0%}" for t, r in e.weakest) or "—",
+            )
+        console.print(table)
+        console.print(
+            "[dim]First-try = the matrix's tool_use first-try rate over this agent's tools, "
+            "weighted by how often its files name each. Coverage = the share of that weight "
+            "with any evidence; a low one means run it.[/dim]"
+        )
+    else:
+        console.print("[dim]No tool evidence in the matrix yet — `runner.py matrix` after a test run.[/dim]")
+
+    if not model and not show_cases:
+        return
+
+    try:
+        slug = install(bundle)
+    except HubError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    try:
+        cases = generate_cases(bundle, slug, execute=execute, timeout_s=timeout)
+        if show_cases:
+            for c in cases:
+                ask = c.scenario_name if c.type == "tick" else c.question
+                console.print(f"  [cyan]{c.id}[/cyan] ({c.type}, {c.risk_level})\n    {ask[:160]}")
+            return
+        from bench.baseline import BaselineStore
+        from bench.manifest import build_manifest
+        from bench.reporter import save_run
+        from bench.staging_health import StagingUnhealthy, assert_ready
+        from config import PASS_THRESHOLD
+
+        _enter_lane("live")
+        try:
+            assert_ready()
+        except StagingUnhealthy as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        store = BaselineStore()
+        prompts = {c.id: (c.scenario_name if c.type == "tick" else c.question) for c in cases}
+        for key in model:
+            run_id = uuid.uuid4().hex[:8]
+            console.print(
+                f"\nRunning [bold]{bundle.slug}[/bold] on [bold]{key}[/bold]: "
+                f"{len(cases)} case(s) × {trials}"
+            )
+            # As `test` does: an ACP model must not start from its last run's notes.
+            memory_reset = _reset_acp_memory(key, run_id)
+            scorecards, responses = asyncio.run(_run_cases(cases, key, store, trials))
+            pin = build_manifest(
+                run_type="hub_agent", case_ids=[c.id for c in cases], models=[key],
+                shared_loaded=True, trials=trials, cases=cases,
+            )
+            # run_type=hub_agent keeps it out of the matrix and router
+            # (config.summary_counts_for_matrix).
+            pin["hub_agent"] = {**bundle.as_dict(), "installed_as": slug, "execute": execute}
+            if memory_reset is not None:
+                pin["agent_memory_reset"] = memory_reset.as_dict()
+            run_dir = save_run(key, scorecards, responses, run_id, prompts=prompts, extra_summary=pin)
+            console.print(f"[bold]Run saved:[/bold] {run_dir}")
+            _print_summary(scorecards, key, PASS_THRESHOLD)
+    finally:
+        uninstall(slug)
 
 
 @app.command("nim-smoke")

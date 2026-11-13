@@ -723,3 +723,57 @@ def test_an_expired_agent_login_is_infra_not_an_answer():
     # A real answer that mentions logging in is still an answer.
     long_answer = "To deploy the bot, first run /login in the CLI, then " + "configure it. " * 60
     assert not is_infra_failure(long_answer)
+
+
+def test_journal_cleaner_finds_journals_where_ticks_now_write_them(tmp_path, monkeypatch):
+    """Probe journals moved to the local layer under ``loops/`` (FEAT-115). A
+    cleaner still scanning ``<checkout>/agents/*/strategies`` found none of them."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from clean_probe_journals import journal_targets, probe_agent_dirs
+
+    from bench.probe_journal import LOOPS_DIRNAME, SESSIONS_DIRNAME
+
+    monkeypatch.delenv("CONDOR_AGENTS_ROOT", raising=False)
+    monkeypatch.delenv("CONDOR_RUNTIME_ROOT", raising=False)
+    agent = tmp_path / ".condor" / "agents" / "bench_tick_normal"
+    session = agent / LOOPS_DIRNAME / "t001" / SESSIONS_DIRNAME / "session_1"
+    session.mkdir(parents=True)
+    (session / "journal.md").write_text("entries")
+
+    assert [d.name for d in probe_agent_dirs(tmp_path)] == ["bench_tick_normal"]
+    assert journal_targets(agent) == [session]
+
+
+def test_a_judge_reply_with_an_unescaped_quote_keeps_its_score():
+    """"Expecting ',' delimiter" left 4 of 16 hub runs unjudged; the score was there."""
+    from metrics.answer_quality import _parse
+
+    raw = '{"score": 0.82, "reason": "Reads the playbook but calls the routine "missing" when it was not invoked."}'
+    score, reason = _parse(raw)
+    assert score == 0.82
+    assert reason.startswith("Reads the playbook") and '"missing"' in reason
+
+
+def test_a_salvaged_null_score_is_still_unscored():
+    from metrics.answer_quality import _parse
+
+    score, _ = _parse('{"score": null, "reason": "cannot tell "why""}')
+    assert score is None
+
+
+def test_a_reply_with_no_score_at_all_is_still_a_judge_error():
+    import pytest
+
+    from metrics.answer_quality import _parse
+
+    with pytest.raises(ValueError):
+        _parse('{"reason": "no "score" given"}')
+
+
+def test_a_salvaged_score_is_the_field_not_a_score_quoted_in_the_reason():
+    from metrics.answer_quality import _parse
+
+    raw = '{"reason": "the model wrote "score": 1 in its reply", "score": 0.3}'
+    assert _parse(raw) == (0.3, 'the model wrote "score": 1 in its reply')

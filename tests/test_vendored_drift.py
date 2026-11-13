@@ -408,3 +408,68 @@ def test_vendored_helpers_resolve_every_name_they_use():
     sol = render_risk_lines({"quote_asset": "SOL", "max_drawdown_pct": -1})
     assert any("$" in line for line in usd)
     assert any("SOL" in line for line in sol)
+
+
+def test_probe_journals_are_provisioned_where_condor_resolves_them(tmp_path, monkeypatch):
+    """bench resets and seeds a journal; condor reads one. They must be the same.
+
+    They were not: bench wrote ``<checkout>/agents/<slug>/strategies/<case>`` after
+    condor had moved journals to the local layer (FEAT-115) and strategies to
+    ``loops/``, so every trial reused a stale journal and read cases never saw
+    their seed. Ask condor's own resolver.
+    """
+    import sys
+    from types import SimpleNamespace
+
+    repo = _condor_repo()
+    if repo is None:
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+    monkeypatch.setenv("CONDOR_AGENTS_ROOT", str(tmp_path))
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from condor.agents.journal import resolve_agent_dirs
+
+    from bench.probe_journal import ensure_probe_journal, probe_agent_id
+
+    case = SimpleNamespace(id="t_probe_001", type="tick", agent_slug="bench_tick_probe",
+                           expected_tool_calls=["trading_agent_journal_write"])
+    ensure_probe_journal(case)
+    session_dir, base_dir = resolve_agent_dirs(probe_agent_id(case))
+    assert base_dir is not None and base_dir.is_relative_to(tmp_path), (
+        "condor does not resolve the journal bench provisioned"
+    )
+    assert session_dir is not None, "the session has to exist too (CORR-654)"
+
+
+def test_library_ticks_show_the_skills_list_production_shows():
+    """Production ticks pass ``SkillStore(slug).list_index()``; library ticks passed "".
+
+    The list is never empty in production (the shared skill library is in it), so
+    every library tick prompt was missing a section production always has.
+    """
+    import sys
+
+    repo = _condor_repo()
+    if repo is None:
+        pytest.skip("no condor checkout — set CONDOR_PATH to enable this check")
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from condor.memory import SkillStore
+
+    from bench.client import build_tick_prompt_for_case
+
+    case = _tick_case()
+    index = SkillStore(case.agent_slug or "bench").list_index()
+    assert index, "condor lists no skills for a fresh agent — this test guards nothing"
+    prompt = build_tick_prompt_for_case(case, _PYDANTIC_KEYS[0])
+    assert index in prompt
+
+
+def test_a_case_that_pins_its_skills_list_keeps_it():
+    from dataclasses import replace
+
+    from bench.client import build_tick_prompt_for_case
+
+    case = replace(_tick_case(), skills_index="- [pinned_only] the case's own list")
+    prompt = build_tick_prompt_for_case(case, _PYDANTIC_KEYS[0])
+    assert "- [pinned_only] the case's own list" in prompt

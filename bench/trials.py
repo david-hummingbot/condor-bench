@@ -249,7 +249,7 @@ async def _execute(
     from bench.probe_journal import ensure_probe_journal
     from bench.scorer import harness_card, timeout_card, with_trial
     from bench.traces import case_span
-    from config import case_timeout_s
+    from config import case_ceiling_s
 
     lane = current_lane()
     partial = None
@@ -281,7 +281,9 @@ async def _execute(
         # Baseline first: the ceiling is sized from it, so a slow case gets room
         # proportional to how slow it has always been.
         baseline = store.load(case.id)
-        timeout_s = case_timeout_s(baseline.latency_s if baseline else None)
+        timeout_s = case_ceiling_s(
+            getattr(case, "timeout_s", None), baseline.latency_s if baseline else None
+        )
         with case_span(case.id, trial=trial, model=model, lane=lane) as trace_link, \
                 recording_trace() as partial:
             result = await asyncio.wait_for(run_case(case, model), timeout=timeout_s)
@@ -320,7 +322,7 @@ async def _execute(
         # so a thinned domain looked like a domain nobody had asked about.
         baseline = store.load(case.id)
         base_s = baseline.latency_s if baseline else 0.0
-        limit = case_timeout_s(base_s or None)
+        limit = case_ceiling_s(getattr(case, "timeout_s", None), base_s or None)
         card = with_trial(timeout_card(case, model, limit, base_s), trial)
         error = f"timed out after {limit:.0f}s — recorded as a harness artifact"
     except Exception as exc:

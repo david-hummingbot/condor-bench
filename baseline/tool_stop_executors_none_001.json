@@ -1,7 +1,9 @@
 {
   "case_id": "tool_stop_executors_none_001",
   "model": "claude-code:sonnet",
-  "latency_s": 19.427,
-  "timestamp": "2026-10-20T07:02:01.251856+00:00",
-  "fingerprint": "f16bfde2e902"
+  "latency_s": 13.467,
+  "model_time_s": 12.183,
+  "timestamp": "2026-11-08T22:06:58.371783+00:00",
+  "fingerprint": "f16bfde2e902",
+  "lane": "live"
 }

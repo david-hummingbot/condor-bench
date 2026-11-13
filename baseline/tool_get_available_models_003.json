@@ -1,7 +1,9 @@
 {
   "case_id": "tool_get_available_models_003",
   "model": "claude-code:sonnet",
-  "latency_s": 24.873,
-  "timestamp": "2026-10-20T06:56:15.740307+00:00",
-  "fingerprint": "693547d7a423"
+  "latency_s": 21.007,
+  "model_time_s": 16.041,
+  "timestamp": "2026-11-08T22:02:08.082548+00:00",
+  "fingerprint": "693547d7a423",
+  "lane": "live"
 }

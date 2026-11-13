@@ -310,6 +310,14 @@ class TickCase:
     lanes: list[str] = field(default_factory=list)
     # Faults armed on the mock before each trial: [{"kind": "5xx", "path": "/…"}].
     mock_faults: list[dict[str, Any]] = field(default_factory=list)
+    # The [AVAILABLE SKILLS] index the tick prompt lists. Production builds it
+    # from the agent's skills each tick; library cases pin none, a hub agent's
+    # tick carries its own (bench.hub_agents).
+    skills_index: str = ""
+    # A ceiling of the case's own, over the baseline-sized one. Generated cases
+    # (bench.hub_agents) have no baseline to size from and run an agent's whole
+    # loop, which the no-baseline floor was never meant for.
+    timeout_s: float | None = None
 
     @property
     def domain(self) -> str:
@@ -406,6 +414,10 @@ class AgentCase:
     lanes: list[str] = field(default_factory=list)
     # Faults armed on the mock before each trial: [{"kind": "5xx", "path": "/…"}].
     mock_faults: list[dict[str, Any]] = field(default_factory=list)
+    # A ceiling of the case's own, over the baseline-sized one. Generated cases
+    # (bench.hub_agents) have no baseline to size from and run an agent's whole
+    # loop, which the no-baseline floor was never meant for.
+    timeout_s: float | None = None
 
     @property
     def domain(self) -> str:

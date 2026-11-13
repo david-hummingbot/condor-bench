@@ -1460,6 +1460,14 @@ async def list_runs():
     return {"runs": completed, "active": active}
 
 
+@app.get("/api/hub-agents")
+async def hub_agents():
+    """Hub agents that have been benchmarked, each with its models' scores."""
+    from bench.hub_results import hub_agent_board
+
+    return hub_agent_board(RESULTS_DIR)
+
+
 @app.get("/api/runs/{run_dir_or_id}")
 async def get_run(run_dir_or_id: str):
     # Check active runs first

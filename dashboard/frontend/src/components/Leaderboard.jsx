@@ -11,16 +11,23 @@ const DESCRIPTION =
   'For per-domain strengths rather than one number per model, use the Matrix.'
 
 export default function Leaderboard({ runs, onNavigate, config }) {
-  if (!runs || runs.length === 0) {
+  const rows = buildLeaderboard(runs || [])
+  if (rows.length === 0) {
+    const hubOnly = (runs || []).some(r => r.run_type === 'hub_agent')
     return (
       <div>
         <PageHeader title="Leaderboard" description={DESCRIPTION} />
         <div className="card">
           <EmptyState
             title="Nothing to rank yet"
-            description="The leaderboard needs at least one scored run before it can order models."
+            description={
+              hubOnly
+                ? 'The leaderboard ranks models on the case library. Hub-agent runs are ranked per agent instead.'
+                : 'The leaderboard needs at least one scored run before it can order models.'
+            }
             actions={[
-              { label: '▶ New benchmark', primary: true, onClick: () => onNavigate?.('#/run/benchmark') },
+              ...(hubOnly ? [{ label: 'Agents →', onClick: () => onNavigate?.('#/results/agents') }] : []),
+              { label: '▶ New benchmark', primary: !hubOnly, onClick: () => onNavigate?.('#/run/benchmark') },
             ]}
           />
         </div>
@@ -28,7 +35,6 @@ export default function Leaderboard({ runs, onNavigate, config }) {
     )
   }
 
-  const rows = buildLeaderboard(runs)
   const weights = weightSummary(config?.scoring?.weights)
   const chartData = rows.map(r => ({
     model: shortModel(r.model),

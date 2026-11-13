@@ -1,11 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { getRun } from '../api.js'
 import { fmtLatency, fmtScore, fmtTime, scoreColor, shortModel, weightSummary } from '../utils.js'
 import CaseTable from './CaseTable.jsx'
 import PageHeader from './PageHeader.jsx'
 import EmptyState from './EmptyState.jsx'
 
-export default function Runs({ runs, onRefresh, onNavigate, config }) {
+export default function Runs({ runs, onRefresh, onNavigate, config, focus }) {
   const [selected, setSelected] = useState(null)
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -25,6 +25,9 @@ export default function Runs({ runs, onRefresh, onNavigate, config }) {
       setLoading(false)
     }
   }
+
+  // Deep link (#/results/runs/<run_dir>), e.g. from the Agents page.
+  useEffect(() => { if (focus) open(focus) }, [focus])
 
   return (
     <div>
