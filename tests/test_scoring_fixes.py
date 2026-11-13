@@ -770,3 +770,10 @@ def test_a_reply_with_no_score_at_all_is_still_a_judge_error():
 
     with pytest.raises(ValueError):
         _parse('{"reason": "no "score" given"}')
+
+
+def test_a_salvaged_score_is_the_field_not_a_score_quoted_in_the_reason():
+    from metrics.answer_quality import _parse
+
+    raw = '{"reason": "the model wrote "score": 1 in its reply", "score": 0.3}'
+    assert _parse(raw) == (0.3, 'the model wrote "score": 1 in its reply')

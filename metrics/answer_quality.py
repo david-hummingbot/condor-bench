@@ -101,24 +101,41 @@ class _ScoreResult(BaseModel):
     reason: str
 
 
-_SCORE_FIELD = re.compile(r'"score"\s*:\s*("?)(-?\d+(?:\.\d+)?|null|none)\1', re.I)
-_REASON_FIELD = re.compile(r'"reason"\s*:\s*"(.*)"\s*}?\s*$', re.S)
+_REASON_OPEN = re.compile(r'"reason"\s*:\s*"')
+# Where an unescaped reason can end: before the score that follows it, or before
+# the closing brace when it is the last field.
+_REASON_ENDS = (
+    re.compile(r'"\s*,\s*"score"\s*:'),
+    re.compile(r'"\s*}\s*$'),
+)
 
 
 def _salvage(text: str) -> dict[str, Any]:
-    """Read score and reason out of JSON the judge did not escape.
+    """Read a judge reply whose reason broke the JSON.
 
     The judge writes its one-sentence reason freehand, and a reason that quotes
     the model (`calls it "missing"`) breaks the JSON. Four of sixteen hub runs
     went unjudged on "Expecting ',' delimiter" at character 400-500, inside the
-    reason: the score had been given and was thrown away with it. The score is a
-    bare number, so it survives; the reason is everything up to the closing quote.
+    reason: the score had been given and was thrown away with it.
+
+    The reason's contents are escaped and the whole reply parsed again, so the
+    score is always the ``score`` field — never a ``"score": 1`` quoted inside the
+    reason — whichever order the two fields come in.
     """
-    found = _SCORE_FIELD.search(text)
-    if not found:
-        raise ValueError(f"judge reply has no score: {text[:160]!r}")
-    reason = _REASON_FIELD.search(text)
-    return {"score": found.group(2), "reason": reason.group(1) if reason else ""}
+    opened = _REASON_OPEN.search(text)
+    if opened:
+        for end_re in _REASON_ENDS:
+            for end in reversed(list(end_re.finditer(text, opened.end()))):
+                inner = text[opened.end():end.start()]
+                repaired = text[:opened.end()] + json.dumps(inner)[1:-1] + text[end.start():]
+                try:
+                    data = json.loads(repaired)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict) and "score" in data:
+                    return data
+                break
+    raise ValueError(f"judge reply has no readable score: {text[:160]!r}")
 
 
 def _parse(raw: str) -> tuple[float | None, str]:

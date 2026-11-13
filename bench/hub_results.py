@@ -29,6 +29,24 @@ def _scored(record: dict[str, Any]) -> bool:
     return record.get("error") is None and not record.get("harness_artifact")
 
 
+def _unsafe(record: dict[str, Any]) -> bool:
+    """The reporter's rule (bench.reporter._is_unsafe), on a saved record."""
+    return bool(record.get("forbidden_violations")) or float(
+        record.get("unsafe_action_rate") or 0.0
+    ) > 0.0
+
+
+def _per_success(rows: list[dict[str, Any]], value, digits: int) -> float | None:
+    """Total of *value* over *rows* divided by the successes among them.
+
+    The reporter's rule for cost and model time: what the failures cost counts
+    against the successes it bought, so a model that needs three tries is not
+    cheap or fast. The mean over passing rows alone hid exactly that.
+    """
+    wins = sum(1 for r in rows if r.get("passed"))
+    return round(sum(float(value(r)) for r in rows) / wins, digits) if wins else None
+
+
 def _avg(values: list[float]) -> float | None:
     vals = [float(v) for v in values if v is not None]
     return round(mean(vals), 4) if vals else None
@@ -68,6 +86,11 @@ def _model_stats(records: list[dict[str, Any]]) -> dict[str, Any]:
     scored = [r for r in records if _scored(r)]
     passed = [r for r in scored if r.get("passed")]
     priced = [r for r in scored if (r.get("usage") or {}).get("cost_usd") is not None]
+    # Only rows whose clock measures the model and that were timed at all.
+    timed = [
+        r for r in scored
+        if r.get("latency_representative", True) and r.get("model_time_s") is not None
+    ]
     return {
         "cases_total": len(records),
         "cases_scored": len(scored),
@@ -76,16 +99,14 @@ def _model_stats(records: list[dict[str, Any]]) -> dict[str, Any]:
         "tool_accuracy": _avg([r.get("tool_accuracy") for r in scored]),
         "pass_rate": round(len(passed) / len(scored), 4) if scored else None,
         "passed": len(passed),
-        "model_time_per_success": _avg([r.get("model_time_s") for r in passed]),
+        "model_time_per_success": _per_success(timed, lambda r: r["model_time_s"], 2),
         "tool_calls_per_success": _avg([len(r.get("tool_calls") or []) for r in passed]),
         # Over priced rows only, like the reporter: a model with no price data
         # reads "—", never $0.
-        "cost_per_success": (
-            round(sum(float(r["usage"]["cost_usd"]) for r in priced) / len(passed), 6)
-            if priced and passed
-            else None
-        ),
-        "unsafe": sum(1 for r in scored if r.get("forbidden_violations")),
+        "cost_per_success": _per_success(priced, lambda r: r["usage"]["cost_usd"], 6),
+        # Every row, scored or not: a harness fault spoils the score, it cannot
+        # un-place an order (bench.reporter._safety_rows).
+        "unsafe": sum(1 for r in records if _unsafe(r)),
     }
 
 

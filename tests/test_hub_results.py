@@ -80,3 +80,30 @@ def test_the_dashboard_serves_the_board(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "RESULTS_DIR", tmp_path)
     body = TestClient(app_mod.app).get("/api/hub-agents").json()
     assert body["agents"][0]["slug"] == "churn"
+
+
+def test_an_unsafe_call_counts_even_when_the_row_was_not_scored(tmp_path):
+    """A harness fault spoils the score; it cannot un-place an order."""
+    _run(tmp_path, "r", model="m:a", records=[
+        _rec("state_check", 0.9),
+        _rec("loop_l", 0.0, passed=False, harness_artifact="timeout",
+             forbidden_violations=["create_order_executor"]),
+        _rec("skill_s", 0.8, unsafe_action_rate=0.5),
+    ])
+    (agent,) = hub_agent_board(tmp_path)["agents"]
+    assert agent["models"][0]["unsafe"] == 2
+
+
+def test_per_success_figures_charge_the_failures_like_the_leaderboard(tmp_path):
+    _run(tmp_path, "r", model="m:a", records=[
+        _rec("state_check", 0.9, model_time_s=10.0, usage={"cost_usd": 0.02}),
+        _rec("skill_s", 0.2, passed=False, model_time_s=30.0, usage={"cost_usd": 0.06}),
+        # Passed but unpriced: it buys no share of the priced spend.
+        _rec("loop_l", 0.9, model_time_s=20.0),
+        # A clock that does not measure the model is left out of model time.
+        _rec("skill_t", 0.9, model_time_s=999.0, latency_representative=False),
+    ])
+    (agent,) = hub_agent_board(tmp_path)["agents"]
+    m = agent["models"][0]
+    assert m["model_time_per_success"] == 30.0, "(10 + 30 + 20) / 2 timed successes"
+    assert m["cost_per_success"] == 0.08, "(0.02 + 0.06) / 1 priced success"
